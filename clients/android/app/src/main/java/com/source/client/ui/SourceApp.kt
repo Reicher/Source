@@ -16,15 +16,23 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -45,9 +53,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.source.client.model.AiSelection
+import com.source.client.model.ChatMessage
+import com.source.client.model.ChatRole
 import com.source.client.model.NodeStatus
 
 private val Ink = Color(0xFF17201D)
@@ -70,7 +82,13 @@ fun SourceApp(screen: AppScreen, viewModel: SourceViewModel) {
             when (screen) {
                 is AppScreen.Setup -> SetupScreen(screen, viewModel::createIdentity)
                 is AppScreen.Locked -> UnlockScreen(screen, viewModel::unlock)
-                is AppScreen.Main -> MainScreen(screen.status, viewModel::scan, viewModel::retry)
+                is AppScreen.Main -> MainScreen(
+                    screen,
+                    viewModel::scan,
+                    viewModel::retry,
+                    viewModel::selectAi,
+                    viewModel::sendMessage,
+                )
                 is AppScreen.Scanner -> ScannerPermissionScreen(screen, viewModel::onQrScanned, viewModel::cancelScanner)
                 is AppScreen.Pairing -> PairingScreen(screen.name)
             }
@@ -127,17 +145,120 @@ private fun UnlockScreen(state: AppScreen.Locked, submit: (String) -> Unit) {
 }
 
 @Composable
-private fun MainScreen(status: NodeStatus, connect: (com.source.client.model.DiscoveredNode) -> Unit, retry: () -> Unit) {
+private fun MainScreen(
+    state: AppScreen.Main,
+    connect: (com.source.client.model.DiscoveredNode) -> Unit,
+    retry: () -> Unit,
+    selectAi: (AiSelection) -> Unit,
+    send: (String) -> Unit,
+) {
+    var draft by rememberSaveable { mutableStateOf("") }
+    val listState = rememberLazyListState()
+    LaunchedEffect(state.chat.messages.size) {
+        if (state.chat.messages.isNotEmpty()) listState.animateScrollToItem(state.chat.messages.lastIndex)
+    }
     Column(
         Modifier
             .fillMaxSize()
             .statusBarsPadding()
+            .navigationBarsPadding()
             .padding(horizontal = 20.dp, vertical = 16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        NodeStatusBar(status, connect, retry)
-        Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-            Wordmark()
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            NodeStatusBar(state.status, connect, retry, Modifier.weight(1f))
+            Spacer(Modifier.width(8.dp))
+            AiPicker(state.status, state.chat.selection, selectAi)
+        }
+        Spacer(Modifier.height(12.dp))
+        if (state.chat.messages.isEmpty()) {
+            Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                Text("Vad vill du prata om?", color = Ink.copy(alpha = .55f))
+            }
+        } else {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxWidth().weight(1f),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                items(state.chat.messages, key = ChatMessage::id) { ChatBubble(it) }
+                if (state.chat.busy) item { Text("Svarar…", color = Ink.copy(alpha = .55f)) }
+            }
+        }
+        state.chat.error?.let { ErrorText(it) }
+        Spacer(Modifier.height(10.dp))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
+            OutlinedTextField(
+                value = draft,
+                onValueChange = { draft = it },
+                modifier = Modifier.weight(1f),
+                placeholder = { Text("Meddelande") },
+                enabled = !state.chat.busy,
+                maxLines = 5,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                keyboardActions = KeyboardActions(onSend = {
+                    if (draft.isNotBlank()) {
+                        send(draft)
+                        draft = ""
+                    }
+                }),
+            )
+            Spacer(Modifier.width(8.dp))
+            Button(
+                onClick = { send(draft); draft = "" },
+                enabled = draft.isNotBlank() && !state.chat.busy,
+                modifier = Modifier.height(56.dp),
+            ) { Text("Skicka") }
+        }
+    }
+}
+
+@Composable
+private fun AiPicker(status: NodeStatus, selection: AiSelection, select: (AiSelection) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    val connectedNode = (status as? NodeStatus.Connected)?.node
+    val label = when (selection) {
+        AiSelection.AUTO -> "Auto"
+        AiSelection.THIS_DEVICE -> "Local"
+        AiSelection.NODE -> "Node"
+    }
+    Box {
+        OutlinedButton(
+            onClick = { expanded = true },
+            modifier = Modifier.widthIn(min = 120.dp, max = 160.dp).heightIn(min = 48.dp),
+        ) {
+            Text("AI: $label", maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenuItem(text = { Text("Auto") }, onClick = { select(AiSelection.AUTO); expanded = false })
+            DropdownMenuItem(text = { Text("Local") }, onClick = { select(AiSelection.THIS_DEVICE); expanded = false })
+            connectedNode?.let {
+                DropdownMenuItem(text = { Text("Node") }, onClick = { select(AiSelection.NODE); expanded = false })
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChatBubble(message: ChatMessage) {
+    val isUser = message.role == ChatRole.USER
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(.86f),
+            shape = RoundedCornerShape(16.dp),
+            color = if (isUser) Moss else Ink.copy(alpha = .055f),
+        ) {
+            Text(
+                message.content,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
+                color = if (isUser) Color.White else Ink,
+            )
         }
     }
 }
@@ -147,16 +268,17 @@ private fun NodeStatusBar(
     status: NodeStatus,
     connect: (com.source.client.model.DiscoveredNode) -> Unit,
     retry: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val node = (status as? NodeStatus.Found)?.nodes?.firstOrNull()
     val label = when (status) {
-        NodeStatus.Searching -> "Söker efter Source Node…"
-        NodeStatus.NoneFound -> "Ingen Source Node hittades"
-        is NodeStatus.Found -> "${node?.displayName ?: "Source Node"} · Hittades"
-        is NodeStatus.Connecting -> "${status.name} · Ansluter…"
-        is NodeStatus.Connected -> "${status.node.displayName} · Ansluten"
-        is NodeStatus.PairedOffline -> "${status.node.displayName} · Inte tillgänglig"
-        is NodeStatus.Error -> status.message
+        NodeStatus.Searching -> "Node · Söker…"
+        NodeStatus.NoneFound -> "Node · Offline"
+        is NodeStatus.Found -> node?.displayName ?: "Node"
+        is NodeStatus.Connecting -> "${status.name}…"
+        is NodeStatus.Connected -> status.node.displayName
+        is NodeStatus.PairedOffline -> "${status.node.displayName} · Offline"
+        is NodeStatus.Error -> "Node · Fel"
     }
     val indicatorColor = when (status) {
         is NodeStatus.Connected -> Moss
@@ -166,7 +288,7 @@ private fun NodeStatusBar(
     }
 
     Surface(
-        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+        modifier = modifier.heightIn(min = 48.dp),
         shape = RoundedCornerShape(16.dp),
         color = Ink.copy(alpha = .045f),
     ) {
@@ -191,7 +313,7 @@ private fun NodeStatusBar(
             )
             when {
                 node != null -> TextButton(onClick = { connect(node) }) { Text("Anslut") }
-                status is NodeStatus.Error && status.canRetry -> TextButton(onClick = retry) { Text("Försök igen") }
+                status is NodeStatus.Error && status.canRetry -> TextButton(onClick = retry) { Text("Försök") }
             }
         }
     }

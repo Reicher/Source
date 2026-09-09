@@ -4,6 +4,8 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.source.client.SourceClientApplication
+import com.source.client.model.AiSelection
+import com.source.client.model.ChatMessage
 import com.source.client.model.DiscoveredNode
 import com.source.client.model.NodeStatus
 import com.source.client.model.TrustedNode
@@ -11,21 +13,32 @@ import com.source.client.protocol.PairingPayloadException
 import com.source.client.protocol.PairingPayloadParser
 import com.source.client.protocol.SourceApiException
 import com.source.client.security.VaultSession
-import kotlinx.coroutines.Job
+import java.io.FileNotFoundException
+import java.util.UUID
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+
+data class ChatUiState(
+    val messages: List<ChatMessage> = emptyList(),
+    val selection: AiSelection = AiSelection.AUTO,
+    val busy: Boolean = false,
+    val error: String? = null,
+)
 
 sealed interface AppScreen {
     data class Setup(val error: String? = null, val busy: Boolean = false) : AppScreen
     data class Locked(val error: String? = null, val busy: Boolean = false) : AppScreen
-    data class Main(val status: NodeStatus) : AppScreen
+    data class Main(val status: NodeStatus, val chat: ChatUiState = ChatUiState()) : AppScreen
     data class Scanner(val node: DiscoveredNode, val error: String? = null) : AppScreen
     data class Pairing(val name: String) : AppScreen
 }
@@ -33,15 +46,23 @@ sealed interface AppScreen {
 internal fun keepActiveConnectionStatus(status: NodeStatus, connectionAttemptActive: Boolean): Boolean =
     status is NodeStatus.Connecting && connectionAttemptActive
 
+private data class ConnectedNode(val discovered: DiscoveredNode, val trusted: TrustedNode)
+
 class SourceViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as SourceClientApplication
     private val _screen = MutableStateFlow<AppScreen>(
         if (app.secureVault.isInitialized) AppScreen.Locked() else AppScreen.Setup(),
     )
     private var session: VaultSession? = null
+    private var chatState = ChatUiState()
     private var foreground = false
+    private var backupDirty = true
+    private var conversationRevision = 0L
+    private val syncMutex = Mutex()
+    private var connectedNode: ConnectedNode? = null
     private var connectJob: Job? = null
     private var heartbeatJob: Job? = null
+    private var inferenceJob: Job? = null
     private var lastConnectedService: String? = null
     private var lastConnectedApiBaseUrl: String? = null
 
@@ -72,6 +93,8 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             val chars = password.toCharArray()
             try {
                 session = withContext(Dispatchers.Default) { app.secureVault.create(name, chars) }
+                chatState = ChatUiState()
+                backupDirty = true
                 openMain()
             } catch (_: Exception) {
                 _screen.value = AppScreen.Setup("Identiteten kunde inte skapas på den här enheten.")
@@ -90,10 +113,84 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             val chars = password.toCharArray()
             try {
-                session = withContext(Dispatchers.Default) { app.secureVault.unlock(chars) }
-                if (session == null) _screen.value = AppScreen.Locked("Fel lösenord.") else openMain()
+                val unlocked = withContext(Dispatchers.Default) { app.secureVault.unlock(chars) }
+                if (unlocked == null) {
+                    _screen.value = AppScreen.Locked("Fel lösenord.")
+                } else {
+                    session = unlocked
+                    chatState = ChatUiState(messages = withContext(Dispatchers.Default) {
+                        app.secureVault.loadConversation(unlocked)
+                    })
+                    backupDirty = true
+                    openMain()
+                }
+            } catch (_: Exception) {
+                session?.close()
+                session = null
+                _screen.value = AppScreen.Locked("Source-data kunde inte läsas på den här enheten.")
             } finally {
                 chars.fill('\u0000')
+            }
+        }
+    }
+
+    fun selectAi(selection: AiSelection) {
+        chatState = chatState.copy(selection = selection, error = null)
+        publishChat()
+    }
+
+    fun sendMessage(raw: String) {
+        val content = raw.trim()
+        if (content.isEmpty() || inferenceJob?.isActive == true) return
+        if (content.length > MAX_MESSAGE_CHARACTERS) {
+            chatState = chatState.copy(error = "Meddelandet får vara högst 4000 tecken.")
+            publishChat()
+            return
+        }
+        val activeSession = session ?: return
+        val userMessage = ChatMessage.user(content)
+        chatState = chatState.copy(messages = chatState.messages + userMessage, busy = true, error = null)
+        conversationRevision += 1
+        publishChat()
+        backupDirty = true
+
+        inferenceJob = viewModelScope.launch {
+            try {
+                persistConversation(activeSession)
+                val context = boundedChatContext(chatState.messages)
+                val selected = chatState.selection
+                val connected = connectedNode
+                val resolved = resolveAiRuntime(selected, connected != null)
+                val assistant = if (resolved == AiRuntimeTarget.NODE && connected != null) {
+                    try {
+                        app.nodeApi.chat(connected.discovered.apiBaseUrl, connected.trusted, context)
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Exception) {
+                        if (!canFallbackFromNode(error)) throw error
+                        if (error !is SourceApiException) {
+                            connectedNode = null
+                            updateNodeStatus(NodeStatus.PairedOffline(connected.trusted))
+                        }
+                        app.localAiRuntime.chat(context)
+                    }
+                } else {
+                    app.localAiRuntime.chat(context)
+                }
+                chatState = chatState.copy(
+                    messages = chatState.messages + assistant.copy(content = assistant.content.take(MAX_MESSAGE_CHARACTERS)),
+                    busy = false,
+                    error = null,
+                )
+                conversationRevision += 1
+                persistConversation(activeSession)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                chatState = chatState.copy(busy = false, error = readableChatError(error))
+            } finally {
+                publishChat()
+                backupConversationIfNeeded()
             }
         }
     }
@@ -105,16 +202,15 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
 
     fun onBackground() {
         foreground = false
+        connectedNode = null
         app.nodeDiscovery.stop()
         app.networkMonitor.stop()
         connectJob?.cancel()
         heartbeatJob?.cancel()
-        if (_screen.value is AppScreen.Pairing) {
-            _screen.value = AppScreen.Main(statusForCurrentNodes())
-        }
+        if (_screen.value is AppScreen.Pairing) updateNodeStatus(statusForCurrentNodes())
         (_screen.value as? AppScreen.Main)?.let { main ->
             val connected = (main.status as? NodeStatus.Connected)?.node
-            if (connected != null) _screen.value = AppScreen.Main(NodeStatus.PairedOffline(connected))
+            if (connected != null) updateNodeStatus(NodeStatus.PairedOffline(connected))
         }
     }
 
@@ -123,7 +219,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun cancelScanner() {
-        _screen.value = AppScreen.Main(statusForCurrentNodes())
+        _screen.value = AppScreen.Main(statusForCurrentNodes(), chatState)
     }
 
     fun onQrScanned(raw: String) {
@@ -148,23 +244,25 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
                     trustedNodes = activeSession.vault.trustedNodes.filterNot { it.nodeId == trusted.nodeId } + trusted,
                 )
                 app.secureVault.save(activeSession)
-                _screen.value = AppScreen.Main(NodeStatus.Connected(trusted))
+                connectedNode = ConnectedNode(scanner.node, trusted)
+                _screen.value = AppScreen.Main(NodeStatus.Connected(trusted), chatState)
+                synchronizeConversation()
                 startHeartbeat(scanner.node, trusted)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                _screen.value = AppScreen.Main(NodeStatus.Error(readableError(error)))
+                _screen.value = AppScreen.Main(NodeStatus.Error(readableError(error)), chatState)
             }
         }
     }
 
     fun retry() {
-        _screen.value = AppScreen.Main(statusForCurrentNodes())
+        updateNodeStatus(statusForCurrentNodes())
         reconcile(app.nodeDiscovery.nodes.value, app.networkMonitor.available.value)
     }
 
     private fun openMain() {
-        _screen.value = AppScreen.Main(NodeStatus.Searching)
+        _screen.value = AppScreen.Main(NodeStatus.Searching, chatState)
         if (foreground) startRuntime()
     }
 
@@ -177,10 +275,11 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     private fun reconcile(nodes: List<DiscoveredNode>, network: Boolean) {
         if (!foreground || session == null || _screen.value !is AppScreen.Main) return
         if (!network) {
+            connectedNode = null
             app.nodeDiscovery.stop()
             heartbeatJob?.cancel()
             connectJob?.cancel()
-            _screen.value = AppScreen.Main(session!!.vault.trustedNodes.firstOrNull()?.let(NodeStatus::PairedOffline) ?: NodeStatus.NoneFound)
+            updateNodeStatus(session!!.vault.trustedNodes.firstOrNull()?.let(NodeStatus::PairedOffline) ?: NodeStatus.NoneFound)
             return
         }
         app.nodeDiscovery.start()
@@ -197,10 +296,11 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             authenticate(candidate.first, candidate.second)
             return
         }
+        connectedNode = null
         val currentStatus = (_screen.value as? AppScreen.Main)?.status
         if (currentStatus != null && keepActiveConnectionStatus(currentStatus, connectJob?.isActive == true)) return
         heartbeatJob?.cancel()
-        _screen.value = AppScreen.Main(
+        updateNodeStatus(
             when {
                 trustedNodes.isNotEmpty() -> NodeStatus.PairedOffline(trustedNodes.first())
                 nodes.isNotEmpty() -> NodeStatus.Found(nodes)
@@ -211,7 +311,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun authenticate(discovered: DiscoveredNode, trusted: TrustedNode, attempt: Int = 0) {
         if (connectJob?.isActive == true) return
-        _screen.value = AppScreen.Main(NodeStatus.Connecting(trusted.displayName))
+        updateNodeStatus(NodeStatus.Connecting(trusted.displayName))
         connectJob = viewModelScope.launch {
             try {
                 val refreshed = app.nodeApi.authenticate(discovered.apiBaseUrl, trusted)
@@ -224,11 +324,14 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 lastConnectedService = discovered.serviceName
                 lastConnectedApiBaseUrl = discovered.apiBaseUrl
-                _screen.value = AppScreen.Main(NodeStatus.Connected(refreshed))
+                connectedNode = ConnectedNode(discovered, refreshed)
+                updateNodeStatus(NodeStatus.Connected(refreshed))
+                synchronizeConversation()
                 startHeartbeat(discovered, refreshed)
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
+                connectedNode = null
                 if (foreground && attempt < 5) {
                     delay((1L shl attempt).coerceAtMost(16) * 1_000)
                     connectJob = null
@@ -237,7 +340,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
                         return@launch
                     }
                 }
-                _screen.value = AppScreen.Main(NodeStatus.PairedOffline(trusted))
+                updateNodeStatus(NodeStatus.PairedOffline(trusted))
             }
         }
     }
@@ -249,19 +352,116 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
                 delay(20_000)
                 try {
                     val refreshed = app.nodeApi.authenticate(discovered.apiBaseUrl, trusted)
-                    _screen.value = AppScreen.Main(NodeStatus.Connected(refreshed))
+                    connectedNode = ConnectedNode(discovered, refreshed)
+                    updateNodeStatus(NodeStatus.Connected(refreshed))
+                    backupConversationIfNeeded()
                 } catch (error: CancellationException) {
                     throw error
                 } catch (_: Exception) {
+                    connectedNode = null
                     lastConnectedService = null
                     lastConnectedApiBaseUrl = null
-                    _screen.value = AppScreen.Main(NodeStatus.PairedOffline(trusted))
+                    updateNodeStatus(NodeStatus.PairedOffline(trusted))
                     connectJob = null
                     authenticate(discovered, trusted)
                     return@launch
                 }
             }
         }
+    }
+
+    private suspend fun persistConversation(activeSession: VaultSession) {
+        val messages = chatState.messages
+        syncMutex.withLock {
+            withContext(Dispatchers.Default) {
+                app.secureVault.saveConversation(activeSession, messages)
+            }
+            backupDirty = true
+        }
+    }
+
+    private suspend fun backupConversationIfNeeded() = syncMutex.withLock {
+        backupConversationLocked()
+    }
+
+    private suspend fun backupConversationLocked() {
+        if (!backupDirty) return
+        val activeSession = session ?: return
+        val connected = connectedNode ?: return
+        val uploadedRevision = conversationRevision
+        val uploadedMessages = chatState.messages
+        try {
+            val snapshot = withContext(Dispatchers.Default) {
+                app.secureVault.createConversationSnapshot(activeSession, uploadedMessages)
+            }
+            app.nodeApi.uploadConversationSnapshot(
+                connected.discovered.apiBaseUrl,
+                connected.trusted,
+                UUID.randomUUID().toString(),
+                snapshot,
+            )
+            if (conversationRevision == uploadedRevision) backupDirty = false
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            backupDirty = true
+        }
+    }
+
+    private suspend fun synchronizeConversation() {
+        syncMutex.withLock {
+            val activeSession = session ?: return@withLock
+            val connected = connectedNode ?: return@withLock
+            val revisionBeforeDownload = conversationRevision
+            try {
+                val remoteSnapshot = app.nodeApi.latestConversationSnapshot(
+                    connected.discovered.apiBaseUrl,
+                    connected.trusted,
+                )
+                if (remoteSnapshot == null) {
+                    backupConversationLocked()
+                    return@withLock
+                }
+                val remoteMessages = withContext(Dispatchers.Default) {
+                    app.secureVault.readConversationSnapshot(activeSession, remoteSnapshot)
+                }
+                if (conversationRevision != revisionBeforeDownload) {
+                    backupConversationLocked()
+                    return@withLock
+                }
+                val remoteUpdatedAt = remoteMessages.maxOfOrNull(ChatMessage::createdAtMillis) ?: Long.MIN_VALUE
+                val localUpdatedAt = chatState.messages.maxOfOrNull(ChatMessage::createdAtMillis) ?: Long.MIN_VALUE
+                when {
+                    remoteUpdatedAt > localUpdatedAt -> {
+                        chatState = chatState.copy(messages = remoteMessages)
+                        conversationRevision += 1
+                        withContext(Dispatchers.Default) {
+                            app.secureVault.saveConversation(activeSession, remoteMessages)
+                        }
+                        backupDirty = false
+                        publishChat()
+                    }
+                    remoteMessages.map(ChatMessage::id) == chatState.messages.map(ChatMessage::id) -> backupDirty = false
+                    else -> backupConversationLocked()
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                backupDirty = true
+                backupConversationLocked()
+            }
+        }
+    }
+
+    private fun publishChat() {
+        val main = _screen.value as? AppScreen.Main ?: return
+        _screen.value = main.copy(chat = chatState)
+    }
+
+    private fun updateNodeStatus(status: NodeStatus) {
+        val current = _screen.value
+        _screen.value = if (current is AppScreen.Main) current.copy(status = status, chat = chatState)
+        else AppScreen.Main(status, chatState)
     }
 
     private fun statusForCurrentNodes(): NodeStatus {
@@ -272,6 +472,13 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             nodes.isNotEmpty() -> NodeStatus.Found(nodes)
             else -> NodeStatus.NoneFound
         }
+    }
+
+    private fun readableChatError(error: Exception): String = when {
+        error is SourceApiException -> error.message ?: "Nodens AI kunde inte svara."
+        error is FileNotFoundException || error.message?.contains("source-client-model.litertlm") == true ->
+            "Den lokala AI-modellen är inte installerad."
+        else -> "AI:n kunde inte svara. Försök igen."
     }
 
     private fun readableError(error: Exception): String = when {
@@ -286,5 +493,9 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
         app.networkMonitor.stop()
         session?.close()
         super.onCleared()
+    }
+
+    private companion object {
+        const val MAX_MESSAGE_CHARACTERS = 4_000
     }
 }

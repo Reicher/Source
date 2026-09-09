@@ -3,6 +3,7 @@ package com.source.client.security
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.source.client.model.ChatMessage
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -37,7 +38,33 @@ class SecureVaultDeviceTest {
         val unlocked = SecureVault(context, preferencesName, alias).unlock(password)
         assertEquals(clientId, unlocked?.vault?.identity?.clientId)
         assertFalse(unlocked?.vault?.identity?.clientPrivateKey.isNullOrBlank())
+        assertTrue(unlocked != null && vault.loadConversation(unlocked).isEmpty())
         unlocked?.close()
+        password.fill('\u0000')
+    }
+
+    @Test
+    fun conversationIsEncryptedPersistedAndRestorableFromSnapshot() {
+        val vault = SecureVault(context, preferencesName, alias)
+        val password = "lokalt testlösenord".toCharArray()
+        val created = vault.create("Robin", password)
+        val messages = listOf(
+            ChatMessage.user("En hemlig fråga"),
+            ChatMessage.assistant("Ett lokalt svar"),
+        )
+
+        vault.saveConversation(created, messages)
+        val snapshot = vault.createConversationSnapshot(created, messages)
+        assertFalse(snapshot.toString(Charsets.UTF_8).contains("En hemlig fråga"))
+        created.close()
+
+        val reopened = SecureVault(context, preferencesName, alias).unlock(password)!!
+        assertEquals(messages, vault.loadConversation(reopened))
+
+        vault.saveConversation(reopened, emptyList())
+        assertEquals(messages, vault.restoreConversationSnapshot(reopened, snapshot))
+        assertEquals(messages, vault.loadConversation(reopened))
+        reopened.close()
         password.fill('\u0000')
     }
 

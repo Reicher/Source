@@ -43,6 +43,7 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.16.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     val cameraX = "1.6.2"
@@ -54,4 +55,5 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("androidx.test:runner:1.7.0")
 }

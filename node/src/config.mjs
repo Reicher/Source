@@ -65,7 +65,7 @@ export function loadConfig(overrides = {}) {
     snapshotRetention:
       overrides.snapshotRetention ?? positiveInteger('SNAPSHOT_RETENTION_COUNT', 20),
     allowedStorageApps:
-      overrides.allowedStorageApps ?? identifierList('ALLOWED_STORAGE_APPS', 'thoughts'),
+      overrides.allowedStorageApps ?? identifierList('ALLOWED_STORAGE_APPS', 'thoughts,source-client'),
     ollamaUrl: overrides.ollamaUrl ?? process.env.OLLAMA_URL ?? 'http://ollama:11434',
     ollamaModel: overrides.ollamaModel ?? process.env.OLLAMA_MODEL ?? 'qwen3:4b',
     ollamaTimeoutMs:

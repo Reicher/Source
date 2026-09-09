@@ -1,5 +1,7 @@
 package com.source.client.model
 
+import java.util.UUID
+
 data class LocalIdentity(
     val userId: String,
     val userDisplayName: String,
@@ -23,6 +25,36 @@ data class UnlockedVault(
     val identity: LocalIdentity,
     val trustedNodes: List<TrustedNode>,
 )
+
+enum class ChatRole(val apiValue: String) {
+    USER("user"),
+    ASSISTANT("assistant");
+
+    override fun toString(): String = apiValue
+
+    companion object {
+        fun fromApiValue(value: String): ChatRole = entries.firstOrNull { it.apiValue == value }
+            ?: throw IllegalArgumentException("Unsupported chat role")
+    }
+}
+
+data class ChatMessage(
+    val id: String = UUID.randomUUID().toString(),
+    val role: ChatRole,
+    val content: String,
+    val createdAtMillis: Long = System.currentTimeMillis(),
+) {
+    companion object {
+        fun user(content: String): ChatMessage = ChatMessage(role = ChatRole.USER, content = content)
+        fun assistant(content: String): ChatMessage = ChatMessage(role = ChatRole.ASSISTANT, content = content)
+    }
+}
+
+enum class AiSelection {
+    AUTO,
+    THIS_DEVICE,
+    NODE,
+}
 
 data class DiscoveredNode(
     val serviceName: String,

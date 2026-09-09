@@ -28,9 +28,10 @@ provides:
 - a versioned OpenAPI contract.
 
 The first Android Source Client now lives in [`clients/android`](clients/android/README.md).
-It implements local identity, LAN discovery, QR pairing, and automatic trusted
-reconnect. General sync and the broader personal-data model are not implemented
-yet. Thoughts is the first intended Source-compatible application.
+It implements local identity, LAN discovery, QR pairing, automatic trusted
+reconnect, and one encrypted local-first AI conversation with Node backup.
+General sync and the broader personal-data model are not implemented yet.
+Thoughts is the first intended Source-compatible application.
 
 ## Install Source Node
 

@@ -1,15 +1,18 @@
 package com.source.client.protocol
 
 import com.source.client.model.LocalIdentity
+import com.source.client.model.ChatMessage
 import com.source.client.model.PairingInvitation
 import com.source.client.model.TrustedNode
 import com.source.client.security.SourceCrypto
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.io.ByteArrayInputStream
 import java.net.URL
+import java.security.MessageDigest
 import java.security.KeyStore
 import java.security.SecureRandom
 import java.security.cert.CertificateFactory
@@ -133,24 +136,96 @@ class SourceNodeApi {
         trusted.copy(displayName = displayName)
     }
 
+    suspend fun chat(
+        apiBaseUrl: String,
+        trusted: TrustedNode,
+        messages: List<ChatMessage>,
+    ): ChatMessage = withContext(Dispatchers.IO) {
+        val response = postJson(
+            "${apiBaseUrl.removeSuffix("/")}/chat",
+            JSONObject().put("messages", JSONArray().apply {
+                messages.forEach { message ->
+                    put(JSONObject().put("role", message.role.apiValue).put("content", message.content))
+                }
+            }),
+            trusted.tlsCaCertificate,
+            trusted.clientCredential,
+            CHAT_TIMEOUT_MILLIS,
+        )
+        val message = response.optJSONObject("message")
+            ?: throw SourceApiException("invalid_response", "Noden skickade ett ofullständigt svar.")
+        val role = message.requiredString("role")
+        val content = message.requiredString("content").trim()
+        if (role != "assistant" || content.length > MAX_MESSAGE_CHARACTERS) {
+            throw SourceApiException("invalid_response", "Noden skickade ett ogiltigt AI-svar.")
+        }
+        ChatMessage.assistant(content)
+    }
+
+    suspend fun uploadConversationSnapshot(
+        apiBaseUrl: String,
+        trusted: TrustedNode,
+        snapshotId: String,
+        snapshot: ByteArray,
+    ) = withContext(Dispatchers.IO) {
+        val connection = openConnection(
+            "${apiBaseUrl.removeSuffix("/")}/storage/$CHAT_STORAGE_APP/snapshots/$snapshotId",
+            trusted.tlsCaCertificate,
+            trusted.clientCredential,
+        )
+        try {
+            connection.requestMethod = "PUT"
+            connection.readTimeout = NETWORK_TIMEOUT_MILLIS
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", "application/octet-stream")
+            connection.setRequestProperty("Accept", "application/json")
+            connection.setRequestProperty("X-Content-SHA256", sha256Hex(snapshot))
+            connection.outputStream.use { it.write(snapshot) }
+            val status = connection.responseCode
+            if (status !in 200..299) throw apiError(connection, status)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    suspend fun latestConversationSnapshot(
+        apiBaseUrl: String,
+        trusted: TrustedNode,
+    ): ByteArray? = withContext(Dispatchers.IO) {
+        val connection = openConnection(
+            "${apiBaseUrl.removeSuffix("/")}/storage/$CHAT_STORAGE_APP/snapshots/latest",
+            trusted.tlsCaCertificate,
+            trusted.clientCredential,
+        )
+        try {
+            connection.requestMethod = "GET"
+            connection.readTimeout = NETWORK_TIMEOUT_MILLIS
+            connection.setRequestProperty("Accept", "application/octet-stream")
+            val status = connection.responseCode
+            when {
+                status == 404 -> null
+                status !in 200..299 -> throw apiError(connection, status)
+                else -> connection.inputStream.use { it.readBytes() }
+            }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
     private fun postJson(
         url: String,
         body: JSONObject,
         tlsCaCertificate: String,
         credential: String? = null,
+        readTimeoutMillis: Int = NETWORK_TIMEOUT_MILLIS,
     ): JSONObject {
-        val connection = (URL(url).openConnection() as? HttpsURLConnection)
-            ?: throw SourceApiException("https_required", "Source Node måste använda HTTPS.")
+        val connection = openConnection(url, tlsCaCertificate, credential)
         return try {
-            connection.sslSocketFactory = sslSocketFactory(tlsCaCertificate)
             connection.requestMethod = "POST"
-            connection.connectTimeout = 8_000
-            connection.readTimeout = 8_000
+            connection.readTimeout = readTimeoutMillis
             connection.doOutput = true
-            connection.useCaches = false
             connection.setRequestProperty("Content-Type", "application/json")
             connection.setRequestProperty("Accept", "application/json")
-            credential?.let { connection.setRequestProperty("Authorization", "Bearer $it") }
             connection.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
             val status = connection.responseCode
             val raw = (if (status in 200..299) connection.inputStream else connection.errorStream)
@@ -173,6 +248,30 @@ class SourceNodeApi {
         }
     }
 
+    private fun openConnection(
+        url: String,
+        tlsCaCertificate: String,
+        credential: String? = null,
+    ): HttpsURLConnection {
+        val connection = (URL(url).openConnection() as? HttpsURLConnection)
+            ?: throw SourceApiException("https_required", "Source Node måste använda HTTPS.")
+        connection.sslSocketFactory = sslSocketFactory(tlsCaCertificate)
+        connection.connectTimeout = NETWORK_TIMEOUT_MILLIS
+        connection.useCaches = false
+        credential?.let { connection.setRequestProperty("Authorization", "Bearer $it") }
+        return connection
+    }
+
+    private fun apiError(connection: HttpsURLConnection, status: Int): SourceApiException {
+        val raw = connection.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+        val code = runCatching { JSONObject(raw).optJSONObject("error")?.optString("code") }.getOrNull()
+        return SourceApiException(code.orEmpty().ifBlank { "http_$status" }, mapError(code))
+    }
+
+    private fun sha256Hex(value: ByteArray): String = MessageDigest.getInstance("SHA-256")
+        .digest(value)
+        .joinToString("") { "%02x".format(it) }
+
     private fun sslSocketFactory(encodedCaCertificate: String): SSLSocketFactory {
         val certificate = runCatching {
             CertificateFactory.getInstance("X.509").generateCertificate(
@@ -194,10 +293,20 @@ class SourceNodeApi {
         "duplicate_client" -> "Den här klientidentiteten är redan parkopplad."
         "pairing_proof_failed" -> "Klientens identitet kunde inte verifieras."
         "authentication_required" -> "Noden känner inte längre igen den här klienten."
+        "model_unavailable" -> "Nodens lokala AI-modell är inte tillgänglig."
+        "chat_rate_limited" -> "För många AI-frågor. Vänta en stund."
+        "storage_quota_exceeded" -> "Nodens lagringsutrymme för användaren är fullt."
         else -> "Noden kunde inte slutföra begäran."
     }
 
     private fun JSONObject.requiredString(name: String): String =
         optString(name).takeIf { it.isNotBlank() }
             ?: throw SourceApiException("invalid_response", "Noden skickade ett ofullständigt svar.")
+
+    private companion object {
+        const val NETWORK_TIMEOUT_MILLIS = 8_000
+        const val CHAT_TIMEOUT_MILLIS = 125_000
+        const val MAX_MESSAGE_CHARACTERS = 4_000
+        const val CHAT_STORAGE_APP = "source-client"
+    }
 }

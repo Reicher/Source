@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createPublicKey, generateKeyPairSync, randomBytes, randomUUID, sign, verify } from 'node:crypto';
+import { createHash, createPublicKey, generateKeyPairSync, randomBytes, randomUUID, sign, verify } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -102,7 +102,14 @@ async function startPairing(api, invitation, client = simulatedClient()) {
 test('first-run admin lifecycle and complete key-based pairing', async (suite) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'source-node-pairing-'));
   let now = 1_800_000_000_000;
-  const ollama = { async status() { return true; }, async chat() { return { role: 'assistant', content: 'Lokalt svar' }; } };
+  let receivedChatMessages;
+  const ollama = {
+    async status() { return true; },
+    async chat(messages) {
+      receivedChatMessages = messages;
+      return { role: 'assistant', content: 'Lokalt svar' };
+    },
+  };
   const options = {
     databasePath: path.join(root, 'state', 'source.sqlite'),
     storageRoot: path.join(root, 'vaults'),
@@ -326,6 +333,61 @@ test('first-run admin lifecycle and complete key-based pairing', async (suite) =
         method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
       });
       assert.equal(oldPasswordLogin.status, 401);
+    });
+
+    await suite.test('paired client can chat through the authenticated local-model endpoint', async () => {
+      const messages = [
+        { role: 'user', content: 'Hej' },
+        { role: 'assistant', content: 'Hej!' },
+        { role: 'user', content: 'Hur mår du?' },
+      ];
+      const unauthenticated = await fetch(`${urls.api}/api/v1/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ messages }),
+      });
+      assert.equal(unauthenticated.status, 401);
+
+      const response = await fetch(`${urls.api}/api/v1/chat`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${credential}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ messages }),
+      });
+      assert.equal(response.status, 200);
+      assert.deepEqual(await json(response), {
+        message: { role: 'assistant', content: 'Lokalt svar' },
+      });
+      assert.deepEqual(receivedChatMessages, messages);
+    });
+
+    await suite.test('paired client can round-trip an encrypted Source Client snapshot', async () => {
+      const snapshotId = randomUUID();
+      const ciphertext = randomBytes(96);
+      const sha256 = createHash('sha256').update(ciphertext).digest('hex');
+      const upload = await fetch(`${urls.api}/api/v1/storage/source-client/snapshots/${snapshotId}`, {
+        method: 'PUT',
+        headers: {
+          authorization: `Bearer ${credential}`,
+          'content-type': 'application/octet-stream',
+          'x-content-sha256': sha256,
+        },
+        body: ciphertext,
+      });
+      assert.equal(upload.status, 201);
+      assert.deepEqual((await json(upload)).snapshot, {
+        id: snapshotId,
+        bytes: ciphertext.length,
+        sha256,
+        createdAt: now,
+      });
+
+      const latest = await fetch(`${urls.api}/api/v1/storage/source-client/snapshots/latest`, {
+        headers: { authorization: `Bearer ${credential}` },
+      });
+      assert.equal(latest.status, 200);
+      assert.equal(latest.headers.get('x-snapshot-id'), snapshotId);
+      assert.equal(latest.headers.get('x-content-sha256'), sha256);
+      assert.deepEqual(Buffer.from(await latest.arrayBuffer()), ciphertext);
     });
 
     await suite.test('restart preserves identity/users but invalidates active invitation', async () => {

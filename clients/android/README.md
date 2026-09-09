@@ -1,7 +1,7 @@
 # Source Client for Android
 
 This directory is an independently buildable Android application inside the
-Source monorepo. It intentionally implements only the first vertical slice:
+Source monorepo. It intentionally implements only the first vertical slices:
 
 1. create and password-protect a local Source identity;
 2. discover `_source._tcp` Nodes on the LAN;
@@ -10,10 +10,26 @@ Source monorepo. It intentionally implements only the first vertical slice:
 5. persist Node trust and the one-time client credential in an encrypted vault;
 6. detect loss of the local network and reconnect automatically after DNS-SD
    rediscovery and a fresh signed Node identity proof.
+7. keep one encrypted conversation and run it either through a local on-device
+   model or the authenticated Source Node chat API;
+8. back up the encrypted conversation as an opaque Source snapshot.
 
 The app has no cloud SDK, account service, telemetry, analytics, or background
-service. Its ZXing QR decoder is packaged in the APK, runs on-device, and has
-no runtime service or network integration.
+service. Its ZXing QR decoder and LiteRT-LM runtime run on-device and have no
+runtime service or internet integration.
+
+## Local client model
+
+Source Client uses the CPU-compatible, Apache-2.0 Qwen3 0.6B no-think INT4
+LiteRT-LM model. The checksum-pinned model is provisioned before the Android
+build and packaged in the APK. There is deliberately no model download or
+model-management UI inside Source Client. The model artifact and its license
+are published by the [LiteRT Community](https://huggingface.co/litert-community/Qwen3-0.6B-int4).
+
+`Auto` uses an authenticated Node when one is connected and otherwise uses
+`This device`. A selected Node that becomes unavailable also falls back to the
+device. Node connectivity continues independently for encrypted backup even
+when `This device` is selected for AI.
 
 ## Security model
 
@@ -39,9 +55,15 @@ provider is available consistently.
 With Android SDK 36 installed:
 
 ```sh
+./scripts/provision-client-model.sh
 cd clients/android
 ./gradlew testDebugUnitTest lintDebug assembleDebug
 ```
+
+The provisioning step downloads and verifies the Apache-2.0 Qwen3 0.6B
+no-think model used for fully offline Client inference. The model is packaged
+in the APK as `source-client-model.litertlm`; the running app never downloads a
+model or contacts an AI service.
 
 The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
@@ -57,7 +79,11 @@ The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 5. Force-stop and reopen the app. After the local password is entered, it should
    rediscover and authenticate without another QR scan.
 6. Turn Wi-Fi off and on, and restart the Node. The state should move through
-   unavailable and return to connected without losing trust.
+   unavailable and return to connected without losing trust;
+7. Select **This device**, turn off Wi-Fi, and send a message. Restart the app,
+   unlock it, and confirm that both messages remain.
+8. Reconnect, select the Node (or **Auto**), send another message, and confirm
+   that a `source-client` snapshot appears on the Node.
 
 The Compose `discovery` service uses host networking so mDNS can reach the LAN.
 On Docker Desktop, host networking must be enabled; native Linux supports it

@@ -8,8 +8,11 @@ artifacts/
 .DS_Store
 node/node_modules/
 clients/android/.gradle/
+clients/android/.kotlin/
 clients/android/local.properties
 clients/android/app/build/
 clients/android/build/
+clients/android/app/src/main/assets/source-client-model.litertlm
+clients/android/app/src/main/assets/source-client-model.litertlm.download
 *.swp
 *~

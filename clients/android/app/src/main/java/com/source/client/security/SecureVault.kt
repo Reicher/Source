@@ -4,6 +4,8 @@ import android.content.Context
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import com.source.client.model.ChatMessage
+import com.source.client.model.ChatRole
 import com.source.client.model.LocalIdentity
 import com.source.client.model.TrustedNode
 import com.source.client.model.UnlockedVault
@@ -90,6 +92,65 @@ class SecureVault(
 
     fun save(session: VaultSession) = persistVault(session)
 
+    fun loadConversation(session: VaultSession): List<ChatMessage> {
+        check(!session.closed)
+        val encodedNonce = preferences.getString(KEY_CONVERSATION_NONCE, null) ?: return emptyList()
+        val encodedData = preferences.getString(KEY_CONVERSATION_DATA, null) ?: return emptyList()
+        val plaintext = SourceCrypto.decrypt(
+            session.key,
+            SourceCrypto.base64UrlDecode(encodedData),
+            SourceCrypto.base64UrlDecode(encodedNonce),
+        )
+        return try {
+            decodeConversation(plaintext.toString(Charsets.UTF_8))
+        } finally {
+            plaintext.fill(0)
+        }
+    }
+
+    fun saveConversation(session: VaultSession, messages: List<ChatMessage>) {
+        check(!session.closed)
+        val (nonce, ciphertext) = encryptConversation(session, messages)
+        check(preferences.edit()
+            .putString(KEY_CONVERSATION_NONCE, SourceCrypto.base64Url(nonce))
+            .putString(KEY_CONVERSATION_DATA, SourceCrypto.base64Url(ciphertext))
+            .commit()) { "Could not persist encrypted conversation" }
+    }
+
+    fun createConversationSnapshot(session: VaultSession, messages: List<ChatMessage>): ByteArray {
+        check(!session.closed)
+        val (nonce, ciphertext) = encryptConversation(session, messages)
+        return JSONObject().apply {
+            put("format", CONVERSATION_SNAPSHOT_FORMAT)
+            put("version", CONVERSATION_FORMAT_VERSION)
+            put("nonce", SourceCrypto.base64Url(nonce))
+            put("ciphertext", SourceCrypto.base64Url(ciphertext))
+        }.toString().toByteArray(Charsets.UTF_8)
+    }
+
+    fun restoreConversationSnapshot(session: VaultSession, snapshot: ByteArray): List<ChatMessage> {
+        val messages = readConversationSnapshot(session, snapshot)
+        saveConversation(session, messages)
+        return messages
+    }
+
+    fun readConversationSnapshot(session: VaultSession, snapshot: ByteArray): List<ChatMessage> {
+        check(!session.closed)
+        val envelope = JSONObject(snapshot.toString(Charsets.UTF_8))
+        require(envelope.getString("format") == CONVERSATION_SNAPSHOT_FORMAT)
+        require(envelope.getInt("version") == CONVERSATION_FORMAT_VERSION)
+        val plaintext = SourceCrypto.decrypt(
+            session.key,
+            SourceCrypto.base64UrlDecode(envelope.getString("ciphertext")),
+            SourceCrypto.base64UrlDecode(envelope.getString("nonce")),
+        )
+        return try {
+            decodeConversation(plaintext.toString(Charsets.UTF_8))
+        } finally {
+            plaintext.fill(0)
+        }
+    }
+
     private fun persistVault(session: VaultSession) {
         check(!session.closed)
         val nonce = randomBytes(12)
@@ -112,6 +173,20 @@ class SecureVault(
         } finally {
             plaintext.fill(0)
         }
+    }
+
+    private fun encryptConversation(
+        session: VaultSession,
+        messages: List<ChatMessage>,
+    ): Pair<ByteArray, ByteArray> {
+        val nonce = randomBytes(12)
+        val plaintext = encodeConversation(messages).toByteArray(Charsets.UTF_8)
+        val ciphertext = try {
+            SourceCrypto.encrypt(session.key, plaintext, nonce)
+        } finally {
+            plaintext.fill(0)
+        }
+        return nonce to ciphertext
     }
 
     private fun getOrCreateDeviceKey(): SecretKey {
@@ -200,6 +275,36 @@ class SecureVault(
         })
     }
 
+    private fun encodeConversation(messages: List<ChatMessage>): String = JSONObject().apply {
+        put("version", CONVERSATION_FORMAT_VERSION)
+        put("messages", JSONArray().apply {
+            messages.forEach { message ->
+                put(JSONObject().apply {
+                    put("id", message.id)
+                    put("role", message.role.apiValue)
+                    put("content", message.content)
+                    put("createdAtMillis", message.createdAtMillis)
+                })
+            }
+        })
+    }.toString()
+
+    private fun decodeConversation(raw: String): List<ChatMessage> {
+        val root = JSONObject(raw)
+        require(root.getInt("version") == CONVERSATION_FORMAT_VERSION)
+        val messages = root.getJSONArray("messages")
+        return List(messages.length()) { index ->
+            messages.getJSONObject(index).let {
+                ChatMessage(
+                    id = it.getString("id"),
+                    role = ChatRole.fromApiValue(it.getString("role")),
+                    content = it.getString("content"),
+                    createdAtMillis = it.getLong("createdAtMillis"),
+                )
+            }
+        }
+    }
+
     companion object {
         private const val DEFAULT_KEYSTORE_ALIAS = "source-client-device-wrap-v1"
         private const val DEFAULT_PREFERENCES = "source_secure_vault_v1"
@@ -210,6 +315,10 @@ class SecureVault(
         private const val KEY_WRAPPED_KEY = "wrapped_vault_key"
         private const val KEY_VAULT_NONCE = "vault_nonce"
         private const val KEY_VAULT_DATA = "vault_data"
+        private const val KEY_CONVERSATION_NONCE = "conversation_nonce"
+        private const val KEY_CONVERSATION_DATA = "conversation_data"
+        private const val CONVERSATION_FORMAT_VERSION = 1
+        private const val CONVERSATION_SNAPSHOT_FORMAT = "source-client-conversation"
     }
 }
 
