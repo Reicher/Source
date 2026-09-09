@@ -39,9 +39,11 @@ Node owner on the physical machine
 ```
 
 The gateway publishes the Source HTTPS port at exactly `SOURCE_BIND_IP`;
-wildcard addresses are rejected by preflight. Docker publishes the admin port
-separately at exactly `127.0.0.1`, never the configured LAN address. Ollama has
-no host port. Do not create router forwarding for either Source port.
+wildcard addresses are rejected by preflight. The same gateway publishes an
+independent HTTP listener at exactly `127.0.0.1` and proxies it over an internal
+network to the Node's admin listener. It is never published on the configured
+LAN address. Ollama has no host port. Do not create router forwarding for
+either Source port.
 
 ## Security boundaries
 

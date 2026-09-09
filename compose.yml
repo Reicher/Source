@@ -17,6 +17,9 @@ services:
       SOURCE_GATEWAY_HOST: ${SOURCE_GATEWAY_HOST:-127.0.0.1}
     ports:
       - "${SOURCE_BIND_IP:-127.0.0.1}:${SOURCE_HTTPS_PORT:-8443}:8443"
+      # Publish administration through the gateway because Docker does not
+      # publish host ports from containers attached only to internal networks.
+      - "127.0.0.1:${SOURCE_ADMIN_PORT:-9090}:9090"
     volumes:
       - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
       - ${SOURCE_DATA_ROOT:-./data}/gateway/data:/data
@@ -50,7 +53,7 @@ services:
     environment:
       SOURCE_NODE_HOST: 0.0.0.0
       SOURCE_NODE_PORT: "8080"
-      # Docker publishes this listener only on the physical host's loopback.
+      # The gateway proxies this listener to the physical host's loopback only.
       SOURCE_ADMIN_HOST: 0.0.0.0
       SOURCE_ADMIN_CONTAINER_MODE: "1"
       SOURCE_ADMIN_PORT: "9090"
@@ -70,8 +73,6 @@ services:
     volumes:
       - ${SOURCE_DATA_ROOT:-./data}/node:/state
       - ${SOURCE_DATA_ROOT:-./data}/vaults:/vaults
-    ports:
-      - "127.0.0.1:${SOURCE_ADMIN_PORT:-9090}:9090"
     networks:
       - source_edge
       - inference

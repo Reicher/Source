@@ -17,11 +17,12 @@ The Source process has two HTTP listeners:
 | Source/LAN | `0.0.0.0:8080` behind the local-CA HTTPS gateway | Pairing and authenticated client APIs |
 | Administration | `127.0.0.1:9090` | First run, login, dashboard, users, invitations |
 
-The Compose deployment publishes the admin container port only as
-`127.0.0.1:9090` on the physical host. `SOURCE_ADMIN_HOST=0.0.0.0` is used
-inside that container solely so Docker's loopback-only host mapping can reach
-it. The admin listener is not routed through Caddy or attached to the LAN edge.
-Direct/non-container deployments retain the safe `127.0.0.1` default.
+The Compose deployment publishes a dedicated gateway listener only as
+`127.0.0.1:9090` on the physical host. It proxies over Source's internal edge
+to the Node admin listener. `SOURCE_ADMIN_HOST=0.0.0.0` is used inside the Node
+container solely so that internal proxy can reach it; the admin site is not
+routed through the LAN HTTPS listener. Direct/non-container deployments retain
+the safe `127.0.0.1` default.
 
 The self-contained admin UI loads no remote script, stylesheet, image, font,
 analytics, or telemetry. Admin sessions are process-local, expire after eight

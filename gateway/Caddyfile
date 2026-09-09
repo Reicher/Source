@@ -27,3 +27,19 @@ https://{$SOURCE_GATEWAY_HOST}:8443 {
 		}
 	}
 }
+
+http://:9090 {
+	header {
+		-Server
+		Cache-Control "no-store"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+	}
+
+	reverse_proxy node:9090 {
+		transport http {
+			dial_timeout 3s
+			response_header_timeout 10s
+		}
+	}
+}
