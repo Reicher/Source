@@ -19,11 +19,24 @@ data class TrustedNode(
     val clientCredential: String,
     val userId: String,
     val clientId: String,
+    val recoveryKey: String? = null,
+    val dataKey: String? = null,
+    val recoverySetupPending: Boolean = false,
+)
+
+data class PairingResult(
+    val trustedNode: TrustedNode,
+    val recoveryEnvelope: String? = null,
 )
 
 data class UnlockedVault(
     val identity: LocalIdentity,
     val trustedNodes: List<TrustedNode>,
+)
+
+data class VaultProfile(
+    val id: String,
+    val displayName: String,
 )
 
 enum class ChatRole(val apiValue: String) {
@@ -73,6 +86,7 @@ data class PairingInvitation(
     val invitationId: String,
     val invitationSecret: String,
     val expiresAtMillis: Long,
+    val recovery: Boolean = false,
 )
 
 sealed interface NodeStatus {

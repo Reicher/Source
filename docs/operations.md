@@ -63,6 +63,11 @@ either Source port.
   during an admin-authorized, short-lived pairing window.
 - Pairing invitations live only in memory and are single-use. Cancellation,
   expiry, completion, and restart revoke them.
+- Recovery invitations are bound to one existing user. A successful recovery
+  requires that user's node-specific recovery key and revokes older clients.
+- The Node stores only a hash of the recovery key and an encrypted envelope for
+  the client-generated data key. Five incorrect recovery attempts cancel the
+  active invitation.
 - Only SHA-256 client-credential hashes are stored.
 - Admin login and AI endpoints are rate limited in each running process.
 - Admin uses HttpOnly SameSite=Strict cookies, same-origin requests, and CSRF tokens.
@@ -140,6 +145,11 @@ client is created before that proof succeeds, and no user password exists on
 the Node. See [`pairing.md`](pairing.md) for the exact protocol and security
 semantics.
 
+The admin UI can also create a recovery invitation for an existing user or
+permanently delete a user. Deletion immediately revokes every client and
+removes the user's database records and snapshot directory after the admin
+types the exact display name as confirmation.
+
 Direct/non-container runs are safe development building blocks, not a complete
 LAN deployment: the plain-HTTP Source and admin listeners bind to loopback and
 discovery is disabled by default. A native LAN installation must provide the
@@ -172,8 +182,14 @@ The archive contains account state, ciphertext, metadata, and gateway state so
 the local CA identity can be restored. Ollama model files are excluded because
 they can be provisioned again.
 
-Restore is intentionally manual: keep the current data directory, unpack the
+Node-wide restore is intentionally manual: keep the current data directory, unpack the
 archive as a replacement with restrictive permissions, run preflight, and only
 then start Source. Older backups can retain a deleted user's ciphertext until
-their external retention period expires; it remains unreadable without the
-client's vault key.
+their external retention period expires.
+
+For a lost phone, create a fresh local user on the replacement client. In the
+admin UI choose **Recover** for the existing Node user, scan the short-lived QR
+code, and enter the recovery key previously shown by the connected client. The
+replacement client receives the existing encrypted snapshots and registers a
+new client credential; all earlier client credentials for that user are
+revoked.

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Source Node API
-  version: 1.1.0
+  version: 1.2.0
   description: >-
     LAN API for key-paired clients, local-model chat, and opaque encrypted
     snapshots. Administrative endpoints are intentionally excluded because
@@ -53,7 +53,11 @@ paths:
     post:
       security: []
       operationId: completePairing
-      description: Verify the signature, atomically create the user/client, and consume the invitation.
+      description: >-
+        Verify the signature and consume the invitation. A normal invitation
+        atomically creates a user/client and recovery material; an
+        administrator-approved recovery invitation replaces the user's active
+        clients after the recovery key is verified.
       requestBody:
         required: true
         content:
@@ -74,6 +78,20 @@ paths:
         "413": { $ref: "#/components/responses/Error" }
         "415": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /recovery/setup:
+    post:
+      operationId: setupRecovery
+      description: Configure recovery once for a user paired before recovery support was introduced.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RecoveryMaterial" }
+      responses:
+        "201": { description: Recovery configured }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /me:
     get:
       operationId: getCurrentUser
@@ -293,6 +311,8 @@ components:
         invitationSecret: { type: string }
         handshakeId: { type: string, format: uuid }
         signature: { type: string, description: Base64url Ed25519 signature over signingPayload }
+        recoveryKey: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
+        recoveryEnvelope: { type: string, pattern: "^[A-Za-z0-9_-]{80}$" }
     PairingResult:
       type: object
       additionalProperties: false
@@ -309,6 +329,16 @@ components:
             id: { type: string }
             displayName: { type: string, minLength: 1, maxLength: 100 }
         clientCredential: { type: string, description: Bearer credential returned once }
+        recoveryEnvelope:
+          type: string
+          description: Returned only for recovery invitations; wraps the user's Node data key.
+    RecoveryMaterial:
+      type: object
+      additionalProperties: false
+      required: [recoveryKey, recoveryEnvelope]
+      properties:
+        recoveryKey: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
+        recoveryEnvelope: { type: string, pattern: "^[A-Za-z0-9_-]{80}$" }
     NodeIdentityChallenge:
       type: object
       additionalProperties: false

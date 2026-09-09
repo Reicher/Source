@@ -9,6 +9,7 @@ import com.source.client.model.ChatRole
 import com.source.client.model.LocalIdentity
 import com.source.client.model.TrustedNode
 import com.source.client.model.UnlockedVault
+import com.source.client.model.VaultProfile
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.KeyStore
@@ -27,12 +28,18 @@ class SecureVault(
     private val preferences = context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
     private val random = SecureRandom()
 
-    val isInitialized: Boolean get() = preferences.getBoolean(KEY_INITIALIZED, false)
+    val profiles: List<VaultProfile>
+        get() {
+            migrateLegacyVaultIfNeeded()
+            return decodeProfiles(preferences.getString(KEY_PROFILES, null))
+        }
+
+    val isInitialized: Boolean get() = profiles.isNotEmpty()
 
     fun create(userName: String, password: CharArray): VaultSession {
-        check(!isInitialized) { "Source identity already exists" }
         val trimmedName = userName.trim()
         require(trimmedName.isNotEmpty())
+        val profile = VaultProfile(UUID.randomUUID().toString(), trimmedName)
 
         val keyPair = SourceCrypto.generateClientKeyPair()
         val publicKey = SourceCrypto.encodePublicKey(keyPair.public)
@@ -56,27 +63,28 @@ class SecureVault(
         val (deviceNonce, deviceEnvelope) = keystoreEncrypt(passwordEnvelope)
         passwordEnvelope.fill(0)
 
-        val session = VaultSession(vaultKey, UnlockedVault(identity, emptyList()))
+        val session = VaultSession(profile.id, vaultKey, UnlockedVault(identity, emptyList()))
         persistVault(session)
+        val updatedProfiles = profiles + profile
         val committed = preferences.edit()
-            .putString(KEY_SALT, SourceCrypto.base64Url(salt))
-            .putString(KEY_PASSWORD_NONCE, SourceCrypto.base64Url(passwordNonce))
-            .putString(KEY_DEVICE_NONCE, SourceCrypto.base64Url(deviceNonce))
-            .putString(KEY_WRAPPED_KEY, SourceCrypto.base64Url(deviceEnvelope))
-            .putBoolean(KEY_INITIALIZED, true)
+            .putString(profileKey(profile.id, KEY_SALT), SourceCrypto.base64Url(salt))
+            .putString(profileKey(profile.id, KEY_PASSWORD_NONCE), SourceCrypto.base64Url(passwordNonce))
+            .putString(profileKey(profile.id, KEY_DEVICE_NONCE), SourceCrypto.base64Url(deviceNonce))
+            .putString(profileKey(profile.id, KEY_WRAPPED_KEY), SourceCrypto.base64Url(deviceEnvelope))
+            .putString(KEY_PROFILES, encodeProfiles(updatedProfiles))
             .commit()
         check(committed) { "Could not persist Source identity" }
         return session
     }
 
-    fun unlock(password: CharArray): VaultSession? {
-        if (!isInitialized) return null
+    fun unlock(profileId: String, password: CharArray): VaultSession? {
+        if (profiles.none { it.id == profileId }) return null
         var unlockedKey: ByteArray? = null
         return runCatching {
-            val salt = storedBytes(KEY_SALT)
-            val passwordNonce = storedBytes(KEY_PASSWORD_NONCE)
-            val deviceNonce = storedBytes(KEY_DEVICE_NONCE)
-            val passwordEnvelope = keystoreDecrypt(storedBytes(KEY_WRAPPED_KEY), deviceNonce)
+            val salt = storedBytes(profileId, KEY_SALT)
+            val passwordNonce = storedBytes(profileId, KEY_PASSWORD_NONCE)
+            val deviceNonce = storedBytes(profileId, KEY_DEVICE_NONCE)
+            val passwordEnvelope = keystoreDecrypt(storedBytes(profileId, KEY_WRAPPED_KEY), deviceNonce)
             val passwordKey = SourceCrypto.derivePasswordKey(password, salt)
             val vaultKey = try {
                 SourceCrypto.decrypt(passwordKey, passwordEnvelope, passwordNonce)
@@ -85,8 +93,9 @@ class SecureVault(
                 passwordEnvelope.fill(0)
             }
             unlockedKey = vaultKey
-            val vault = decryptVault(vaultKey)
-            VaultSession(vaultKey, vault)
+            val vault = decryptVault(profileId, vaultKey)
+            updateProfileName(profileId, vault.identity.userDisplayName)
+            VaultSession(profileId, vaultKey, vault)
         }.onFailure { unlockedKey?.fill(0) }.getOrNull()
     }
 
@@ -94,8 +103,8 @@ class SecureVault(
 
     fun loadConversation(session: VaultSession): List<ChatMessage> {
         check(!session.closed)
-        val encodedNonce = preferences.getString(KEY_CONVERSATION_NONCE, null) ?: return emptyList()
-        val encodedData = preferences.getString(KEY_CONVERSATION_DATA, null) ?: return emptyList()
+        val encodedNonce = preferences.getString(profileKey(session.profileId, KEY_CONVERSATION_NONCE), null) ?: return emptyList()
+        val encodedData = preferences.getString(profileKey(session.profileId, KEY_CONVERSATION_DATA), null) ?: return emptyList()
         val plaintext = SourceCrypto.decrypt(
             session.key,
             SourceCrypto.base64UrlDecode(encodedData),
@@ -112,14 +121,18 @@ class SecureVault(
         check(!session.closed)
         val (nonce, ciphertext) = encryptConversation(session, messages)
         check(preferences.edit()
-            .putString(KEY_CONVERSATION_NONCE, SourceCrypto.base64Url(nonce))
-            .putString(KEY_CONVERSATION_DATA, SourceCrypto.base64Url(ciphertext))
+            .putString(profileKey(session.profileId, KEY_CONVERSATION_NONCE), SourceCrypto.base64Url(nonce))
+            .putString(profileKey(session.profileId, KEY_CONVERSATION_DATA), SourceCrypto.base64Url(ciphertext))
             .commit()) { "Could not persist encrypted conversation" }
     }
 
-    fun createConversationSnapshot(session: VaultSession, messages: List<ChatMessage>): ByteArray {
+    fun createConversationSnapshot(
+        session: VaultSession,
+        messages: List<ChatMessage>,
+        encryptionKey: ByteArray = session.key,
+    ): ByteArray {
         check(!session.closed)
-        val (nonce, ciphertext) = encryptConversation(session, messages)
+        val (nonce, ciphertext) = encryptConversation(encryptionKey, messages)
         return JSONObject().apply {
             put("format", CONVERSATION_SNAPSHOT_FORMAT)
             put("version", CONVERSATION_FORMAT_VERSION)
@@ -128,19 +141,27 @@ class SecureVault(
         }.toString().toByteArray(Charsets.UTF_8)
     }
 
-    fun restoreConversationSnapshot(session: VaultSession, snapshot: ByteArray): List<ChatMessage> {
-        val messages = readConversationSnapshot(session, snapshot)
+    fun restoreConversationSnapshot(
+        session: VaultSession,
+        snapshot: ByteArray,
+        encryptionKey: ByteArray = session.key,
+    ): List<ChatMessage> {
+        val messages = readConversationSnapshot(session, snapshot, encryptionKey)
         saveConversation(session, messages)
         return messages
     }
 
-    fun readConversationSnapshot(session: VaultSession, snapshot: ByteArray): List<ChatMessage> {
+    fun readConversationSnapshot(
+        session: VaultSession,
+        snapshot: ByteArray,
+        encryptionKey: ByteArray = session.key,
+    ): List<ChatMessage> {
         check(!session.closed)
         val envelope = JSONObject(snapshot.toString(Charsets.UTF_8))
         require(envelope.getString("format") == CONVERSATION_SNAPSHOT_FORMAT)
         require(envelope.getInt("version") == CONVERSATION_FORMAT_VERSION)
         val plaintext = SourceCrypto.decrypt(
-            session.key,
+            encryptionKey,
             SourceCrypto.base64UrlDecode(envelope.getString("ciphertext")),
             SourceCrypto.base64UrlDecode(envelope.getString("nonce")),
         )
@@ -161,13 +182,13 @@ class SecureVault(
             plaintext.fill(0)
         }
         check(preferences.edit()
-            .putString(KEY_VAULT_NONCE, SourceCrypto.base64Url(nonce))
-            .putString(KEY_VAULT_DATA, SourceCrypto.base64Url(ciphertext))
+            .putString(profileKey(session.profileId, KEY_VAULT_NONCE), SourceCrypto.base64Url(nonce))
+            .putString(profileKey(session.profileId, KEY_VAULT_DATA), SourceCrypto.base64Url(ciphertext))
             .commit()) { "Could not persist encrypted Source data" }
     }
 
-    private fun decryptVault(key: ByteArray): UnlockedVault {
-        val plaintext = SourceCrypto.decrypt(key, storedBytes(KEY_VAULT_DATA), storedBytes(KEY_VAULT_NONCE))
+    private fun decryptVault(profileId: String, key: ByteArray): UnlockedVault {
+        val plaintext = SourceCrypto.decrypt(key, storedBytes(profileId, KEY_VAULT_DATA), storedBytes(profileId, KEY_VAULT_NONCE))
         return try {
             decode(plaintext.toString(Charsets.UTF_8))
         } finally {
@@ -178,11 +199,16 @@ class SecureVault(
     private fun encryptConversation(
         session: VaultSession,
         messages: List<ChatMessage>,
+    ): Pair<ByteArray, ByteArray> = encryptConversation(session.key, messages)
+
+    private fun encryptConversation(
+        encryptionKey: ByteArray,
+        messages: List<ChatMessage>,
     ): Pair<ByteArray, ByteArray> {
         val nonce = randomBytes(12)
         val plaintext = encodeConversation(messages).toByteArray(Charsets.UTF_8)
         val ciphertext = try {
-            SourceCrypto.encrypt(session.key, plaintext, nonce)
+            SourceCrypto.encrypt(encryptionKey, plaintext, nonce)
         } finally {
             plaintext.fill(0)
         }
@@ -220,8 +246,44 @@ class SecureVault(
         return cipher.doFinal(value)
     }
 
-    private fun storedBytes(key: String): ByteArray =
-        SourceCrypto.base64UrlDecode(checkNotNull(preferences.getString(key, null)))
+    private fun storedBytes(profileId: String, key: String): ByteArray =
+        SourceCrypto.base64UrlDecode(checkNotNull(preferences.getString(profileKey(profileId, key), null)))
+
+    private fun profileKey(profileId: String, key: String) = "profile.$profileId.$key"
+
+    private fun encodeProfiles(profiles: List<VaultProfile>): String = JSONArray().apply {
+        profiles.forEach { profile ->
+            put(JSONObject().put("id", profile.id).put("displayName", profile.displayName))
+        }
+    }.toString()
+
+    private fun decodeProfiles(raw: String?): List<VaultProfile> = runCatching {
+        val array = JSONArray(raw ?: "[]")
+        List(array.length()) { index ->
+            array.getJSONObject(index).let { VaultProfile(it.getString("id"), it.getString("displayName")) }
+        }
+    }.getOrDefault(emptyList())
+
+    private fun updateProfileName(profileId: String, displayName: String) {
+        val current = decodeProfiles(preferences.getString(KEY_PROFILES, null))
+        if (current.none { it.id == profileId && it.displayName != displayName }) return
+        preferences.edit().putString(
+            KEY_PROFILES,
+            encodeProfiles(current.map { if (it.id == profileId) it.copy(displayName = displayName) else it }),
+        ).commit()
+    }
+
+    private fun migrateLegacyVaultIfNeeded() {
+        if (preferences.contains(KEY_PROFILES) || !preferences.getBoolean(KEY_INITIALIZED, false)) return
+        val editor = preferences.edit()
+        LEGACY_KEYS.forEach { key ->
+            preferences.getString(key, null)?.let { editor.putString(profileKey(LEGACY_PROFILE_ID, key), it) }
+        }
+        editor.putString(
+            KEY_PROFILES,
+            encodeProfiles(listOf(VaultProfile(LEGACY_PROFILE_ID, "Befintlig användare"))),
+        ).commit()
+    }
 
     private fun randomBytes(size: Int) = ByteArray(size).also(random::nextBytes)
 
@@ -250,6 +312,9 @@ class SecureVault(
                     put("clientCredential", node.clientCredential)
                     put("userId", node.userId)
                     put("clientId", node.clientId)
+                    node.recoveryKey?.let { put("recoveryKey", it) }
+                    node.dataKey?.let { put("dataKey", it) }
+                    if (node.recoverySetupPending) put("recoverySetupPending", true)
                 })
             }
         })
@@ -270,6 +335,9 @@ class SecureVault(
                 TrustedNode(
                     it.getString("nodeId"), it.getString("nodePublicKey"), it.getString("tlsCaCertificate"), it.getString("displayName"),
                     it.getString("clientCredential"), it.getString("userId"), it.getString("clientId"),
+                    it.optString("recoveryKey").takeIf(String::isNotBlank),
+                    it.optString("dataKey").takeIf(String::isNotBlank),
+                    it.optBoolean("recoverySetupPending", false),
                 )
             }
         })
@@ -308,6 +376,7 @@ class SecureVault(
     companion object {
         private const val DEFAULT_KEYSTORE_ALIAS = "source-client-device-wrap-v1"
         private const val DEFAULT_PREFERENCES = "source_secure_vault_v1"
+        private const val KEY_PROFILES = "profiles_v2"
         private const val KEY_INITIALIZED = "initialized"
         private const val KEY_SALT = "password_salt"
         private const val KEY_PASSWORD_NONCE = "password_nonce"
@@ -319,10 +388,22 @@ class SecureVault(
         private const val KEY_CONVERSATION_DATA = "conversation_data"
         private const val CONVERSATION_FORMAT_VERSION = 1
         private const val CONVERSATION_SNAPSHOT_FORMAT = "source-client-conversation"
+        private const val LEGACY_PROFILE_ID = "legacy-v1"
+        private val LEGACY_KEYS = listOf(
+            KEY_SALT,
+            KEY_PASSWORD_NONCE,
+            KEY_DEVICE_NONCE,
+            KEY_WRAPPED_KEY,
+            KEY_VAULT_NONCE,
+            KEY_VAULT_DATA,
+            KEY_CONVERSATION_NONCE,
+            KEY_CONVERSATION_DATA,
+        )
     }
 }
 
 class VaultSession internal constructor(
+    val profileId: String,
     internal val key: ByteArray,
     vault: UnlockedVault,
 ) {

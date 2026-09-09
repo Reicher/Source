@@ -3,7 +3,8 @@
 This directory is an independently buildable Android application inside the
 Source monorepo. It intentionally implements only the first vertical slices:
 
-1. create and password-protect a local Source identity;
+1. create multiple password-protected local Source users, switch between them,
+   and log out without deleting their separate encrypted data;
 2. discover `_source._tcp` Nodes on the LAN;
 3. scan and validate the Node's protocol-v1 invitation QR;
 4. complete the existing mutual Ed25519 pairing handshake;
@@ -35,6 +36,12 @@ when `This device` is selected for AI.
 
 - The password is processed locally with PBKDF2-HMAC-SHA256 and is never stored
   or sent to a Node.
+- Every local user has a separate identity, vault, trusted-Node credentials, and
+  conversation. Existing single-user installations migrate in place.
+- Each paired Node gets a client-generated recovery key and data key. The app
+  shows the recovery key while connected; an administrator-approved recovery
+  QR plus that key can attach a replacement client to the existing Node user
+  and decrypt its snapshots.
 - The Ed25519 Client private key and trusted-Node credentials live only in the
   encrypted local vault. A random vault key is password-wrapped and then wrapped
   again by a non-exportable Android Keystore AES key.
@@ -57,8 +64,13 @@ With Android SDK 36 installed:
 ```sh
 ./scripts/provision-client-model.sh
 cd clients/android
-./gradlew testDebugUnitTest lintDebug assembleDebug
+./gradlew testInstrumentedUnitTest lintDebug assembleDebug
+./gradlew connectedInstrumentedAndroidTest
 ```
+
+Instrumentation uses the separate `com.source.client.instrumented` application
+ID, so running it on a physical device cannot uninstall or clear the normal
+`com.source.client` app.
 
 The provisioning step downloads and verifies the Apache-2.0 Qwen3 0.6B
 no-think model used for fully offline Client inference. The model is packaged
@@ -73,7 +85,7 @@ The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
    LAN address, start the Compose deployment, and initialize the Node.
 2. Export `artifacts/source-node-ca.crt`; the Node embeds this public certificate
    in each pairing QR automatically.
-3. Install and open the debug APK, then create the local identity.
+3. Install and open the debug APK, then create or select a local user and log in.
 4. Create a pairing invitation on the Node. The client should discover the Node,
    show **Anslut**, request camera access, scan the QR, and show **Ansluten**.
 5. Force-stop and reopen the app. After the local password is entered, it should

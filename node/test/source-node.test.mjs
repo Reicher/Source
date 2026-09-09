@@ -9,6 +9,8 @@ import { createSourceNode } from '../src/server.mjs';
 
 const quietLogger = { info() {}, warn() {}, error() {} };
 const adminPassword = 'correct horse source battery';
+const recoveryKey = 'r'.repeat(43);
+const recoveryEnvelope = 'e'.repeat(80);
 const pairingCaCertificatePath = new URL('./fixtures/source-test-ca.crt', import.meta.url);
 
 async function listen(source) {
@@ -145,6 +147,9 @@ test('first-run admin lifecycle and complete key-based pairing', async (suite) =
       const html = await ui.text();
       assert.equal(ui.status, 200);
       assert.match(html, /Initialize this Node/);
+      assert.match(html, /Recover/);
+      assert.match(html, /Permanently delete/);
+      assert.doesNotThrow(() => new Function(html.match(/<script>([\s\S]*)<\/script>/)[1]));
       assert.doesNotMatch(html, /<(?:script|link)[^>]+(?:src|href)=["']https?:/i);
     });
 
@@ -263,6 +268,8 @@ test('first-run admin lifecycle and complete key-based pairing', async (suite) =
         invitationSecret: started.request.invitationSecret,
         handshakeId: challenge.handshakeId,
         signature,
+        recoveryKey,
+        recoveryEnvelope,
       };
       const completed = await fetch(`${urls.api}/api/v1/pairing/complete`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(completionBody),
@@ -276,6 +283,7 @@ test('first-run admin lifecycle and complete key-based pairing', async (suite) =
       assert.equal(source.database.listUsers()[0].quotaBytes, 7 * 1024 ** 3);
       assert.equal(source.database.listUsers()[0].clientCount, 1);
       assert.equal(source.database.listUsers()[0].displayName, 'Robin');
+      assert.equal(source.database.listUsers()[0].recoveryConfigured, 1);
 
       const replay = await fetch(`${urls.api}/api/v1/pairing/complete`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(completionBody),
@@ -284,7 +292,10 @@ test('first-run admin lifecycle and complete key-based pairing', async (suite) =
       assert.equal(source.database.listUsers().length, 1);
 
       const dashboard = await fetch(`${urls.admin}/admin/api/dashboard`, { headers: { cookie: session.cookie } });
-      assert.equal((await json(dashboard)).users[0].clientCount, 1);
+      const dashboardUser = (await json(dashboard)).users[0];
+      assert.equal(dashboardUser.clientCount, 1);
+      assert.equal(dashboardUser.recoveryConfigured, true);
+      assert.equal(JSON.stringify(dashboardUser).includes(recoveryKey), false);
     });
 
     await suite.test('paired client credential authenticates the normal API', async () => {
@@ -390,6 +401,89 @@ test('first-run admin lifecycle and complete key-based pairing', async (suite) =
       assert.deepEqual(Buffer.from(await latest.arrayBuffer()), ciphertext);
     });
 
+    await suite.test('an existing paired client can configure recovery after a server upgrade', async () => {
+      source.database.database.exec('UPDATE users SET recovery_key_hash = NULL, recovery_envelope = NULL');
+      const unauthenticated = await fetch(`${urls.api}/api/v1/recovery/setup`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ recoveryKey, recoveryEnvelope }),
+      });
+      assert.equal(unauthenticated.status, 401);
+      const configured = await fetch(`${urls.api}/api/v1/recovery/setup`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${credential}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ recoveryKey, recoveryEnvelope }),
+      });
+      assert.equal(configured.status, 201);
+      assert.equal(source.database.listUsers()[0].recoveryConfigured, 1);
+      const repeated = await fetch(`${urls.api}/api/v1/recovery/setup`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${credential}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ recoveryKey, recoveryEnvelope }),
+      });
+      assert.equal(repeated.status, 201, 'the same recovery key can be retried after a lost response');
+      const differentKey = await fetch(`${urls.api}/api/v1/recovery/setup`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${credential}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ recoveryKey: 'z'.repeat(43), recoveryEnvelope }),
+      });
+      assert.equal(differentKey.status, 409, 'an existing recovery key cannot be replaced silently');
+    });
+
+    await suite.test('admin-approved recovery replaces lost clients and preserves Node data', async () => {
+      const user = source.database.listUsers()[0];
+      const oldCredential = credential;
+      const invitationResponse = await fetch(
+        `${urls.admin}/admin/api/users/${user.id}/recovery-invitations`,
+        { method: 'POST', headers: adminHeaders(session, urls.admin) },
+      );
+      assert.equal(invitationResponse.status, 201);
+      const invitation = (await json(invitationResponse)).invitation;
+      assert.equal(invitation.kind, 'recover');
+      assert.equal(invitation.userId, user.id);
+      assert.equal(new URL(invitation.payload).searchParams.get('action'), 'recover');
+
+      const started = await startPairing(urls.api, invitation, simulatedClient());
+      assert.equal(started.response.status, 200);
+      const challenge = await json(started.response);
+      const completion = {
+        protocol: 1,
+        invitationId: started.request.invitationId,
+        invitationSecret: started.request.invitationSecret,
+        handshakeId: challenge.handshakeId,
+        signature: sign(null, Buffer.from(challenge.signingPayload), started.client.privateKey).toString('base64url'),
+      };
+      const wrongKey = await fetch(`${urls.api}/api/v1/pairing/complete`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ...completion, recoveryKey: 'x'.repeat(43) }),
+      });
+      assert.equal(wrongKey.status, 401);
+      assert.equal((await fetch(`${urls.api}/api/v1/me`, {
+        headers: { authorization: `Bearer ${oldCredential}` },
+      })).status, 200, 'a failed recovery does not revoke the current client');
+
+      const recovered = await fetch(`${urls.api}/api/v1/pairing/complete`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ...completion, recoveryKey }),
+      });
+      assert.equal(recovered.status, 201);
+      const recoveredBody = await json(recovered);
+      credential = recoveredBody.clientCredential;
+      assert.equal(recoveredBody.user.id, user.id);
+      assert.equal(recoveredBody.recoveryEnvelope, recoveryEnvelope);
+      assert.equal((await fetch(`${urls.api}/api/v1/me`, {
+        headers: { authorization: `Bearer ${oldCredential}` },
+      })).status, 401, 'successful recovery revokes old clients');
+      assert.equal(source.database.listUsers()[0].clientCount, 1);
+
+      const latest = await fetch(`${urls.api}/api/v1/storage/source-client/snapshots/latest`, {
+        headers: { authorization: `Bearer ${credential}` },
+      });
+      assert.equal(latest.status, 200, 'the recovered client uses the existing user storage');
+    });
+
     await suite.test('restart preserves identity/users but invalidates active invitation', async () => {
       const active = await invite(urls.admin, session);
       assert.equal((await startPairing(urls.api, active)).response.status, 200);
@@ -401,6 +495,29 @@ test('first-run admin lifecycle and complete key-based pairing', async (suite) =
       assert.equal((await startPairing(urls.api, active)).response.status, 404);
       const me = await fetch(`${urls.api}/api/v1/me`, { headers: { authorization: `Bearer ${credential}` } });
       assert.equal(me.status, 200);
+    });
+
+    await suite.test('admin deletion revokes access and removes user storage', async () => {
+      const user = source.database.listUsers()[0];
+      const namespace = source.database.findUserById(user.id).storageNamespace;
+      const deletionSession = await login(urls.admin);
+      const wrongConfirmation = await fetch(`${urls.admin}/admin/api/users/${user.id}`, {
+        method: 'DELETE',
+        headers: adminHeaders(deletionSession, urls.admin, true),
+        body: JSON.stringify({ displayName: 'Not Robin' }),
+      });
+      assert.equal(wrongConfirmation.status, 400);
+      const deleted = await fetch(`${urls.admin}/admin/api/users/${user.id}`, {
+        method: 'DELETE',
+        headers: adminHeaders(deletionSession, urls.admin, true),
+        body: JSON.stringify({ displayName: 'Robin' }),
+      });
+      assert.equal(deleted.status, 204);
+      assert.equal(source.database.listUsers().length, 0);
+      assert.equal((await fetch(`${urls.api}/api/v1/me`, {
+        headers: { authorization: `Bearer ${credential}` },
+      })).status, 401);
+      await assert.rejects(fs.access(path.join(root, 'vaults', namespace)));
     });
   } finally {
     await source.close();

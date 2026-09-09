@@ -4,6 +4,7 @@ import { AuthService } from './auth.mjs';
 import { proveNodeIdentity } from './node-identity.mjs';
 import { RateLimiter } from './rate-limit.mjs';
 import { SnapshotStorage } from './storage.mjs';
+import { tokenHash } from './security.mjs';
 
 class HttpError extends Error {
   constructor(status, code, message) {
@@ -110,6 +111,18 @@ function authorizeStorageApp(config, appId) {
   return appId;
 }
 
+function recoveryMaterial(body) {
+  if (
+    typeof body?.recoveryKey !== 'string'
+    || !/^[A-Za-z0-9_-]{43}$/.test(body.recoveryKey)
+    || typeof body?.recoveryEnvelope !== 'string'
+    || !/^[A-Za-z0-9_-]{80}$/.test(body.recoveryEnvelope)
+  ) {
+    throw new HttpError(400, 'invalid_recovery_material', 'Återställningsmaterialet är ogiltigt.');
+  }
+  return body;
+}
+
 export function createRequestHandler({ database, config, ollama, pairing, logger = console }) {
   const auth = new AuthService(database, config);
   const storage = new SnapshotStorage(database, config);
@@ -163,6 +176,20 @@ export function createRequestHandler({ database, config, ollama, pairing, logger
       if (route === 'POST /api/v1/identity/challenge') {
         status = 200;
         json(response, status, proveNodeIdentity(database, session, await readJson(request)));
+        return;
+      }
+
+      if (route === 'POST /api/v1/recovery/setup') {
+        const body = recoveryMaterial(await readJson(request));
+        if (!database.configureRecovery({
+          userId: session.user.id,
+          recoveryKeyHash: tokenHash(body.recoveryKey),
+          recoveryEnvelope: body.recoveryEnvelope,
+        })) {
+          throw new HttpError(409, 'recovery_already_configured', 'Återställningsnyckeln är redan konfigurerad.');
+        }
+        status = 201;
+        json(response, status, { recoveryConfigured: true });
         return;
       }
 

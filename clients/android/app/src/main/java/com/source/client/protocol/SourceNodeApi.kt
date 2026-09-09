@@ -3,6 +3,7 @@ package com.source.client.protocol
 import com.source.client.model.LocalIdentity
 import com.source.client.model.ChatMessage
 import com.source.client.model.PairingInvitation
+import com.source.client.model.PairingResult
 import com.source.client.model.TrustedNode
 import com.source.client.security.SourceCrypto
 import kotlinx.coroutines.Dispatchers
@@ -28,7 +29,12 @@ class SourceApiException(val code: String, message: String) : IOException(messag
 class SourceNodeApi {
     private val random = SecureRandom()
 
-    suspend fun pair(invitation: PairingInvitation, identity: LocalIdentity): TrustedNode = withContext(Dispatchers.IO) {
+    suspend fun pair(
+        invitation: PairingInvitation,
+        identity: LocalIdentity,
+        recoveryKey: String,
+        recoveryEnvelope: String? = null,
+    ): PairingResult = withContext(Dispatchers.IO) {
         val start = postJson(
             "${invitation.pairingEndpoint}/start",
             JSONObject().apply {
@@ -76,6 +82,8 @@ class SourceNodeApi {
                 put("invitationSecret", invitation.invitationSecret)
                 put("handshakeId", handshakeId)
                 put("signature", SourceCrypto.sign(SourceCrypto.decodePrivateKey(identity.clientPrivateKey), signingPayload))
+                put("recoveryKey", recoveryKey)
+                recoveryEnvelope?.let { put("recoveryEnvelope", it) }
             },
             invitation.tlsCaCertificate,
         )
@@ -93,14 +101,32 @@ class SourceNodeApi {
         ) {
             throw SourceApiException("client_identity_changed", "Noden returnerade fel klientidentitet.")
         }
-        TrustedNode(
-            nodeId = invitation.nodeId,
-            nodePublicKey = invitation.nodePublicKey,
-            tlsCaCertificate = invitation.tlsCaCertificate,
-            displayName = invitation.nodeName,
-            clientCredential = credential,
-            userId = returnedUserId,
-            clientId = returnedClientId,
+        PairingResult(
+            trustedNode = TrustedNode(
+                nodeId = invitation.nodeId,
+                nodePublicKey = invitation.nodePublicKey,
+                tlsCaCertificate = invitation.tlsCaCertificate,
+                displayName = invitation.nodeName,
+                clientCredential = credential,
+                userId = returnedUserId,
+                clientId = returnedClientId,
+                recoveryKey = recoveryKey,
+            ),
+            recoveryEnvelope = complete.optString("recoveryEnvelope").takeIf(String::isNotBlank),
+        )
+    }
+
+    suspend fun setupRecovery(
+        apiBaseUrl: String,
+        trusted: TrustedNode,
+        recoveryKey: String,
+        recoveryEnvelope: String,
+    ) = withContext(Dispatchers.IO) {
+        postJson(
+            "${apiBaseUrl.removeSuffix("/")}/recovery/setup",
+            JSONObject().put("recoveryKey", recoveryKey).put("recoveryEnvelope", recoveryEnvelope),
+            trusted.tlsCaCertificate,
+            trusted.clientCredential,
         )
     }
 
@@ -292,6 +318,8 @@ class SourceNodeApi {
         "pairing_unavailable" -> "Inbjudan har gått ut, avbrutits eller redan använts."
         "duplicate_client" -> "Den här klientidentiteten är redan parkopplad."
         "pairing_proof_failed" -> "Klientens identitet kunde inte verifieras."
+        "invalid_recovery_key" -> "Återställningsnyckeln är fel."
+        "recovery_not_configured" -> "Användaren har ingen återställningsnyckel."
         "authentication_required" -> "Noden känner inte längre igen den här klienten."
         "model_unavailable" -> "Nodens lokala AI-modell är inte tillgänglig."
         "chat_rate_limited" -> "För många AI-frågor. Vänta en stund."

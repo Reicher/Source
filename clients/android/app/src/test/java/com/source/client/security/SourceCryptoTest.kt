@@ -3,6 +3,7 @@ package com.source.client.security
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class SourceCryptoTest {
@@ -31,5 +32,19 @@ class SourceCryptoTest {
 
         assertFalse(ciphertext.contentEquals(plaintext))
         assertArrayEquals(plaintext, SourceCrypto.decrypt(key, ciphertext, nonce))
+    }
+
+    @Test
+    fun `node recovery key unwraps only its bound data key`() {
+        val nodeId = "srcnode_${"n".repeat(43)}"
+        val material = SourceCrypto.generateRecoveryMaterial(nodeId)
+        val dataKey = SourceCrypto.base64UrlDecode(material.dataKey)
+
+        assertTrue(material.recoveryKey.matches(Regex("^[A-Za-z0-9_-]{43}$")))
+        assertTrue(material.envelope.matches(Regex("^[A-Za-z0-9_-]{80}$")))
+        assertArrayEquals(dataKey, SourceCrypto.unwrapDataKey(nodeId, material.recoveryKey, material.envelope))
+        assertThrows(Exception::class.java) {
+            SourceCrypto.unwrapDataKey("srcnode_${"x".repeat(43)}", material.recoveryKey, material.envelope)
+        }
     }
 }

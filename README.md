@@ -20,10 +20,12 @@ provides:
 
 - a LAN-only HTTPS endpoint backed by a local certificate authority;
 - localhost-only first-run administration and health dashboard;
-- temporary QR invitations and Ed25519 client pairing;
+- temporary QR invitations, Ed25519 client pairing, and administrator-approved
+  recovery of an existing user on a replacement client;
 - isolated users created together with their first key-proven client, with
   per-user quotas and a data model prepared for additional client identities;
-- opaque storage for client-encrypted snapshots;
+- opaque storage for client-encrypted snapshots, protected by a node-specific
+  recovery key held by the user;
 - authenticated chat through a local Ollama model;
 - a versioned OpenAPI contract.
 

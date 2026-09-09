@@ -55,22 +55,25 @@ export class PairingService {
     if (!Number.isSafeInteger(quotaBytes) || quotaBytes < 64 * 1024 * 1024 || quotaBytes > 16 * 1024 ** 4) {
       throw pairingError(400, 'invalid_quota', 'Quota must be between 64 MiB and 16 TiB.');
     }
-    const caCertificate = pairingCaCertificate(this.config.pairingCaCertificatePath);
-    const node = this.database.getNodeState();
-    const secret = randomBytes(32).toString('base64url');
-    const now = this.config.clock();
-    this.active = {
-      id: randomUUID(),
-      secret,
-      secretHash: tokenHash(secret),
+    return this.#createInvitation({
+      kind: 'create',
       quotaBytes,
-      caCertificate,
-      createdAt: now,
-      expiresAt: now + this.config.pairingInvitationTtlMs,
-      handshakes: new Map(),
-    };
-    this.lastResult = null;
-    return this.#publicInvitation(node);
+    });
+  }
+
+  createRecoveryInvitation(userId) {
+    if (!this.database.isInitialized()) throw pairingError(409, 'node_not_initialized', 'Node is not initialized.');
+    const user = this.database.findUserById(userId);
+    if (!user || user.disabledAt !== null) throw pairingError(404, 'user_not_found', 'The user was not found.');
+    if (!user.recoveryKeyHash || !user.recoveryEnvelope) {
+      throw pairingError(409, 'recovery_not_configured', 'The user has no recovery key.');
+    }
+    return this.#createInvitation({
+      kind: 'recover',
+      userId: user.id,
+      userDisplayName: user.displayName,
+      quotaBytes: user.quotaBytes,
+    });
   }
 
   getInvitation() {
@@ -88,6 +91,11 @@ export class PairingService {
     this.active = null;
     this.lastResult = { id, state: 'cancelled' };
     return this.lastResult;
+  }
+
+  cancelUserInvitation(userId) {
+    if (this.active?.userId !== userId) return;
+    this.cancelInvitation(this.active.id);
   }
 
   start(body) {
@@ -165,19 +173,40 @@ export class PairingService {
     const clientCredential = generateToken();
     let paired;
     try {
-      paired = this.database.createPairedUser({
-        displayName: handshake.userDisplayName,
-        quotaBytes: invitation.quotaBytes,
-        client: {
-          id: handshake.clientId,
-          displayName: handshake.clientDisplayName,
-          publicKey: handshake.clientPublicKey,
-          credentialHash: tokenHash(clientCredential),
-          protocolVersion: PAIRING_PROTOCOL_VERSION,
-        },
-        now: this.config.clock(),
-      });
+      const client = {
+        id: handshake.clientId,
+        displayName: handshake.clientDisplayName,
+        publicKey: handshake.clientPublicKey,
+        credentialHash: tokenHash(clientCredential),
+        protocolVersion: PAIRING_PROTOCOL_VERSION,
+      };
+      if (invitation.kind === 'recover') {
+        const user = this.database.findUserById(invitation.userId);
+        if (!user || !safeTokenHashEqual(body?.recoveryKey, user.recoveryKeyHash)) {
+          invitation.failedRecoveryAttempts += 1;
+          if (invitation.failedRecoveryAttempts >= 5) this.cancelInvitation(invitation.id);
+          throw pairingError(401, 'invalid_recovery_key', 'The recovery key is incorrect.');
+        }
+        paired = this.database.addRecoveredClient({
+          userId: user.id,
+          client,
+          now: this.config.clock(),
+        });
+      } else {
+        if (!validBase64Url(body?.recoveryKey, 43, 43) || !validBase64Url(body?.recoveryEnvelope, 80, 80)) {
+          throw pairingError(400, 'invalid_recovery_material', 'Recovery material is invalid.');
+        }
+        paired = this.database.createPairedUser({
+          displayName: handshake.userDisplayName,
+          quotaBytes: invitation.quotaBytes,
+          recoveryKeyHash: tokenHash(body.recoveryKey),
+          recoveryEnvelope: body.recoveryEnvelope,
+          client,
+          now: this.config.clock(),
+        });
+      }
     } catch (error) {
+      if (Number.isInteger(error.status)) throw error;
       if (String(error.message).includes('UNIQUE constraint failed: clients')) {
         throw pairingError(409, 'duplicate_client', 'This client identity is already paired.');
       }
@@ -195,13 +224,37 @@ export class PairingService {
       userId: paired.user.id,
       clientId: paired.client.id,
     };
-    return {
+    const result = {
       protocol: PAIRING_PROTOCOL_VERSION,
       nodeId: this.database.getNodeState().nodeId,
       user: { id: paired.user.id, displayName: paired.user.displayName },
       client: { id: paired.client.id, displayName: paired.client.clientDisplayName },
       clientCredential,
     };
+    if (invitation.kind === 'recover') result.recoveryEnvelope = paired.user.recoveryEnvelope;
+    return result;
+  }
+
+  #createInvitation(details) {
+    this.#expireIfNeeded();
+    if (this.active) throw pairingError(409, 'invitation_already_active', 'A pairing invitation is already active.');
+    const caCertificate = pairingCaCertificate(this.config.pairingCaCertificatePath);
+    const node = this.database.getNodeState();
+    const secret = randomBytes(32).toString('base64url');
+    const now = this.config.clock();
+    this.active = {
+      ...details,
+      id: randomUUID(),
+      secret,
+      secretHash: tokenHash(secret),
+      caCertificate,
+      createdAt: now,
+      expiresAt: now + this.config.pairingInvitationTtlMs,
+      failedRecoveryAttempts: 0,
+      handshakes: new Map(),
+    };
+    this.lastResult = null;
+    return this.#publicInvitation(node);
   }
 
   #authorizeInvitation(id, secret) {
@@ -239,9 +292,13 @@ export class PairingService {
     payload.searchParams.set('invite', this.active.id);
     payload.searchParams.set('secret', this.active.secret);
     payload.searchParams.set('expires', new Date(this.active.expiresAt).toISOString());
+    if (this.active.kind === 'recover') payload.searchParams.set('action', 'recover');
     return {
       id: this.active.id,
       state: 'active',
+      kind: this.active.kind,
+      userId: this.active.userId,
+      userDisplayName: this.active.userDisplayName,
       quotaBytes: this.active.quotaBytes,
       createdAt: new Date(this.active.createdAt).toISOString(),
       expiresAt: new Date(this.active.expiresAt).toISOString(),

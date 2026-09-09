@@ -31,7 +31,9 @@ export class SourceDatabase {
         storage_namespace TEXT NOT NULL UNIQUE,
         quota_bytes INTEGER NOT NULL CHECK (quota_bytes > 0),
         created_at INTEGER NOT NULL,
-        disabled_at INTEGER
+        disabled_at INTEGER,
+        recovery_key_hash TEXT,
+        recovery_envelope TEXT
       ) STRICT;
 
       CREATE TABLE IF NOT EXISTS clients (
@@ -62,6 +64,13 @@ export class SourceDatabase {
       CREATE INDEX IF NOT EXISTS snapshots_latest_idx
         ON snapshots(user_id, app_id, created_at DESC);
     `);
+    for (const definition of ['recovery_key_hash TEXT', 'recovery_envelope TEXT']) {
+      try {
+        this.database.exec(`ALTER TABLE users ADD COLUMN ${definition}`);
+      } catch (error) {
+        if (!String(error.message).includes('duplicate column name')) throw error;
+      }
+    }
   }
 
   close() {
@@ -106,6 +115,7 @@ export class SourceDatabase {
     return this.database.prepare(`
       SELECT u.id, u.display_name AS displayName, u.storage_namespace AS storageNamespace,
              u.quota_bytes AS quotaBytes, u.created_at AS createdAt, u.disabled_at AS disabledAt,
+             (u.recovery_key_hash IS NOT NULL AND u.recovery_envelope IS NOT NULL) AS recoveryConfigured,
              COALESCE((SELECT SUM(s.byte_count) FROM snapshots s WHERE s.user_id = u.id), 0) AS storageUsedBytes,
              (SELECT COUNT(*) FROM clients c WHERE c.user_id = u.id AND c.revoked_at IS NULL) AS clientCount
       FROM users u ORDER BY u.created_at, u.id
@@ -115,7 +125,8 @@ export class SourceDatabase {
   findUserById(id) {
     return this.database.prepare(`
       SELECT id, display_name AS displayName, storage_namespace AS storageNamespace,
-             quota_bytes AS quotaBytes, created_at AS createdAt, disabled_at AS disabledAt
+             quota_bytes AS quotaBytes, created_at AS createdAt, disabled_at AS disabledAt,
+             recovery_key_hash AS recoveryKeyHash, recovery_envelope AS recoveryEnvelope
       FROM users WHERE id = ?
     `).get(id);
   }
@@ -139,15 +150,17 @@ export class SourceDatabase {
     `).get(credentialHash);
   }
 
-  createPairedUser({ displayName, quotaBytes, client, now }) {
+  createPairedUser({ displayName, quotaBytes, recoveryKeyHash = null, recoveryEnvelope = null, client, now }) {
     const userId = randomUUID();
     const storageNamespace = randomUUID();
     this.database.exec('BEGIN IMMEDIATE');
     try {
       this.database.prepare(`
-        INSERT INTO users (id, display_name, storage_namespace, quota_bytes, created_at)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(userId, displayName, storageNamespace, quotaBytes, now);
+        INSERT INTO users (
+          id, display_name, storage_namespace, quota_bytes, created_at,
+          recovery_key_hash, recovery_envelope
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(userId, displayName, storageNamespace, quotaBytes, now, recoveryKeyHash, recoveryEnvelope);
       this.database.prepare(`
         INSERT INTO clients (
           id, user_id, display_name, public_key, credential_hash,
@@ -160,6 +173,62 @@ export class SourceDatabase {
       throw error;
     }
     return { user: this.findUserById(userId), client: this.findClientById(client.id) };
+  }
+
+  addRecoveredClient({ userId, client, now }) {
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      const user = this.findUserById(userId);
+      if (!user || user.disabledAt !== null) throw new Error('Recovery user is unavailable');
+      this.database.prepare(`
+        UPDATE clients SET revoked_at = ?
+        WHERE user_id = ? AND revoked_at IS NULL
+      `).run(now, userId);
+      this.database.prepare(`
+        INSERT INTO clients (
+          id, user_id, display_name, public_key, credential_hash,
+          protocol_version, paired_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(client.id, userId, client.displayName, client.publicKey, client.credentialHash, client.protocolVersion, now);
+      this.database.exec('COMMIT');
+    } catch (error) {
+      this.database.exec('ROLLBACK');
+      throw error;
+    }
+    return { user: this.findUserById(userId), client: this.findClientById(client.id) };
+  }
+
+  configureRecovery({ userId, recoveryKeyHash, recoveryEnvelope }) {
+    const result = this.database.prepare(`
+      UPDATE users SET recovery_key_hash = ?, recovery_envelope = ?
+      WHERE id = ? AND disabled_at IS NULL AND recovery_key_hash IS NULL AND recovery_envelope IS NULL
+    `).run(recoveryKeyHash, recoveryEnvelope, userId);
+    if (result.changes === 1) return true;
+    const existing = this.findUserById(userId);
+    if (!existing || existing.disabledAt !== null || existing.recoveryKeyHash !== recoveryKeyHash) return false;
+    this.database.prepare(`
+      UPDATE users SET recovery_envelope = ? WHERE id = ?
+    `).run(recoveryEnvelope, userId);
+    return true;
+  }
+
+  disableUser(userId, now) {
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      const user = this.findUserById(userId);
+      if (!user) throw Object.assign(new Error('User not found'), { code: 'user_not_found' });
+      this.database.prepare('UPDATE users SET disabled_at = ? WHERE id = ?').run(now, userId);
+      this.database.prepare('UPDATE clients SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL').run(now, userId);
+      this.database.exec('COMMIT');
+      return user;
+    } catch (error) {
+      this.database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  deleteUser(userId) {
+    return this.database.prepare('DELETE FROM users WHERE id = ?').run(userId).changes === 1;
   }
 
   touchClient(id, now) {

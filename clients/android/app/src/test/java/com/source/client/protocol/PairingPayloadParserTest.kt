@@ -24,6 +24,8 @@ class PairingPayloadParserTest {
         assertEquals(caCertificate, invitation.tlsCaCertificate)
         assertEquals("Plattservern hemma", invitation.nodeName)
         assertEquals("https://192.168.1.10:8443/api/v1/pairing", invitation.pairingEndpoint)
+        assertEquals(false, invitation.recovery)
+        assertEquals(true, PairingPayloadParser.parse("${payload()}&action=recover", now).recovery)
     }
 
     @Test
@@ -42,6 +44,7 @@ class PairingPayloadParserTest {
         assertThrows(PairingPayloadException::class.java) { PairingPayloadParser.parse("https://example.com", now) }
         assertThrows(PairingPayloadException::class.java) { PairingPayloadParser.parse("${payload()}&secret=again", now) }
         assertThrows(PairingPayloadException::class.java) { PairingPayloadParser.parse("${payload()}&extra=value", now) }
+        assertThrows(PairingPayloadException::class.java) { PairingPayloadParser.parse("${payload()}&action=delete", now) }
     }
 
     @Test

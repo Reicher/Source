@@ -40,7 +40,8 @@ admin password hash, and creation time. Private key and password hash are never
 returned by an API. The SQLite state file is created with mode `0600`.
 
 `users` and `clients` are separate. A user has a random ID, random storage
-namespace, byte-valued quota, display name, and creation time. Each client has
+namespace, byte-valued quota, display name, creation time, recovery-key hash,
+and an encrypted node-data-key envelope. Each client has
 a key-derived stable ID, Ed25519 public key, display name, hashed API
 credential, timestamps, and revocation state. This permits more clients to be
 attached to a user later without changing the data model.
@@ -72,6 +73,8 @@ source://pair?v=1&node_id=...&node_key=...&ca=...&name=...&endpoint=...&invite=.
 - `invite`: invitation UUID
 - `secret`: one-time 256-bit base64url secret
 - `expires`: ISO 8601 expiry
+- `action=recover`: present only for an administrator-approved recovery of an
+  existing user
 
 The client treats a scanned QR as a secret, validates its version, expiry, URL
 scheme/host, Node ID derived from `node_key`, and the CA certificate. It uses
@@ -138,7 +141,9 @@ exact `signingPayload` bytes with its own Ed25519 private key.
   "invitationId": "UUID from QR",
   "invitationSecret": "secret from QR",
   "handshakeId": "UUID from start",
-  "signature": "base64url client Ed25519 signature"
+  "signature": "base64url client Ed25519 signature",
+  "recoveryKey": "256-bit base64url recovery key",
+  "recoveryEnvelope": "node data key encrypted by the recovery key"
 }
 ```
 
@@ -148,6 +153,17 @@ transaction. Only after it commits does the service clear and consume the
 invitation. The response contains user/client metadata and a 256-bit
 `clientCredential`, returned once; only its SHA-256 hash is stored. The client
 uses it as `Authorization: Bearer ...` for normal Source API calls.
+
+For a recovery invitation, the client sends the recovery key but not a new
+envelope. The Node verifies its stored hash, revokes the user's old clients,
+creates the replacement client, and returns the existing encrypted envelope.
+The client unwraps the shared node data key locally and uses it to decrypt the
+user's existing snapshots. Five incorrect keys cancel the invitation.
+
+Clients paired before recovery support can configure it once through
+`POST /api/v1/recovery/setup`. The Android client does this automatically after
+first synchronizing an older snapshot and then uploads a snapshot encrypted by
+the new node-specific data key.
 
 ## Discovery and reconnect proof
 
@@ -201,10 +217,14 @@ a quota; it does not persist a user or client until pairing completes:
 - `GET /admin/api/pairing-invitations/active`
 - `DELETE /admin/api/pairing-invitations/{id}`
 - `GET /admin/api/pairing-invitations/{id}/qr.svg`
+- `POST /admin/api/users/{id}/recovery-invitations`
+- `DELETE /admin/api/users/{id}`
 
 The dashboard contains administrative metadata and bounded system-health
 values only. It does not expose storage namespaces, ciphertext, private keys,
-password hashes, invitation secrets as text, or client credentials.
+password hashes, recovery-key hashes or envelopes, invitation secrets as text,
+or client credentials. Deletion requires the exact display name in the request
+body, revokes all clients, and removes the user's snapshots and database rows.
 
 The LAN API is specified in `contracts/source-api.openapi.yml`. Admin routes
 are deliberately not part of that LAN contract.

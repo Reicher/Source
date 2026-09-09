@@ -23,7 +23,8 @@ object PairingPayloadParser {
             fail("Det här är ingen giltig Source-kod.")
         }
         val values = parseQuery(uri.rawQuery ?: fail("Source-koden saknar innehåll."))
-        if (values.keys != required || values.values.any { it.size != 1 }) fail("Source-koden har oväntade fält.")
+        val allowedKeys = if (values.containsKey("action")) required + "action" else required
+        if (values.keys != allowedKeys || values.values.any { it.size != 1 }) fail("Source-koden har oväntade fält.")
         fun field(name: String) = values.getValue(name).single()
 
         val version = field("v").toIntOrNull()
@@ -45,7 +46,11 @@ object PairingPayloadParser {
         val expires = runCatching { Instant.parse(field("expires")).toEpochMilli() }
             .getOrElse { fail("Inbjudans sluttid är ogiltig.") }
         if (expires <= nowMillis) fail("Inbjudan har gått ut.")
-        return PairingInvitation(version, nodeId, nodeKey, caCertificate, name, endpoint, invitationId, secret, expires)
+        val recovery = values["action"]?.singleOrNull()?.let {
+            if (it != "recover") fail("Source-koden har en ogiltig åtgärd.")
+            true
+        } ?: false
+        return PairingInvitation(version, nodeId, nodeKey, caCertificate, name, endpoint, invitationId, secret, expires, recovery)
     }
 
     private fun validateCaCertificate(encoded: String, nowMillis: Long): String {

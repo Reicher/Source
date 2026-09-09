@@ -7,6 +7,7 @@ import java.security.MessageDigest
 import java.security.PrivateKey
 import java.security.PublicKey
 import java.security.Signature
+import java.security.SecureRandom
 import java.security.spec.PKCS8EncodedKeySpec
 import java.security.spec.X509EncodedKeySpec
 import java.util.Base64
@@ -19,6 +20,7 @@ import javax.crypto.spec.SecretKeySpec
 object SourceCrypto {
     const val PBKDF2_ITERATIONS = 310_000
     private const val GCM_TAG_BITS = 128
+    private val random = SecureRandom()
 
     fun generateClientKeyPair(): KeyPair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
 
@@ -72,4 +74,54 @@ object SourceCrypto {
     fun sha256(value: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(value)
     fun base64Url(value: ByteArray): String = Base64.getUrlEncoder().withoutPadding().encodeToString(value)
     fun base64UrlDecode(value: String): ByteArray = Base64.getUrlDecoder().decode(value)
+
+    fun generateRecoveryMaterial(nodeId: String): RecoveryMaterial {
+        val recoveryKey = base64Url(ByteArray(32).also(random::nextBytes))
+        val dataKey = ByteArray(32).also(random::nextBytes)
+        return RecoveryMaterial(recoveryKey, base64Url(dataKey), wrapDataKey(nodeId, recoveryKey, dataKey)).also {
+            dataKey.fill(0)
+        }
+    }
+
+    fun wrapDataKey(nodeId: String, recoveryKey: String, dataKey: ByteArray): String {
+        require(recoveryKey.matches(Regex("^[A-Za-z0-9_-]{43}$")))
+        require(dataKey.size == 32)
+        val wrappingKey = recoveryWrappingKey(nodeId, recoveryKey)
+        val nonce = ByteArray(12).also(random::nextBytes)
+        val ciphertext = try {
+            encrypt(wrappingKey, dataKey, nonce)
+        } finally {
+            wrappingKey.fill(0)
+        }
+        return base64Url(nonce + ciphertext)
+    }
+
+    fun unwrapDataKey(nodeId: String, recoveryKey: String, envelope: String): ByteArray {
+        require(recoveryKey.matches(Regex("^[A-Za-z0-9_-]{43}$")))
+        val bytes = base64UrlDecode(envelope)
+        require(bytes.size == 60)
+        val wrappingKey = recoveryWrappingKey(nodeId, recoveryKey)
+        val nonce = bytes.copyOfRange(0, 12)
+        val ciphertext = bytes.copyOfRange(12, bytes.size)
+        return try {
+            decrypt(wrappingKey, ciphertext, nonce).also {
+                require(it.size == 32)
+            }
+        } finally {
+            wrappingKey.fill(0)
+            nonce.fill(0)
+            ciphertext.fill(0)
+            bytes.fill(0)
+        }
+    }
+
+    private fun recoveryWrappingKey(nodeId: String, recoveryKey: String): ByteArray = sha256(
+        "source-recovery-v1\n$nodeId\n$recoveryKey".toByteArray(Charsets.UTF_8),
+    )
 }
+
+data class RecoveryMaterial(
+    val recoveryKey: String,
+    val dataKey: String,
+    val envelope: String,
+)

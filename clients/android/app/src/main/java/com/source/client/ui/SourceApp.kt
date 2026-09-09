@@ -28,6 +28,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -61,6 +63,7 @@ import com.source.client.model.AiSelection
 import com.source.client.model.ChatMessage
 import com.source.client.model.ChatRole
 import com.source.client.model.NodeStatus
+import com.source.client.model.VaultProfile
 
 private val Ink = Color(0xFF17201D)
 private val Paper = Color(0xFFFAF9F6)
@@ -80,16 +83,19 @@ fun SourceApp(screen: AppScreen, viewModel: SourceViewModel) {
     ) {
         Surface(Modifier.fillMaxSize()) {
             when (screen) {
-                is AppScreen.Setup -> SetupScreen(screen, viewModel::createIdentity)
-                is AppScreen.Locked -> UnlockScreen(screen, viewModel::unlock)
+                is AppScreen.Accounts -> AccountsScreen(screen, viewModel::selectProfile, viewModel::showCreateIdentity)
+                is AppScreen.Setup -> SetupScreen(screen, viewModel::createIdentity, viewModel::showAccounts)
+                is AppScreen.Locked -> UnlockScreen(screen, viewModel::unlock, viewModel::showAccounts)
                 is AppScreen.Main -> MainScreen(
                     screen,
                     viewModel::scan,
                     viewModel::retry,
                     viewModel::selectAi,
                     viewModel::sendMessage,
+                    viewModel::logout,
                 )
                 is AppScreen.Scanner -> ScannerPermissionScreen(screen, viewModel::onQrScanned, viewModel::cancelScanner)
+                is AppScreen.Recovery -> RecoveryScreen(screen, viewModel::recover, viewModel::cancelRecovery)
                 is AppScreen.Pairing -> PairingScreen(screen.name)
             }
         }
@@ -97,15 +103,49 @@ fun SourceApp(screen: AppScreen, viewModel: SourceViewModel) {
 }
 
 @Composable
-private fun SetupScreen(state: AppScreen.Setup, submit: (String, String, String) -> Unit) {
+private fun AccountsScreen(
+    state: AppScreen.Accounts,
+    select: (VaultProfile) -> Unit,
+    create: () -> Unit,
+) {
+    SourceColumn {
+        Wordmark()
+        Spacer(Modifier.height(40.dp))
+        Text("Välj användare", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium)
+        Text("Varje användare har separat krypterad data på telefonen.", color = Ink.copy(alpha = .64f))
+        Spacer(Modifier.height(24.dp))
+        LazyColumn(
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            items(state.profiles, key = VaultProfile::id) { profile ->
+                OutlinedButton(
+                    onClick = { select(profile) },
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                ) {
+                    Text(profile.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Button(onClick = create, modifier = Modifier.fillMaxWidth()) { Text("Skapa ny användare") }
+    }
+}
+
+@Composable
+private fun SetupScreen(
+    state: AppScreen.Setup,
+    submit: (String, String, String) -> Unit,
+    cancel: () -> Unit,
+) {
     var name by rememberSaveable { mutableStateOf("") }
     var password by rememberSaveable { mutableStateOf("") }
     var confirmation by rememberSaveable { mutableStateOf("") }
     SourceColumn {
         Wordmark()
         Spacer(Modifier.height(40.dp))
-        Text("Skapa din lokala identitet", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium)
-        Text("Inget konto skapas på internet. Identiteten stannar på den här enheten.", color = Ink.copy(alpha = .64f))
+        Text("Skapa användare", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium)
+        Text("Användaren och dess lösenord sparas krypterat på telefonen. Parkoppla med en server senare.", color = Ink.copy(alpha = .64f))
         Spacer(Modifier.height(24.dp))
         OutlinedTextField(name, { name = it }, Modifier.fillMaxWidth(), label = { Text("Användarnamn") }, singleLine = true)
         OutlinedTextField(
@@ -121,17 +161,18 @@ private fun SetupScreen(state: AppScreen.Setup, submit: (String, String, String)
             onClick = { submit(name, password, confirmation); password = ""; confirmation = "" },
             enabled = !state.busy,
             modifier = Modifier.fillMaxWidth(),
-        ) { if (state.busy) SmallProgress() else Text("Skapa identitet") }
+        ) { if (state.busy) SmallProgress() else Text("Skapa användare") }
+        if (state.canCancel) TextButton(onClick = cancel, enabled = !state.busy) { Text("Avbryt") }
     }
 }
 
 @Composable
-private fun UnlockScreen(state: AppScreen.Locked, submit: (String) -> Unit) {
+private fun UnlockScreen(state: AppScreen.Locked, submit: (String) -> Unit, switchUser: () -> Unit) {
     var password by rememberSaveable { mutableStateOf("") }
     SourceColumn {
         Wordmark()
         Spacer(Modifier.height(56.dp))
-        Text("Lås upp Source", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium)
+        Text("Logga in som ${state.profile.displayName}", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(20.dp))
         OutlinedTextField(
             password, { password = it }, Modifier.fillMaxWidth(), label = { Text("Lösenord") }, singleLine = true,
@@ -139,8 +180,9 @@ private fun UnlockScreen(state: AppScreen.Locked, submit: (String) -> Unit) {
         )
         state.error?.let { ErrorText(it) }
         Button(onClick = { submit(password); password = "" }, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {
-            if (state.busy) SmallProgress() else Text("Lås upp")
+            if (state.busy) SmallProgress() else Text("Logga in")
         }
+        TextButton(onClick = switchUser, enabled = !state.busy) { Text("Byt användare") }
     }
 }
 
@@ -151,8 +193,10 @@ private fun MainScreen(
     retry: () -> Unit,
     selectAi: (AiSelection) -> Unit,
     send: (String) -> Unit,
+    logout: () -> Unit,
 ) {
     var draft by rememberSaveable { mutableStateOf("") }
+    var recoveryKeyToShow by rememberSaveable { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
     LaunchedEffect(state.chat.messages.size) {
         if (state.chat.messages.isNotEmpty()) listState.animateScrollToItem(state.chat.messages.lastIndex)
@@ -169,11 +213,26 @@ private fun MainScreen(
             Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            Text("Source", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.weight(1f))
+            OutlinedButton(onClick = logout, modifier = Modifier.widthIn(max = 240.dp).heightIn(min = 48.dp)) {
+                Text("${state.userDisplayName} · Logga ut", maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             NodeStatusBar(state.status, connect, retry, Modifier.weight(1f))
             Spacer(Modifier.width(8.dp))
             AiPicker(state.status, state.chat.selection, selectAi)
         }
         Spacer(Modifier.height(12.dp))
+        val recoveryKey = (state.status as? NodeStatus.Connected)?.node?.recoveryKey
+        if (recoveryKey != null) {
+            TextButton(onClick = { recoveryKeyToShow = recoveryKey }) { Text("Visa återställningsnyckel") }
+        }
         if (state.chat.messages.isEmpty()) {
             Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
                 Text("Vad vill du prata om?", color = Ink.copy(alpha = .55f))
@@ -213,6 +272,19 @@ private fun MainScreen(
                 modifier = Modifier.height(56.dp),
             ) { Text("Skicka") }
         }
+    }
+    recoveryKeyToShow?.let { recoveryKey ->
+        AlertDialog(
+            onDismissRequest = { recoveryKeyToShow = null },
+            title = { Text("Återställningsnyckel") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("Spara nyckeln säkert. Den behövs om alla anslutna enheter försvinner.")
+                    SelectionContainer { Text(recoveryKey) }
+                }
+            },
+            confirmButton = { TextButton(onClick = { recoveryKeyToShow = null }) { Text("Klar") } },
+        )
     }
 }
 
@@ -362,6 +434,40 @@ private fun PairingScreen(name: String) {
     SourceColumn(vertical = Arrangement.Center) {
         CircularProgressIndicator(color = Moss)
         Text("Ansluter till $name…", style = MaterialTheme.typography.headlineSmall)
+    }
+}
+
+@Composable
+private fun RecoveryScreen(
+    state: AppScreen.Recovery,
+    recover: (String) -> Unit,
+    cancel: () -> Unit,
+) {
+    var recoveryKey by rememberSaveable { mutableStateOf("") }
+    SourceColumn(vertical = Arrangement.Center) {
+        Wordmark()
+        Spacer(Modifier.height(32.dp))
+        Text("Återställ användare", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium)
+        Text("Ange återställningsnyckeln för ${state.invitation.nodeName}.", color = Ink.copy(alpha = .64f))
+        Spacer(Modifier.height(20.dp))
+        OutlinedTextField(
+            recoveryKey,
+            { recoveryKey = it },
+            Modifier.fillMaxWidth(),
+            label = { Text("Återställningsnyckel") },
+            singleLine = true,
+        )
+        state.error?.let { ErrorText(it) }
+        Button(
+            onClick = {
+                val submittedKey = recoveryKey
+                recoveryKey = ""
+                recover(submittedKey)
+            },
+            enabled = recoveryKey.isNotBlank() && !state.busy,
+            modifier = Modifier.fillMaxWidth(),
+        ) { if (state.busy) SmallProgress() else Text("Återställ") }
+        TextButton(onClick = cancel, enabled = !state.busy) { Text("Avbryt") }
     }
 }
 
