@@ -20,7 +20,6 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -29,12 +28,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -59,7 +61,6 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import com.source.client.model.AiSelection
 import com.source.client.model.ChatMessage
 import com.source.client.model.ChatRole
 import com.source.client.model.NodeStatus
@@ -90,7 +91,6 @@ fun SourceApp(screen: AppScreen, viewModel: SourceViewModel) {
                     screen,
                     viewModel::scan,
                     viewModel::retry,
-                    viewModel::selectAi,
                     viewModel::sendMessage,
                     viewModel::logout,
                 )
@@ -191,11 +191,11 @@ private fun MainScreen(
     state: AppScreen.Main,
     connect: (com.source.client.model.DiscoveredNode) -> Unit,
     retry: () -> Unit,
-    selectAi: (AiSelection) -> Unit,
     send: (String) -> Unit,
     logout: () -> Unit,
 ) {
     var draft by rememberSaveable { mutableStateOf("") }
+    var settingsOpen by rememberSaveable { mutableStateOf(false) }
     var recoveryKeyToShow by rememberSaveable { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
     LaunchedEffect(state.chat.messages.size) {
@@ -206,37 +206,23 @@ private fun MainScreen(
             .fillMaxSize()
             .statusBarsPadding()
             .navigationBarsPadding()
-            .padding(horizontal = 20.dp, vertical = 16.dp),
+            .padding(horizontal = 20.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Row(
-            Modifier.fillMaxWidth(),
+            Modifier.fillMaxWidth().heightIn(min = 64.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("Source", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+            Text("Source", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.weight(1f))
-            OutlinedButton(onClick = logout, modifier = Modifier.widthIn(max = 240.dp).heightIn(min = 48.dp)) {
-                Text("${state.userDisplayName} · Logga ut", maxLines = 1, overflow = TextOverflow.Ellipsis)
+            IconButton(onClick = { settingsOpen = true }) {
+                Icon(Icons.Outlined.Settings, contentDescription = "Inställningar", tint = Ink.copy(alpha = .78f))
             }
         }
-        Spacer(Modifier.height(10.dp))
-        Row(
-            Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            NodeStatusBar(state.status, connect, retry, Modifier.weight(1f))
-            Spacer(Modifier.width(8.dp))
-            AiPicker(state.status, state.chat.selection, selectAi)
-        }
+        NodeStatusSummary(state.status, connect, retry, Modifier.fillMaxWidth())
         Spacer(Modifier.height(12.dp))
-        val recoveryKey = (state.status as? NodeStatus.Connected)?.node?.recoveryKey
-        if (recoveryKey != null) {
-            TextButton(onClick = { recoveryKeyToShow = recoveryKey }) { Text("Visa återställningsnyckel") }
-        }
         if (state.chat.messages.isEmpty()) {
-            Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                Text("Vad vill du prata om?", color = Ink.copy(alpha = .55f))
-            }
+            Spacer(Modifier.weight(1f))
         } else {
             LazyColumn(
                 state = listState,
@@ -270,8 +256,25 @@ private fun MainScreen(
                 onClick = { send(draft); draft = "" },
                 enabled = draft.isNotBlank() && !state.chat.busy,
                 modifier = Modifier.height(56.dp),
+                shape = RoundedCornerShape(14.dp),
             ) { Text("Skicka") }
         }
+        Spacer(Modifier.height(12.dp))
+    }
+    if (settingsOpen) {
+        SettingsDialog(
+            userDisplayName = state.userDisplayName,
+            recoveryKey = (state.status as? NodeStatus.Connected)?.node?.recoveryKey,
+            onShowRecoveryKey = {
+                settingsOpen = false
+                recoveryKeyToShow = it
+            },
+            onLogout = {
+                settingsOpen = false
+                logout()
+            },
+            onDismiss = { settingsOpen = false },
+        )
     }
     recoveryKeyToShow?.let { recoveryKey ->
         AlertDialog(
@@ -289,29 +292,46 @@ private fun MainScreen(
 }
 
 @Composable
-private fun AiPicker(status: NodeStatus, selection: AiSelection, select: (AiSelection) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    val connectedNode = (status as? NodeStatus.Connected)?.node
-    val label = when (selection) {
-        AiSelection.AUTO -> "Auto"
-        AiSelection.THIS_DEVICE -> "Local"
-        AiSelection.NODE -> "Node"
-    }
-    Box {
-        OutlinedButton(
-            onClick = { expanded = true },
-            modifier = Modifier.widthIn(min = 120.dp, max = 160.dp).heightIn(min = 48.dp),
-        ) {
-            Text("AI: $label", maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            DropdownMenuItem(text = { Text("Auto") }, onClick = { select(AiSelection.AUTO); expanded = false })
-            DropdownMenuItem(text = { Text("Local") }, onClick = { select(AiSelection.THIS_DEVICE); expanded = false })
-            connectedNode?.let {
-                DropdownMenuItem(text = { Text("Node") }, onClick = { select(AiSelection.NODE); expanded = false })
+private fun SettingsDialog(
+    userDisplayName: String,
+    recoveryKey: String?,
+    onShowRecoveryKey: (String) -> Unit,
+    onLogout: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Inställningar") },
+        text = {
+            Column {
+                Text(
+                    userDisplayName,
+                    color = Ink.copy(alpha = .6f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(16.dp))
+                HorizontalDivider(color = Ink.copy(alpha = .1f))
+                recoveryKey?.let { key ->
+                    TextButton(
+                        onClick = { onShowRecoveryKey(key) },
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                    ) {
+                        Text("Visa återställningsnyckel", modifier = Modifier.fillMaxWidth())
+                    }
+                }
+                TextButton(
+                    onClick = onLogout,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                ) {
+                    Text("Logga ut", modifier = Modifier.fillMaxWidth())
+                }
             }
-        }
-    }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Klar") }
+        },
+    )
 }
 
 @Composable
@@ -322,21 +342,27 @@ private fun ChatBubble(message: ChatMessage) {
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
     ) {
         Surface(
-            modifier = Modifier.fillMaxWidth(.86f),
-            shape = RoundedCornerShape(16.dp),
-            color = if (isUser) Moss else Ink.copy(alpha = .055f),
+            modifier = Modifier.fillMaxWidth(if (isUser) .82f else .88f),
+            shape = RoundedCornerShape(
+                topStart = 18.dp,
+                topEnd = 18.dp,
+                bottomStart = if (isUser) 18.dp else 5.dp,
+                bottomEnd = if (isUser) 5.dp else 18.dp,
+            ),
+            color = if (isUser) Moss.copy(alpha = .1f) else Ink.copy(alpha = .05f),
         ) {
             Text(
                 message.content,
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
-                color = if (isUser) Color.White else Ink,
+                modifier = Modifier.padding(horizontal = 15.dp, vertical = 12.dp),
+                color = Ink,
+                style = MaterialTheme.typography.bodyLarge,
             )
         }
     }
 }
 
 @Composable
-private fun NodeStatusBar(
+private fun NodeStatusSummary(
     status: NodeStatus,
     connect: (com.source.client.model.DiscoveredNode) -> Unit,
     retry: () -> Unit,
@@ -344,13 +370,13 @@ private fun NodeStatusBar(
 ) {
     val node = (status as? NodeStatus.Found)?.nodes?.firstOrNull()
     val label = when (status) {
-        NodeStatus.Searching -> "Node · Söker…"
-        NodeStatus.NoneFound -> "Node · Offline"
+        NodeStatus.Searching -> "This device"
+        NodeStatus.NoneFound -> "This device"
         is NodeStatus.Found -> node?.displayName ?: "Node"
-        is NodeStatus.Connecting -> "${status.name}…"
+        is NodeStatus.Connecting -> status.name
         is NodeStatus.Connected -> status.node.displayName
-        is NodeStatus.PairedOffline -> "${status.node.displayName} · Offline"
-        is NodeStatus.Error -> "Node · Fel"
+        is NodeStatus.PairedOffline -> "This device"
+        is NodeStatus.Error -> "This device"
     }
     val indicatorColor = when (status) {
         is NodeStatus.Connected -> Moss
@@ -359,34 +385,28 @@ private fun NodeStatusBar(
         else -> Ink.copy(alpha = .34f)
     }
 
-    Surface(
-        modifier = modifier.heightIn(min = 48.dp),
-        shape = RoundedCornerShape(16.dp),
-        color = Ink.copy(alpha = .045f),
+    Row(
+        modifier = modifier.heightIn(min = 32.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (status is NodeStatus.Searching || status is NodeStatus.Connecting) {
-                CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp, color = Moss)
-            } else {
-                Box(Modifier.size(9.dp).background(indicatorColor, CircleShape))
-            }
-            Spacer(Modifier.width(10.dp))
-            Text(
-                text = label,
-                modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (status is NodeStatus.Connected) Moss else Ink.copy(alpha = .78f),
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            when {
-                node != null -> TextButton(onClick = { connect(node) }) { Text("Anslut") }
-                status is NodeStatus.Error && status.canRetry -> TextButton(onClick = retry) { Text("Försök") }
-            }
+        if (status is NodeStatus.Searching || status is NodeStatus.Connecting) {
+            CircularProgressIndicator(Modifier.size(9.dp), strokeWidth = 1.5.dp, color = Moss)
+        } else {
+            Box(Modifier.size(8.dp).background(indicatorColor, CircleShape))
+        }
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = label,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.labelLarge,
+            color = if (status is NodeStatus.Connected) Moss else Ink.copy(alpha = .58f),
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        when {
+            node != null -> TextButton(onClick = { connect(node) }) { Text("Anslut") }
+            status is NodeStatus.Error && status.canRetry -> TextButton(onClick = retry) { Text("Försök igen") }
         }
     }
 }
