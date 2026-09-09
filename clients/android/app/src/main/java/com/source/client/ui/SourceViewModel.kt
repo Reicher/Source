@@ -31,6 +31,9 @@ sealed interface AppScreen {
     data class Pairing(val name: String) : AppScreen
 }
 
+internal fun keepActiveConnectionStatus(status: NodeStatus, connectionAttemptActive: Boolean): Boolean =
+    status is NodeStatus.Connecting && connectionAttemptActive
+
 class SourceViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as SourceClientApplication
     private val _screen = MutableStateFlow<AppScreen>(AppScreen.Loading)
@@ -198,6 +201,8 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             authenticate(candidate.first, candidate.second)
             return
         }
+        val currentStatus = (_screen.value as? AppScreen.Main)?.status
+        if (currentStatus != null && keepActiveConnectionStatus(currentStatus, connectJob?.isActive == true)) return
         heartbeatJob?.cancel()
         _screen.value = AppScreen.Main(
             when {
@@ -228,14 +233,15 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
-                _screen.value = AppScreen.Main(NodeStatus.PairedOffline(trusted))
                 if (foreground && attempt < 5) {
                     delay((1L shl attempt).coerceAtMost(16) * 1_000)
                     connectJob = null
                     if (app.nodeDiscovery.nodes.value.any { it.serviceName == discovered.serviceName }) {
                         authenticate(discovered, trusted, attempt + 1)
+                        return@launch
                     }
                 }
+                _screen.value = AppScreen.Main(NodeStatus.PairedOffline(trusted))
             }
         }
     }

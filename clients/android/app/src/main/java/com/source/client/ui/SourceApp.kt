@@ -9,11 +9,17 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
@@ -24,6 +30,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -38,6 +45,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.camera.core.ExperimentalGetImage
@@ -122,30 +130,70 @@ private fun UnlockScreen(state: AppScreen.Locked, submit: (String) -> Unit) {
 
 @Composable
 private fun MainScreen(status: NodeStatus, connect: (com.source.client.model.DiscoveredNode) -> Unit, retry: () -> Unit) {
-    SourceColumn(vertical = Arrangement.Center) {
-        Wordmark()
-        Spacer(Modifier.height(52.dp))
-        when (status) {
-            NodeStatus.Searching -> {
-                CircularProgressIndicator(color = Moss)
-                Text("Söker efter Source Node…", color = Ink.copy(alpha = .64f))
+    Column(
+        Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        NodeStatusBar(status, connect, retry)
+        Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+            Wordmark()
+        }
+    }
+}
+
+@Composable
+private fun NodeStatusBar(
+    status: NodeStatus,
+    connect: (com.source.client.model.DiscoveredNode) -> Unit,
+    retry: () -> Unit,
+) {
+    val node = (status as? NodeStatus.Found)?.nodes?.firstOrNull()
+    val label = when (status) {
+        NodeStatus.Searching -> "Söker efter Source Node…"
+        NodeStatus.NoneFound -> "Ingen Source Node hittades"
+        is NodeStatus.Found -> "${node?.displayName ?: "Source Node"} · Hittades"
+        is NodeStatus.Connecting -> "${status.name} · Ansluter…"
+        is NodeStatus.Connected -> "${status.node.displayName} · Ansluten"
+        is NodeStatus.PairedOffline -> "${status.node.displayName} · Inte tillgänglig"
+        is NodeStatus.Error -> status.message
+    }
+    val indicatorColor = when (status) {
+        is NodeStatus.Connected -> Moss
+        is NodeStatus.Error -> MaterialTheme.colorScheme.error
+        is NodeStatus.Found -> Color(0xFF9A6A24)
+        else -> Ink.copy(alpha = .34f)
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+        shape = RoundedCornerShape(16.dp),
+        color = Ink.copy(alpha = .045f),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (status is NodeStatus.Searching || status is NodeStatus.Connecting) {
+                CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp, color = Moss)
+            } else {
+                Box(Modifier.size(9.dp).background(indicatorColor, CircleShape))
             }
-            NodeStatus.NoneFound -> StatusText("Ingen Source Node hittades", "Source fungerar lokalt även utan en nod.")
-            is NodeStatus.Found -> {
-                val node = status.nodes.first()
-                StatusText("Source Node hittades", node.displayName)
-                Spacer(Modifier.height(12.dp))
-                Button(onClick = { connect(node) }) { Text("Anslut") }
-            }
-            is NodeStatus.Connecting -> {
-                CircularProgressIndicator(color = Moss)
-                StatusText("Ansluter…", status.name)
-            }
-            is NodeStatus.Connected -> StatusText("Ansluten", status.node.displayName, connected = true)
-            is NodeStatus.PairedOffline -> StatusText("Source Node är inte tillgänglig", status.node.displayName)
-            is NodeStatus.Error -> {
-                StatusText("Det gick inte att ansluta", status.message)
-                if (status.canRetry) OutlinedButton(onClick = retry) { Text("Försök igen") }
+            Spacer(Modifier.width(10.dp))
+            Text(
+                text = label,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (status is NodeStatus.Connected) Moss else Ink.copy(alpha = .78f),
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            when {
+                node != null -> TextButton(onClick = { connect(node) }) { Text("Anslut") }
+                status is NodeStatus.Error && status.canRetry -> TextButton(onClick = retry) { Text("Försök igen") }
             }
         }
     }
@@ -209,12 +257,6 @@ private fun SourceColumn(vertical: Arrangement.Vertical = Arrangement.Top, conte
 }
 
 @Composable private fun Wordmark() = Text("Source", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.SemiBold)
-
-@Composable
-private fun StatusText(title: String, detail: String, connected: Boolean = false) {
-    Text(title, style = MaterialTheme.typography.headlineSmall, color = if (connected) Moss else Ink, fontWeight = FontWeight.Medium)
-    Text(detail, color = Ink.copy(alpha = .64f))
-}
 
 @Composable private fun ErrorText(message: String) = Text(message, color = MaterialTheme.colorScheme.error)
 @Composable private fun SmallProgress() = CircularProgressIndicator(Modifier.height(20.dp), strokeWidth = 2.dp, color = Color.White)
