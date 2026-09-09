@@ -12,5 +12,7 @@ untrusted routing hint; paired clients use the authenticated identity-challenge
 operation in the OpenAPI contract to verify the Node's permanent Ed25519 key
 after every rediscovery.
 
-The generated local CA certificate is an installation artifact, not part of
-the API contract. `scripts/export-ca.sh` writes it to `artifacts/source-node-ca.crt`.
+The generated local CA certificate is an installation artifact, not a global
+client prerequisite. `scripts/export-ca.sh` writes it to
+`artifacts/source-node-ca.crt`; the Node embeds its public DER form in pairing
+QRs so clients can establish private per-Node TLS trust automatically.

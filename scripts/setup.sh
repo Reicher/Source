@@ -23,6 +23,7 @@ install -d -m 0700 \
     "$data_root/gateway/data" \
     "$data_root/gateway/config" \
     "$data_root/ollama"
+install -d -m 0755 "$repo_root/artifacts"
 
 printf '%s\n' "Source directories created."
 printf '%s\n' "Next: review .env, run scripts/preflight.sh, then provision the model."

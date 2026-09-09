@@ -8,10 +8,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.IOException
+import java.io.ByteArrayInputStream
 import java.net.URL
+import java.security.KeyStore
 import java.security.SecureRandom
+import java.security.cert.CertificateFactory
+import java.security.cert.X509Certificate
 import javax.net.ssl.HttpsURLConnection
-import javax.net.ssl.SSLHandshakeException
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLException
+import javax.net.ssl.SSLSocketFactory
+import javax.net.ssl.TrustManagerFactory
 
 class SourceApiException(val code: String, message: String) : IOException(message)
 
@@ -29,6 +36,7 @@ class SourceNodeApi {
                 put("userDisplayName", identity.userDisplayName)
                 put("clientDisplayName", identity.clientDisplayName)
             },
+            invitation.tlsCaCertificate,
         )
         if (start.getInt("protocol") != 1) throw SourceApiException("unsupported_pairing_protocol", "Protokollet stöds inte.")
         val handshakeId = start.requiredString("handshakeId")
@@ -66,6 +74,7 @@ class SourceNodeApi {
                 put("handshakeId", handshakeId)
                 put("signature", SourceCrypto.sign(SourceCrypto.decodePrivateKey(identity.clientPrivateKey), signingPayload))
             },
+            invitation.tlsCaCertificate,
         )
         if (complete.getInt("protocol") != 1 || complete.requiredString("nodeId") != invitation.nodeId) {
             throw SourceApiException("node_identity_changed", "Nodidentiteten ändrades under parkopplingen.")
@@ -84,6 +93,7 @@ class SourceNodeApi {
         TrustedNode(
             nodeId = invitation.nodeId,
             nodePublicKey = invitation.nodePublicKey,
+            tlsCaCertificate = invitation.tlsCaCertificate,
             displayName = invitation.nodeName,
             clientCredential = credential,
             userId = returnedUserId,
@@ -96,6 +106,7 @@ class SourceNodeApi {
         val proof = postJson(
             "${apiBaseUrl.removeSuffix("/")}/identity/challenge",
             JSONObject().put("protocol", 1).put("nonce", nonce),
+            trusted.tlsCaCertificate,
             trusted.clientCredential,
         )
         val displayName = proof.requiredString("displayName")
@@ -122,10 +133,16 @@ class SourceNodeApi {
         trusted.copy(displayName = displayName)
     }
 
-    private fun postJson(url: String, body: JSONObject, credential: String? = null): JSONObject {
+    private fun postJson(
+        url: String,
+        body: JSONObject,
+        tlsCaCertificate: String,
+        credential: String? = null,
+    ): JSONObject {
         val connection = (URL(url).openConnection() as? HttpsURLConnection)
             ?: throw SourceApiException("https_required", "Source Node måste använda HTTPS.")
         return try {
+            connection.sslSocketFactory = sslSocketFactory(tlsCaCertificate)
             connection.requestMethod = "POST"
             connection.connectTimeout = 8_000
             connection.readTimeout = 8_000
@@ -146,14 +163,30 @@ class SourceNodeApi {
                 throw SourceApiException(error?.optString("code").orEmpty().ifBlank { "http_$status" }, mapError(error?.optString("code")))
             }
             response
-        } catch (error: SSLHandshakeException) {
+        } catch (error: SSLException) {
             throw SourceApiException(
-                "tls_untrusted",
-                "Nodens lokala certifikat är inte betrott. Installera Source Node-CA på enheten och försök igen.",
+                "tls_identity_mismatch",
+                "Nodens HTTPS-identitet stämmer inte med QR-koden.",
             )
         } finally {
             connection.disconnect()
         }
+    }
+
+    private fun sslSocketFactory(encodedCaCertificate: String): SSLSocketFactory {
+        val certificate = runCatching {
+            CertificateFactory.getInstance("X.509").generateCertificate(
+                ByteArrayInputStream(SourceCrypto.base64UrlDecode(encodedCaCertificate)),
+            ) as X509Certificate
+        }.getOrElse { throw SourceApiException("invalid_ca_certificate", "QR-kodens CA-certifikat är ogiltigt.") }
+        val keyStore = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
+            load(null, null)
+            setCertificateEntry("source-node-ca", certificate)
+        }
+        val trustManagers = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply {
+            init(keyStore)
+        }.trustManagers
+        return SSLContext.getInstance("TLS").apply { init(null, trustManagers, null) }.socketFactory
     }
 
     private fun mapError(code: String?): String = when (code) {

@@ -1,4 +1,5 @@
-import { randomBytes, randomUUID, sign, verify } from 'node:crypto';
+import { randomBytes, randomUUID, sign, verify, X509Certificate } from 'node:crypto';
+import fs from 'node:fs';
 import {
   clientIdFromPublicKey,
   generateToken,
@@ -29,6 +30,16 @@ function validBase64Url(value, minimum = 1, maximum = 512) {
     && /^[A-Za-z0-9_-]+$/.test(value);
 }
 
+function pairingCaCertificate(path) {
+  try {
+    const certificate = new X509Certificate(fs.readFileSync(path));
+    if (!certificate.ca) throw new Error('certificate is not a CA');
+    return certificate.raw.toString('base64url');
+  } catch {
+    throw pairingError(503, 'pairing_ca_unavailable', 'The Source pairing CA is not available.');
+  }
+}
+
 export class PairingService {
   constructor(database, config) {
     this.database = database;
@@ -44,6 +55,7 @@ export class PairingService {
     if (!Number.isSafeInteger(quotaBytes) || quotaBytes < 64 * 1024 * 1024 || quotaBytes > 16 * 1024 ** 4) {
       throw pairingError(400, 'invalid_quota', 'Quota must be between 64 MiB and 16 TiB.');
     }
+    const caCertificate = pairingCaCertificate(this.config.pairingCaCertificatePath);
     const node = this.database.getNodeState();
     const secret = randomBytes(32).toString('base64url');
     const now = this.config.clock();
@@ -52,6 +64,7 @@ export class PairingService {
       secret,
       secretHash: tokenHash(secret),
       quotaBytes,
+      caCertificate,
       createdAt: now,
       expiresAt: now + this.config.pairingInvitationTtlMs,
       handshakes: new Map(),
@@ -220,6 +233,7 @@ export class PairingService {
     payload.searchParams.set('v', String(PAIRING_PROTOCOL_VERSION));
     payload.searchParams.set('node_id', node.nodeId);
     payload.searchParams.set('node_key', node.publicKey);
+    payload.searchParams.set('ca', this.active.caCertificate);
     payload.searchParams.set('name', node.displayName);
     payload.searchParams.set('endpoint', this.config.pairingBaseUrl);
     payload.searchParams.set('invite', this.active.id);

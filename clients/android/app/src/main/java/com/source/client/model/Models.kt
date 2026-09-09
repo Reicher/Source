@@ -12,6 +12,7 @@ data class LocalIdentity(
 data class TrustedNode(
     val nodeId: String,
     val nodePublicKey: String,
+    val tlsCaCertificate: String,
     val displayName: String,
     val clientCredential: String,
     val userId: String,
@@ -34,6 +35,7 @@ data class PairingInvitation(
     val protocol: Int,
     val nodeId: String,
     val nodePublicKey: String,
+    val tlsCaCertificate: String,
     val nodeName: String,
     val pairingEndpoint: String,
     val invitationId: String,

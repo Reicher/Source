@@ -5,15 +5,19 @@ import com.source.client.security.SourceCrypto
 import java.net.InetAddress
 import java.net.URI
 import java.time.Instant
+import java.io.ByteArrayInputStream
+import java.security.cert.CertificateFactory
+import java.security.cert.X509Certificate
+import java.util.Date
 import java.util.UUID
 
 class PairingPayloadException(message: String) : IllegalArgumentException(message)
 
 object PairingPayloadParser {
-    private val required = setOf("v", "node_id", "node_key", "name", "endpoint", "invite", "secret", "expires")
+    private val required = setOf("v", "node_id", "node_key", "ca", "name", "endpoint", "invite", "secret", "expires")
 
     fun parse(raw: String, nowMillis: Long = System.currentTimeMillis()): PairingInvitation {
-        if (raw.length !in 1..4_096) fail("QR-koden har ogiltig storlek.")
+        if (raw.length !in 1..8_192) fail("QR-koden har ogiltig storlek.")
         val uri = runCatching { URI(raw) }.getOrElse { fail("Det här är ingen giltig Source-kod.") }
         if (uri.scheme != "source" || uri.host != "pair" || uri.fragment != null || uri.userInfo != null) {
             fail("Det här är ingen giltig Source-kod.")
@@ -29,6 +33,7 @@ object PairingPayloadParser {
         val nodeKey = field("node_key")
         val parsedKey = runCatching { SourceCrypto.decodePublicKey(nodeKey) }.getOrElse { fail("Nodnyckeln är ogiltig.") }
         if (SourceCrypto.nodeId(parsedKey.encoded) != nodeId) fail("Nodidentiteten stämmer inte med nodnyckeln.")
+        val caCertificate = validateCaCertificate(field("ca"), nowMillis)
 
         val name = field("name").trim()
         if (name.isEmpty() || name.length > 100 || name.any { it.isISOControl() }) fail("Nodnamnet är ogiltigt.")
@@ -40,7 +45,22 @@ object PairingPayloadParser {
         val expires = runCatching { Instant.parse(field("expires")).toEpochMilli() }
             .getOrElse { fail("Inbjudans sluttid är ogiltig.") }
         if (expires <= nowMillis) fail("Inbjudan har gått ut.")
-        return PairingInvitation(version, nodeId, nodeKey, name, endpoint, invitationId, secret, expires)
+        return PairingInvitation(version, nodeId, nodeKey, caCertificate, name, endpoint, invitationId, secret, expires)
+    }
+
+    private fun validateCaCertificate(encoded: String, nowMillis: Long): String {
+        if (encoded.length !in 1..4_096 || !encoded.matches(Regex("^[A-Za-z0-9_-]+$"))) {
+            fail("Nodens CA-certifikat är ogiltigt.")
+        }
+        val certificate = runCatching {
+            CertificateFactory.getInstance("X.509").generateCertificate(
+                ByteArrayInputStream(SourceCrypto.base64UrlDecode(encoded)),
+            ) as X509Certificate
+        }.getOrElse { fail("Nodens CA-certifikat är ogiltigt.") }
+        if (certificate.basicConstraints < 0 || runCatching { certificate.checkValidity(Date(nowMillis)) }.isFailure) {
+            fail("Nodens CA-certifikat är ogiltigt eller har gått ut.")
+        }
+        return SourceCrypto.base64Url(certificate.encoded)
     }
 
     private fun validateEndpoint(raw: String): String {

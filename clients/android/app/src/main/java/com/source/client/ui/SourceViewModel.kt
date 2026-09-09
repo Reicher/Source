@@ -21,7 +21,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import javax.net.ssl.SSLHandshakeException
 
 sealed interface AppScreen {
     data object Loading : AppScreen
@@ -274,8 +273,6 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun readableError(error: Exception): String = when {
-        error is SSLHandshakeException || error.cause is SSLHandshakeException ->
-            "Säker anslutning misslyckades. Installera Source Nodes lokala CA-certifikat på enheten."
         error is SourceApiException && error.code == "pairing_unavailable" -> "Inbjudan är inte längre tillgänglig."
         error is SourceApiException && error.code == "duplicate_client" -> "Den här klienten är redan parkopplad."
         error is SourceApiException -> error.message ?: "Anslutningen misslyckades."

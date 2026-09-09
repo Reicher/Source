@@ -170,6 +170,7 @@ class SecureVault(
                 put(JSONObject().apply {
                     put("nodeId", node.nodeId)
                     put("nodePublicKey", node.nodePublicKey)
+                    put("tlsCaCertificate", node.tlsCaCertificate)
                     put("displayName", node.displayName)
                     put("clientCredential", node.clientCredential)
                     put("userId", node.userId)
@@ -192,7 +193,7 @@ class SecureVault(
         return UnlockedVault(identity, List(trusted.length()) { index ->
             trusted.getJSONObject(index).let {
                 TrustedNode(
-                    it.getString("nodeId"), it.getString("nodePublicKey"), it.getString("displayName"),
+                    it.getString("nodeId"), it.getString("nodePublicKey"), it.getString("tlsCaCertificate"), it.getString("displayName"),
                     it.getString("clientCredential"), it.getString("userId"), it.getString("clientId"),
                 )
             }

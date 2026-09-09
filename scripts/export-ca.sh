@@ -16,4 +16,5 @@ fi
 mkdir -p "$repo_root/artifacts"
 install -m 0644 "$source_path" "$destination"
 printf '%s\n' "$destination"
-printf '%s\n' "This is the public CA certificate. Never copy Caddy's root.key."
+printf '%s\n' "This public CA is embedded in pairing QRs; clients do not install it globally."
+printf '%s\n' "Never copy Caddy's root.key."

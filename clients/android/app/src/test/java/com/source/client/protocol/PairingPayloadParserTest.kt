@@ -13,6 +13,7 @@ class PairingPayloadParserTest {
     private val publicKey = SourceCrypto.generateClientKeyPair().public
     private val encodedKey = SourceCrypto.encodePublicKey(publicKey)
     private val nodeId = SourceCrypto.nodeId(publicKey.encoded)
+    private val caCertificate = "MIIBRjCB-aADAgECAhRVRG_Eel2JGVX0d6gs588FanR7FTAFBgMrZXAwGTEXMBUGA1UEAwwOU291cmNlLVRlc3QtQ0EwHhcNMjYwOTA5MTIyODA1WhcNMzYwOTA2MTIyODA1WjAZMRcwFQYDVQQDDA5Tb3VyY2UtVGVzdC1DQTAqMAUGAytlcAMhAPo_2axphEzqC7vn5ElfUEQEcBxtHuM-3PxtGmVpm9lwo1MwUTAdBgNVHQ4EFgQUQlM82RFXRYILrXvF_mZe-43lzsQwHwYDVR0jBBgwFoAUQlM82RFXRYILrXvF_mZe-43lzsQwDwYDVR0TAQH_BAUwAwEB_zAFBgMrZXADQQC_DYnJEkF3ONdmL4HNnTdtmgG8BP4JRjjKLpz68qxqvOAhZWhIEfiiqet4IloN9MQE8v0wXJ_z-5bQt8fxqMYF"
 
     @Test
     fun `parses exact Node protocol invitation`() {
@@ -20,6 +21,7 @@ class PairingPayloadParserTest {
 
         assertEquals(1, invitation.protocol)
         assertEquals(nodeId, invitation.nodeId)
+        assertEquals(caCertificate, invitation.tlsCaCertificate)
         assertEquals("Plattservern hemma", invitation.nodeName)
         assertEquals("https://192.168.1.10:8443/api/v1/pairing", invitation.pairingEndpoint)
     }
@@ -42,15 +44,27 @@ class PairingPayloadParserTest {
         assertThrows(PairingPayloadException::class.java) { PairingPayloadParser.parse("${payload()}&extra=value", now) }
     }
 
+    @Test
+    fun `rejects malformed and non-CA trust anchors`() {
+        assertThrows(PairingPayloadException::class.java) {
+            PairingPayloadParser.parse(payload(caOverride = "not-a-certificate"), now)
+        }
+        assertThrows(PairingPayloadException::class.java) {
+            PairingPayloadParser.parse(payload().replace("&ca=$caCertificate", ""), now)
+        }
+    }
+
     private fun payload(
         expires: Long = now + 300_000,
         endpoint: String = "https://192.168.1.10:8443/api/v1/pairing",
         nodeIdOverride: String = nodeId,
+        caOverride: String = caCertificate,
     ): String {
         val values = listOf(
             "v" to "1",
             "node_id" to nodeIdOverride,
             "node_key" to encodedKey,
+            "ca" to caOverride,
             "name" to "Plattservern hemma",
             "endpoint" to endpoint,
             "invite" to UUID.fromString("11111111-2222-3333-4444-555555555555").toString(),

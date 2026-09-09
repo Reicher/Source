@@ -5,7 +5,7 @@ import { generateNodeIdentity, generateToken, hashPassword, tokenHash, validateP
 import { RateLimiter } from './rate-limit.mjs';
 
 const ADMIN_COOKIE = 'source_admin_session';
-const VERSION = '0.2.0';
+const VERSION = '0.2.1';
 
 class AdminError extends Error {
   constructor(status, code, message) {

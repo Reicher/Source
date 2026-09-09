@@ -10,6 +10,7 @@ import { createSourceNode } from '../src/server.mjs';
 
 const quietLogger = { info() {}, warn() {}, error() {} };
 const adminPassword = 'correct horse source battery';
+const pairingCaCertificatePath = new URL('./fixtures/source-test-ca.crt', import.meta.url);
 
 async function listen(source) {
   await Promise.all([
@@ -108,6 +109,7 @@ test('first-run admin lifecycle and complete key-based pairing', async (suite) =
     storageRoot: path.join(root, 'vaults'),
     pairingBaseUrl: 'https://192.168.1.10:8443/api/v1/pairing',
     pairingInvitationTtlMs: 300_000,
+    pairingCaCertificatePath,
     maximumSnapshotBytes: 1_024,
     clock: () => now,
     ollama,
@@ -183,6 +185,7 @@ test('first-run admin lifecycle and complete key-based pairing', async (suite) =
       const first = await invite(urls.admin, session);
       assert.equal(new URL(first.payload).protocol, 'source:');
       assert.equal(new URL(first.payload).searchParams.get('node_id'), nodeId);
+      assert.ok(new URL(first.payload).searchParams.get('ca').length > 300);
       const qr = await fetch(`${urls.admin}/admin/api/pairing-invitations/${first.id}/qr.svg`, {
         headers: { cookie: session.cookie },
       });
@@ -346,6 +349,7 @@ test('invalid client proof and malformed keys do not create a user', async () =>
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'source-node-proof-'));
   const source = createSourceNode({
     databasePath: path.join(root, 'state.sqlite'), storageRoot: path.join(root, 'vaults'),
+    pairingCaCertificatePath,
     ollama: { async status() { return false; } }, logger: quietLogger,
   });
   const urls = await listen(source);

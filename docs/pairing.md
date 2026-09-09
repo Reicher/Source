@@ -60,21 +60,25 @@ The QR is generated locally and encodes a deterministic URI whose parameters
 appear in this order:
 
 ```text
-source://pair?v=1&node_id=...&node_key=...&name=...&endpoint=...&invite=...&secret=...&expires=...
+source://pair?v=1&node_id=...&node_key=...&ca=...&name=...&endpoint=...&invite=...&secret=...&expires=...
 ```
 
 - `v`: pairing protocol version (`1`)
 - `node_id`: stable Node ID
 - `node_key`: base64url DER SubjectPublicKeyInfo for the Node Ed25519 key
+- `ca`: base64url DER certificate for the Node's public local root CA
 - `name`: human-readable Node display name
 - `endpoint`: LAN HTTPS base URL ending in `/api/v1/pairing`
 - `invite`: invitation UUID
 - `secret`: one-time 256-bit base64url secret
 - `expires`: ISO 8601 expiry
 
-The future client should treat a scanned QR as a secret, validate its version,
-expiry, URL scheme/host, Node ID derived from `node_key`, and later verify the
-Node signature returned by the challenge endpoint.
+The client treats a scanned QR as a secret, validates its version, expiry, URL
+scheme/host, Node ID derived from `node_key`, and the CA certificate. It uses
+that CA as an app-private trust anchor for this Node only, then verifies the Node
+signature returned by the challenge endpoint. The CA is persisted inside the
+encrypted client vault; it is never installed in the operating system's global
+trust store.
 
 ## Node-side protocol v1
 
@@ -173,9 +177,9 @@ compare the client ID and nonce with its request, reconstruct the exact payload,
 and verify the signature before showing the Node as connected. A DNS-SD name,
 TXT record, hostname, or IP address alone is never authoritative.
 
-The LAN HTTPS certificate chains to the installation's local Source CA. That CA
-must be installed as a user trust anchor on Android before pairing; the client
-does not disable TLS verification.
+The LAN HTTPS certificate chains to the installation's local Source CA embedded
+in the pairing QR. The client verifies against that private per-Node trust
+anchor and does not disable TLS verification or modify Android's trust store.
 
 Failures expose bounded error codes rather than secrets or internal details.
 An absent, unknown, cancelled, expired, consumed, or pre-restart invitation

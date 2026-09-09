@@ -52,6 +52,10 @@ export function loadConfig(overrides = {}) {
       overrides.pairingBaseUrl
       ?? process.env.SOURCE_PAIRING_BASE_URL
       ?? `https://${gatewayHost}:${httpsPort}/api/v1/pairing`,
+    pairingCaCertificatePath:
+      overrides.pairingCaCertificatePath
+      ?? process.env.SOURCE_PAIRING_CA_CERTIFICATE_PATH
+      ?? '/artifacts/source-node-ca.crt',
     suggestedNodeName: overrides.suggestedNodeName ?? os.hostname(),
     databasePath:
       overrides.databasePath ?? process.env.SOURCE_NODE_DATABASE_PATH ?? path.join(stateRoot, 'source-node.sqlite'),

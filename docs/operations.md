@@ -109,8 +109,9 @@ its public root certificate:
 ./scripts/export-ca.sh
 ```
 
-Import `artifacts/source-node-ca.crt` into the client. Never copy the adjacent
-private `root.key` from the gateway data directory.
+The Node embeds `artifacts/source-node-ca.crt` in each pairing QR. Clients keep
+it as a private per-Node trust anchor, so users do not install a system CA.
+Never copy the adjacent private `root.key` from the gateway data directory.
 
 ## User administration
 

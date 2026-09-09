@@ -59,6 +59,7 @@ services:
       SOURCE_ADMIN_PORT: "9090"
       SOURCE_GATEWAY_HOST: ${SOURCE_GATEWAY_HOST:-127.0.0.1}
       SOURCE_HTTPS_PORT: ${SOURCE_HTTPS_PORT:-8443}
+      SOURCE_PAIRING_CA_CERTIFICATE_PATH: /artifacts/source-node-ca.crt
       # A host-network sidecar advertises the public gateway over mDNS.
       SOURCE_DISCOVERY_ENABLED: "0"
       PAIRING_INVITATION_TTL_SECONDS: ${PAIRING_INVITATION_TTL_SECONDS:-300}
@@ -75,6 +76,7 @@ services:
     volumes:
       - ${SOURCE_DATA_ROOT:-./data}/node:/state
       - ${SOURCE_DATA_ROOT:-./data}/vaults:/vaults
+      - ./artifacts:/artifacts:ro
     networks:
       - source_edge
       - inference

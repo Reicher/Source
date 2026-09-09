@@ -25,10 +25,10 @@ service. The bundled ML Kit barcode model runs on-device and works offline.
 - DNS-SD metadata is only a routing hint. Pairing verifies the QR-bound Node
   signature; reconnect verifies `POST /api/v1/identity/challenge` with the
   persisted Node public key.
-- HTTPS verification is never bypassed. Before pairing, install the local CA
-  produced by `../../scripts/export-ca.sh` as a user CA certificate on the
-  Android device. Android's network security policy trusts system and explicitly
-  installed user anchors, but never cleartext traffic.
+- HTTPS verification is never bypassed. The QR contains the Node's public local
+  CA certificate, which the app uses as a private trust anchor only for that
+  Node. The CA is stored in the encrypted vault for reconnects; no Android
+  system certificate or security-setting change is required.
 
 The first version requires Android 13 (API 33) or newer so the platform Ed25519
 provider is available consistently.
@@ -48,7 +48,8 @@ The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
 1. Configure `SOURCE_BIND_IP` and `SOURCE_GATEWAY_HOST` to the Node's reserved
    LAN address, start the Compose deployment, and initialize the Node.
-2. Export and install `artifacts/source-node-ca.crt` on the Android device.
+2. Export `artifacts/source-node-ca.crt`; the Node embeds this public certificate
+   in each pairing QR automatically.
 3. Install and open the debug APK, then create the local identity.
 4. Create a pairing invitation on the Node. The client should discover the Node,
    show **Anslut**, request camera access, scan the QR, and show **Ansluten**.
