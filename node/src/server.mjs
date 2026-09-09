@@ -1,10 +1,9 @@
 import fs from 'node:fs';
 import http from 'node:http';
-import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createAdminHandler } from './admin-http.mjs';
 import { loadConfig } from './config.mjs';
-import { HubDatabase } from './database.mjs';
+import { SourceDatabase } from './database.mjs';
 import { createRequestHandler } from './http.mjs';
 import { SourceDiscovery } from './discovery.mjs';
 import { OllamaClient } from './ollama.mjs';
@@ -22,24 +21,11 @@ function httpServer(handler, config) {
 function runtime(overrides = {}) {
   const config = loadConfig(overrides);
   fs.mkdirSync(config.storageRoot, { recursive: true, mode: 0o700 });
-  const database = overrides.database ?? new HubDatabase(config.databasePath);
-  for (const userId of database.removedLegacyUserIds ?? []) {
-    if (/^[0-9a-f-]{36}$/i.test(userId)) {
-      fs.rmSync(path.join(path.resolve(config.storageRoot), userId), { recursive: true, force: true });
-    }
-  }
+  const database = overrides.database ?? new SourceDatabase(config.databasePath);
   const ollama = overrides.ollama ?? new OllamaClient(config);
   const pairing = overrides.pairing ?? new PairingService(database, config);
   const logger = overrides.logger ?? console;
   return { config, database, ollama, pairing, logger };
-}
-
-// Kept as the small LAN-server factory used by API integrations and tests.
-export function createHubServer(overrides = {}) {
-  const state = runtime(overrides);
-  const server = httpServer(createRequestHandler(state), state.config);
-  server.on('close', () => state.database.close());
-  return { server, ...state };
 }
 
 export function createSourceNode(overrides = {}) {

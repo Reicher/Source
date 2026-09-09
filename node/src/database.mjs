@@ -3,11 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
-function columns(database, table) {
-  return database.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name);
-}
-
-export class HubDatabase {
+export class SourceDatabase {
   constructor(databasePath) {
     if (databasePath !== ':memory:') fs.mkdirSync(path.dirname(databasePath), { recursive: true, mode: 0o700 });
     this.database = new DatabaseSync(databasePath);
@@ -18,19 +14,6 @@ export class HubDatabase {
       PRAGMA synchronous = FULL;
       PRAGMA busy_timeout = 5000;
     `);
-    this.removedLegacyUserIds = [];
-
-    // The prototype stored server-side user passwords. Those accounts are
-    // deliberately discarded: new Source users only exist after key pairing.
-    if (columns(this.database, 'users').includes('password_hash')) {
-      this.removedLegacyUserIds = this.database.prepare('SELECT id FROM users').all().map((user) => user.id);
-      this.database.exec(`
-        DROP TABLE IF EXISTS snapshots;
-        DROP TABLE IF EXISTS sessions;
-        DROP TABLE IF EXISTS users;
-      `);
-    }
-
     this.database.exec(`
       CREATE TABLE IF NOT EXISTS node_state (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),

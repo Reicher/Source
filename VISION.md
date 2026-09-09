@@ -82,9 +82,10 @@ Client är den betrodda utgångspunkten för användarens identitet.
 
 Användarens nycklar hör till Client och ska inte vara beroende av en specifik Node.
 
-När en användare vill koppla sin Client till en Node skapas användaren lokalt via Nodes administrationsgränssnitt.
-
-Node visar därefter en tillfällig QR-kod som skannas med Source Client.
+När en användare vill koppla sin Client till en Node godkänner administratören
+lokalt en tillfällig inbjudan och användarens lagringskvot. Node visar därefter
+en QR-kod som skannas med Source Client. Användaren och den första klienten
+sparas på Node först när Client har bevisat kontroll över sin privata nyckel.
 
 QR-flödet etablerar förtroende mellan Client och Node.
 

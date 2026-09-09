@@ -1,9 +1,17 @@
 # Source
 
 Source is a private, local-first system for personal data, storage, and AI.
-This repository contains the early Source Node implementation and the versioned
-Source API contract. The long-term product direction is described in
-[`VISION.md`](VISION.md).
+This repository owns the official Android Source Client, the Source Node
+implementation and reference deployment, and the versioned Source API contract.
+The long-term product direction is described in [`VISION.md`](VISION.md).
+
+Source may run on a machine managed by a separate infrastructure repository,
+such as `homeLab`, but it remains a standalone installation. This repository
+owns Source's services, internal networks, data layout, local CA, models,
+administration, API contract, backup, and restore. Host infrastructure only
+reserves the LAN and loopback ports, maintains the physical machine and
+firewall, and ensures Source is not routed through public services. The two
+deployments must not share Compose networks, volumes, routes, or secrets.
 
 ## Current status
 
@@ -13,7 +21,8 @@ provides:
 - a LAN-only HTTPS endpoint backed by a local certificate authority;
 - localhost-only first-run administration and health dashboard;
 - temporary QR invitations and Ed25519 client pairing;
-- isolated users with per-user quotas and one or more client identities;
+- isolated users created together with their first key-proven client, with
+  per-user quotas and a data model prepared for additional client identities;
 - opaque storage for client-encrypted snapshots;
 - authenticated chat through a local Ollama model;
 - a versioned OpenAPI contract.
@@ -38,7 +47,9 @@ docker compose up -d --build
 ```
 
 Open `http://127.0.0.1:9090` on the Node itself to initialize and administer
-it. This port is always published on host loopback only.
+it. An administrator authorizes a quota-limited pairing invitation; the user
+and first client are persisted only after the client proves its private key.
+This port is always published on host loopback only.
 
 The defaults bind HTTPS only to `127.0.0.1:8443`. Before using a LAN client,
 set `SOURCE_BIND_IP` and `SOURCE_GATEWAY_HOST` in `.env` to the same reserved
@@ -56,6 +67,12 @@ cd node
 npm ci
 npm test
 ```
+
+Direct `npm start` binds both plain-HTTP listeners to loopback and leaves
+DNS-SD discovery disabled by default. A non-container LAN deployment must add
+an HTTPS gateway backed by the Node's local CA, keep administration on host
+loopback, and explicitly enable discovery only after the advertised HTTPS
+endpoint works. The Compose deployment above supplies those boundaries.
 
 The QR renderer is installed locally with the Node package and never contacts
 an external service at runtime.

@@ -95,12 +95,6 @@ export class SnapshotStorage {
     return true;
   }
 
-  async deleteUser(userId) {
-    if (!/^[0-9a-f-]{36}$/i.test(userId)) throw new Error('Invalid user id');
-    const namespace = this.database.findUserById(userId)?.storageNamespace;
-    if (namespace) await fs.rm(path.join(this.root, namespace), { recursive: true, force: true });
-  }
-
   #directory(userId, appId) {
     const namespace = this.database.findUserById(userId)?.storageNamespace;
     if (!namespace) throw new Error('User storage namespace is unavailable');

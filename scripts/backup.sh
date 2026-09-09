@@ -5,6 +5,14 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 configured_root=$(sed -n 's/^SOURCE_DATA_ROOT=//p' "$repo_root/.env" 2>/dev/null | tail -n 1)
 data_root=${SOURCE_DATA_ROOT:-${configured_root:-$repo_root/data}}
 backup_root=${SOURCE_BACKUP_ROOT:-$repo_root/backups}
+case "$data_root" in
+    /*) ;;
+    *) data_root="$repo_root/$data_root" ;;
+esac
+case "$backup_root" in
+    /*) ;;
+    *) backup_root="$repo_root/$backup_root" ;;
+esac
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 archive="$backup_root/source-node-$timestamp.tar.gz"
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { loadConfig } from './config.mjs';
-import { HubDatabase } from './database.mjs';
+import { SourceDatabase } from './database.mjs';
 
-const database = new HubDatabase(loadConfig().databasePath);
+const database = new SourceDatabase(loadConfig().databasePath);
 try {
   const command = process.argv[2];
   if (command === 'status') {

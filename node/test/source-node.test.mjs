@@ -3,7 +3,6 @@ import { createPublicKey, generateKeyPairSync, randomBytes, randomUUID, sign, ve
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { loadConfig } from '../src/config.mjs';
 import { createSourceNode } from '../src/server.mjs';
@@ -120,7 +119,9 @@ test('first-run admin lifecycle and complete key-based pairing', async (suite) =
 
   try {
     await suite.test('fresh Node requires setup and admin is loopback by default', async () => {
+      assert.equal(source.config.host, '127.0.0.1');
       assert.equal(source.config.adminHost, '127.0.0.1');
+      assert.equal(source.config.discoveryEnabled, false);
       assert.throws(
         () => loadConfig({ adminHost: '0.0.0.0', containerAdmin: false }),
         /must be loopback/,
@@ -375,44 +376,6 @@ test('invalid client proof and malformed keys do not create a user', async () =>
     });
     assert.equal(failed.status, 401);
     assert.equal(source.database.listUsers().length, 0);
-  } finally {
-    await source.close();
-    await fs.rm(root, { recursive: true, force: true });
-  }
-});
-
-test('legacy password users and their encrypted storage are removed during schema replacement', async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'source-node-legacy-'));
-  const databasePath = path.join(root, 'state', 'source.sqlite');
-  const storageRoot = path.join(root, 'vaults');
-  const legacyUserId = randomUUID();
-  await fs.mkdir(path.dirname(databasePath), { recursive: true });
-  await fs.mkdir(path.join(storageRoot, legacyUserId), { recursive: true });
-  await fs.writeFile(path.join(storageRoot, legacyUserId, 'legacy.bin'), 'ciphertext');
-  const legacy = new DatabaseSync(databasePath);
-  legacy.exec(`
-    CREATE TABLE users (
-      id TEXT PRIMARY KEY,
-      username TEXT NOT NULL UNIQUE,
-      password_hash TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      disabled_at INTEGER
-    ) STRICT;
-  `);
-  legacy.prepare('INSERT INTO users (id, username, password_hash, created_at) VALUES (?, ?, ?, ?)')
-    .run(legacyUserId, 'legacy', 'old-password-hash', Date.now());
-  legacy.close();
-
-  const source = createSourceNode({
-    databasePath,
-    storageRoot,
-    ollama: { async status() { return false; } },
-    logger: quietLogger,
-  });
-  try {
-    assert.deepEqual(source.database.listUsers(), []);
-    assert.equal(source.database.database.prepare("SELECT COUNT(*) AS count FROM pragma_table_info('users') WHERE name = 'password_hash'").get().count, 0);
-    await assert.rejects(fs.access(path.join(storageRoot, legacyUserId)), { code: 'ENOENT' });
   } finally {
     await source.close();
     await fs.rm(root, { recursive: true, force: true });

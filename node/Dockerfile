@@ -7,7 +7,6 @@ COPY package.json ./
 COPY package-lock.json ./
 RUN npm ci --omit=dev
 COPY src ./src
-COPY test ./test
 
 ENV NODE_ENV=production
 EXPOSE 8080 9090

@@ -10,19 +10,22 @@ transaction succeeds. Its stable Node ID is `srcnode_` plus the base64url
 SHA-256 digest of the DER-encoded public key. Changing a display name in a
 future release must not replace that identity.
 
-The Source process has two HTTP listeners:
+The Source process has two internal HTTP listeners in the Compose deployment:
 
-| Listener | Default | Purpose |
-| --- | --- | --- |
-| Source/LAN | `0.0.0.0:8080` behind the local-CA HTTPS gateway | Pairing and authenticated client APIs |
-| Administration | `127.0.0.1:9090` | First run, login, dashboard, users, invitations |
+| Listener | Container address | Effective host entry | Purpose |
+| --- | --- | --- | --- |
+| Source API | `0.0.0.0:8080` | local-CA HTTPS gateway on the configured LAN address | Pairing and authenticated client APIs |
+| Administration | `0.0.0.0:9090` | `127.0.0.1:9090` | First run, login, dashboard, users, invitations |
 
 The Compose deployment publishes a dedicated gateway listener only as
 `127.0.0.1:9090` on the physical host. It proxies over Source's internal edge
 to the Node admin listener. `SOURCE_ADMIN_HOST=0.0.0.0` is used inside the Node
 container solely so that internal proxy can reach it; the admin site is not
-routed through the LAN HTTPS listener. Direct/non-container deployments retain
-the safe `127.0.0.1` default.
+routed through the LAN HTTPS listener.
+
+Direct/non-container runs bind both HTTP listeners to `127.0.0.1` and leave
+DNS-SD disabled by default. LAN access requires an equivalent local-CA HTTPS
+gateway; discovery must not be enabled until that advertised endpoint exists.
 
 The self-contained admin UI loads no remote script, stylesheet, image, font,
 analytics, or telemetry. Admin sessions are process-local, expire after eight
@@ -42,11 +45,8 @@ a key-derived stable ID, Ed25519 public key, display name, hashed API
 credential, timestamps, and revocation state. This permits more clients to be
 attached to a user later without changing the data model.
 
-The pre-pairing prototype's Node-side user passwords and sessions are not
-retained. On first startup of this version, a legacy `users.password_hash`
-schema is detected and the old users, sessions, snapshot metadata, and their
-server-side encrypted storage directories are removed before the new key-paired schema is created. The user/password model
-must not be reintroduced: Source user passwords belong exclusively to clients.
+Source user passwords belong exclusively to clients. Node-side user passwords
+and password-based user sessions are not part of the current model.
 
 ## Invitation and QR format
 
@@ -189,7 +189,8 @@ create another user.
 
 ## Local admin interface
 
-The UI uses these loopback-only interfaces:
+The UI uses these loopback-only interfaces. Creating an invitation authorizes
+a quota; it does not persist a user or client until pairing completes:
 
 - `GET /admin/api/state`
 - `POST /admin/api/initialize`

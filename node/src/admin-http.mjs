@@ -1,11 +1,12 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import QRCode from 'qrcode';
+import packageMetadata from '../package.json' with { type: 'json' };
 import { generateNodeIdentity, generateToken, hashPassword, tokenHash, validatePassword, verifyPassword } from './security.mjs';
 import { RateLimiter } from './rate-limit.mjs';
 
 const ADMIN_COOKIE = 'source_admin_session';
-const VERSION = '0.2.1';
+const VERSION = packageMetadata.version;
 
 class AdminError extends Error {
   constructor(status, code, message) {

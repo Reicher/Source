@@ -9,6 +9,10 @@ fi
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 configured_root=$(sed -n 's/^SOURCE_DATA_ROOT=//p' "$repo_root/.env" 2>/dev/null | tail -n 1)
 data_root=${SOURCE_DATA_ROOT:-${configured_root:-$repo_root/data}}
+case "$data_root" in
+    /*) ;;
+    *) data_root="$repo_root/$data_root" ;;
+esac
 printf '%s\n' "This creates Source Node state below $data_root."
 printf '%s\n' "It does not start containers, alter router forwarding, or expose a public port."
 printf '%s' "Type SOURCE to continue: "

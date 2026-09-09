@@ -4,6 +4,10 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 configured_root=$(sed -n 's/^SOURCE_DATA_ROOT=//p' "$repo_root/.env" 2>/dev/null | tail -n 1)
 data_root=${SOURCE_DATA_ROOT:-${configured_root:-$repo_root/data}}
+case "$data_root" in
+    /*) ;;
+    *) data_root="$repo_root/$data_root" ;;
+esac
 source_path="$data_root/gateway/data/caddy/pki/authorities/local/root.crt"
 destination="$repo_root/artifacts/source-node-ca.crt"
 

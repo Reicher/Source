@@ -1,9 +1,9 @@
 import { loadConfig } from './config.mjs';
-import { HubDatabase } from './database.mjs';
+import { SourceDatabase } from './database.mjs';
 import { SourceDiscovery } from './discovery.mjs';
 
 const config = loadConfig();
-const database = new HubDatabase(config.databasePath);
+const database = new SourceDatabase(config.databasePath);
 const discovery = new SourceDiscovery({ database, config });
 discovery.start();
 

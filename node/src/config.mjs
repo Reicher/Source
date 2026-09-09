@@ -38,10 +38,10 @@ export function loadConfig(overrides = {}) {
     throw new Error('SOURCE_ADMIN_HOST must be loopback (container deployments must explicitly set SOURCE_ADMIN_CONTAINER_MODE=1)');
   }
   return {
-    host: overrides.host ?? process.env.SOURCE_NODE_HOST ?? '0.0.0.0',
+    host: overrides.host ?? process.env.SOURCE_NODE_HOST ?? '127.0.0.1',
     port: overrides.port ?? positiveInteger('SOURCE_NODE_PORT', 8080),
     httpsPort,
-    discoveryEnabled: overrides.discoveryEnabled ?? booleanSetting('SOURCE_DISCOVERY_ENABLED', true),
+    discoveryEnabled: overrides.discoveryEnabled ?? booleanSetting('SOURCE_DISCOVERY_ENABLED', false),
     adminHost,
     adminPort: overrides.adminPort ?? positiveInteger('SOURCE_ADMIN_PORT', 9090),
     adminSessionTtlMs:

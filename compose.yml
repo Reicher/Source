@@ -188,6 +188,8 @@ services:
       - ALL
 
 networks:
+  # Keep one non-internal network on the gateway so Docker can publish its host
+  # ports; Source services and data remain isolated on the internal networks.
   lan_edge:
   source_edge:
     internal: true

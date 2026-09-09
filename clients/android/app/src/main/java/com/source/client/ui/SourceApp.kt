@@ -48,7 +48,6 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import androidx.camera.core.ExperimentalGetImage
 import com.source.client.model.NodeStatus
 
 private val Ink = Color(0xFF17201D)
@@ -69,7 +68,6 @@ fun SourceApp(screen: AppScreen, viewModel: SourceViewModel) {
     ) {
         Surface(Modifier.fillMaxSize()) {
             when (screen) {
-                AppScreen.Loading -> CenteredProgress()
                 is AppScreen.Setup -> SetupScreen(screen, viewModel::createIdentity)
                 is AppScreen.Locked -> UnlockScreen(screen, viewModel::unlock)
                 is AppScreen.Main -> MainScreen(screen.status, viewModel::scan, viewModel::retry)
@@ -200,7 +198,6 @@ private fun NodeStatusBar(
 }
 
 @Composable
-@androidx.annotation.OptIn(markerClass = [ExperimentalGetImage::class])
 private fun ScannerPermissionScreen(state: AppScreen.Scanner, scanned: (String) -> Unit, close: () -> Unit) {
     val context = LocalContext.current
     var granted by remember {
@@ -260,4 +257,3 @@ private fun SourceColumn(vertical: Arrangement.Vertical = Arrangement.Top, conte
 
 @Composable private fun ErrorText(message: String) = Text(message, color = MaterialTheme.colorScheme.error)
 @Composable private fun SmallProgress() = CircularProgressIndicator(Modifier.height(20.dp), strokeWidth = 2.dp, color = Color.White)
-@Composable private fun CenteredProgress() = Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = Moss) }

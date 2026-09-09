@@ -12,7 +12,8 @@ Source monorepo. It intentionally implements only the first vertical slice:
    rediscovery and a fresh signed Node identity proof.
 
 The app has no cloud SDK, account service, telemetry, analytics, or background
-service. The bundled ML Kit barcode model runs on-device and works offline.
+service. Its ZXing QR decoder is packaged in the APK, runs on-device, and has
+no runtime service or network integration.
 
 ## Security model
 
@@ -60,5 +61,7 @@ The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
 The Compose `discovery` service uses host networking so mDNS can reach the LAN.
 On Docker Desktop, host networking must be enabled; native Linux supports it
-directly. A Node started directly with `node/src/server.mjs` advertises itself
-without the sidecar.
+directly. Running `node/src/server.mjs` directly keeps the safe loopback and
+discovery-disabled defaults and does not provide the required HTTPS gateway.
+A non-Compose LAN deployment must add a local-CA HTTPS gateway, configure an
+explicit LAN bind address and pairing URL, and opt in to direct discovery.

@@ -23,7 +23,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 sealed interface AppScreen {
-    data object Loading : AppScreen
     data class Setup(val error: String? = null, val busy: Boolean = false) : AppScreen
     data class Locked(val error: String? = null, val busy: Boolean = false) : AppScreen
     data class Main(val status: NodeStatus) : AppScreen
@@ -36,10 +35,11 @@ internal fun keepActiveConnectionStatus(status: NodeStatus, connectionAttemptAct
 
 class SourceViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as SourceClientApplication
-    private val _screen = MutableStateFlow<AppScreen>(AppScreen.Loading)
+    private val _screen = MutableStateFlow<AppScreen>(
+        if (app.secureVault.isInitialized) AppScreen.Locked() else AppScreen.Setup(),
+    )
     private var session: VaultSession? = null
     private var foreground = false
-    private var selectedNode: DiscoveredNode? = null
     private var connectJob: Job? = null
     private var heartbeatJob: Job? = null
     private var lastConnectedService: String? = null
@@ -48,7 +48,6 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     val screen: StateFlow<AppScreen> = _screen.asStateFlow()
 
     init {
-        _screen.value = if (app.secureVault.isInitialized) AppScreen.Locked() else AppScreen.Setup()
         viewModelScope.launch {
             combine(app.nodeDiscovery.nodes, app.networkMonitor.available) { nodes, network -> nodes to network }
                 .collect { (nodes, network) -> reconcile(nodes, network) }
@@ -120,12 +119,10 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun scan(node: DiscoveredNode) {
-        selectedNode = node
         _screen.value = AppScreen.Scanner(node)
     }
 
     fun cancelScanner() {
-        selectedNode = null
         _screen.value = AppScreen.Main(statusForCurrentNodes())
     }
 
@@ -151,7 +148,6 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
                     trustedNodes = activeSession.vault.trustedNodes.filterNot { it.nodeId == trusted.nodeId } + trusted,
                 )
                 app.secureVault.save(activeSession)
-                selectedNode = null
                 _screen.value = AppScreen.Main(NodeStatus.Connected(trusted))
                 startHeartbeat(scanner.node, trusted)
             } catch (error: CancellationException) {

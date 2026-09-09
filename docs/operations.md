@@ -15,6 +15,17 @@ snapshot. Text explicitly sent to chat exists in plaintext in the model
 process during that request. The current version never reads snapshots or adds
 stored personal data to model context.
 
+## Repository and host responsibility
+
+This repository owns the complete Source installation: Node, its private
+gateway and internal networks, discovery, local model runtime, users, storage,
+local CA, API contract, backup, and restore. A separate host-infrastructure
+repository such as `homeLab` may manage the physical server, container runtime,
+host firewall, and port reservations. It must not include Source in its public
+proxy, read Source data or secrets, or share Compose networks and volumes with
+Source. Source-specific changes and operational commands remain in this
+repository.
+
 ## Trust zones
 
 ```text
@@ -102,8 +113,10 @@ host networking enabled. Permit local multicast UDP 5353 and the configured
 HTTPS port in the host firewall, but do not expose either through the router.
 
 Open `http://127.0.0.1:9090` on the physical Node to complete first-run setup,
-log in, view health, and add users. The gateway creates a local certificate authority on first start. Export only
-its public root certificate:
+log in, view health, and authorize a quota-limited pairing invitation. The user
+and first client are written only after the client completes the key proof. The
+gateway creates a local certificate authority on first start. Export only its
+public root certificate:
 
 ```sh
 ./scripts/export-ca.sh
@@ -120,11 +133,18 @@ Never copy the adjacent private `root.key` from the gateway data directory.
 ./scripts/source-user.sh list
 ```
 
-These commands are read-only diagnostics. Add a user through the local admin
-UI: select a byte-safe quota, display the locally generated QR invitation, and
-let the client complete the documented key challenge. No user password exists
-on the Node. See [`pairing.md`](pairing.md) for the exact protocol and security
+These commands are read-only diagnostics. Authorize a user through the local
+admin UI: select a byte-safe quota, display the locally generated QR invitation,
+and let the client complete the documented key challenge. No database user or
+client is created before that proof succeeds, and no user password exists on
+the Node. See [`pairing.md`](pairing.md) for the exact protocol and security
 semantics.
+
+Direct/non-container runs are safe development building blocks, not a complete
+LAN deployment: the plain-HTTP Source and admin listeners bind to loopback and
+discovery is disabled by default. A native LAN installation must provide the
+same local-CA HTTPS termination and loopback-only administration boundary as
+the Compose deployment before enabling DNS-SD.
 
 ## Verification
 
