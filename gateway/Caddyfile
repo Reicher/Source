@@ -2,6 +2,7 @@
 	admin off
 	auto_https disable_redirects
 	default_sni {$SOURCE_GATEWAY_HOST}
+	skip_install_trust
 }
 
 https://{$SOURCE_GATEWAY_HOST}:8443 {
