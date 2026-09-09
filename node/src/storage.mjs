@@ -15,7 +15,6 @@ export class SnapshotStorage {
   constructor(database, config) {
     this.database = database;
     this.root = path.resolve(config.storageRoot);
-    this.quota = config.userStorageQuotaBytes;
     this.retention = config.snapshotRetention;
     this.clock = config.clock;
   }
@@ -34,7 +33,9 @@ export class SnapshotStorage {
     this.validate(appId, snapshotId);
     const existing = this.database.findSnapshot({ userId, appId, snapshotId });
     const used = this.database.totalSnapshotBytes(userId) - (existing?.bytes ?? 0);
-    if (used + body.length > this.quota) {
+    const quota = this.database.findUserById(userId)?.quotaBytes;
+    if (!quota) throw new Error('User storage quota is unavailable');
+    if (used + body.length > quota) {
       throw Object.assign(new Error('User storage quota exceeded'), {
         status: 413,
         code: 'storage_quota_exceeded',
@@ -96,11 +97,14 @@ export class SnapshotStorage {
 
   async deleteUser(userId) {
     if (!/^[0-9a-f-]{36}$/i.test(userId)) throw new Error('Invalid user id');
-    await fs.rm(path.join(this.root, userId), { recursive: true, force: true });
+    const namespace = this.database.findUserById(userId)?.storageNamespace;
+    if (namespace) await fs.rm(path.join(this.root, namespace), { recursive: true, force: true });
   }
 
   #directory(userId, appId) {
-    return path.join(this.root, userId, appId, 'snapshots');
+    const namespace = this.database.findUserById(userId)?.storageNamespace;
+    if (!namespace) throw new Error('User storage namespace is unavailable');
+    return path.join(this.root, namespace, appId, 'snapshots');
   }
 
   #path(userId, appId, snapshotId) {

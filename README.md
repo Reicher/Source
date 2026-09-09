@@ -11,14 +11,17 @@ This is a working prototype, not the complete Source vision. Today Source Node
 provides:
 
 - a LAN-only HTTPS endpoint backed by a local certificate authority;
-- manually administered, isolated user accounts;
+- localhost-only first-run administration and health dashboard;
+- temporary QR invitations and Ed25519 client pairing;
+- isolated users with per-user quotas and one or more client identities;
 - opaque storage for client-encrypted snapshots;
 - authenticated chat through a local Ollama model;
 - a versioned OpenAPI contract.
 
-The standalone Source Client, local pairing through QR code, general sync, key
-management, and broader personal-data model are not implemented yet. Thoughts
-is the first intended Source-compatible application.
+The standalone Source Client, general sync, client-side key management, and
+broader personal-data model are not implemented yet. The complete Node side of
+pairing is available for a future client. Thoughts is the first intended
+Source-compatible application.
 
 ## Install Source Node
 
@@ -34,6 +37,9 @@ docker compose up -d --build
 ./scripts/export-ca.sh
 ```
 
+Open `http://127.0.0.1:9090` on the Node itself to initialize and administer
+it. This port is always published on host loopback only.
+
 The defaults bind HTTPS only to `127.0.0.1:8443`. Before using a LAN client,
 set `SOURCE_BIND_IP` and `SOURCE_GATEWAY_HOST` in `.env` to the same reserved
 LAN address. Never forward the Source port from a router to the public internet.
@@ -47,10 +53,12 @@ Source Node requires Node.js 24.7 or newer:
 
 ```sh
 cd node
+npm ci
 npm test
 ```
 
-No third-party npm dependencies are required by the current Node service.
+The QR renderer is installed locally with the Node package and never contacts
+an external service at runtime.
 
 ## License
 

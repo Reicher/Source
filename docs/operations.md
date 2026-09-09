@@ -2,9 +2,10 @@
 
 ## Implemented first version
 
-Source Node currently exposes two authenticated services on a trusted local
-network:
+Source Node exposes a localhost-only administration interface and three
+facilities on a trusted local network:
 
+- temporary, administrator-authorized client pairing;
 - chat through a locally running language model;
 - storage and retrieval of snapshots already encrypted by a client.
 
@@ -27,22 +28,31 @@ Source-compatible client on a trusted LAN
                  v
             Source Node -------- inference -------- Ollama
                  |
-                 +-- account/session state and metadata
+                 +-- user/client identity state and metadata
                  +-- opaque client-encrypted snapshots
+
+Node owner on the physical machine
+                 |
+                 | HTTP, host loopback only, :9090
+                 v
+        Source admin listener
 ```
 
-Only the gateway publishes a host port. Source Node and Ollama have no host
-ports and use internal Docker networks. The gateway binds to exactly
-`SOURCE_BIND_IP`; wildcard addresses are rejected by preflight. Do not create
-router forwarding for the Source port.
+The gateway publishes the Source HTTPS port at exactly `SOURCE_BIND_IP`;
+wildcard addresses are rejected by preflight. Docker publishes the admin port
+separately at exactly `127.0.0.1`, never the configured LAN address. Ollama has
+no host port. Do not create router forwarding for either Source port.
 
 ## Security boundaries
 
-- There is no network registration endpoint yet; operators create users locally.
-- Passwords use Node 24 Argon2id with 64 MiB, three passes, and unique salts.
-- Access tokens normally last 15 minutes and refresh tokens 30 days.
-- Only SHA-256 token hashes are stored.
-- Login and AI endpoints are rate limited in each running process.
+- The admin password uses Node 24 Argon2id with 64 MiB, three passes, and a unique salt.
+- Users have no Node-side passwords. A client proves its Ed25519 private key
+  during an admin-authorized, short-lived pairing window.
+- Pairing invitations live only in memory and are single-use. Cancellation,
+  expiry, completion, and restart revoke them.
+- Only SHA-256 client-credential hashes are stored.
+- Admin login and AI endpoints are rate limited in each running process.
+- Admin uses HttpOnly SameSite=Strict cookies, same-origin requests, and CSRF tokens.
 - Request bodies, chat text, passwords, and tokens are not logged.
 - Snapshot identifiers and application namespaces are validated and allowlisted.
 - Snapshots are written atomically and may be checked against a SHA-256 header.
@@ -84,7 +94,8 @@ docker compose up -d --build
 docker compose ps
 ```
 
-The gateway creates a local certificate authority on first start. Export only
+Open `http://127.0.0.1:9090` on the physical Node to complete first-run setup,
+log in, view health, and add users. The gateway creates a local certificate authority on first start. Export only
 its public root certificate:
 
 ```sh
@@ -97,23 +108,15 @@ private `root.key` from the gateway data directory.
 ## User administration
 
 ```sh
-./scripts/source-user.sh create robin
+./scripts/source-user.sh status
 ./scripts/source-user.sh list
-./scripts/source-user.sh reset-password robin
-./scripts/source-user.sh sessions robin
-./scripts/source-user.sh revoke-session robin SESSION-UUID
-./scripts/source-user.sh disable robin
-./scripts/source-user.sh enable robin
-./scripts/source-user.sh delete robin --confirm
 ```
 
-`create` and `reset-password` display a generated password once. Transfer it
-directly to the user. Resetting a password revokes all sessions. Deleting a
-user removes the account, sessions, metadata, and server-side ciphertext; it
-does not affect copies already held by clients.
-
-This manual administration is an interim mechanism. The local QR pairing flow
-described in `VISION.md` is not implemented yet.
+These commands are read-only diagnostics. Add a user through the local admin
+UI: select a byte-safe quota, display the locally generated QR invitation, and
+let the client complete the documented key challenge. No user password exists
+on the Node. See [`pairing.md`](pairing.md) for the exact protocol and security
+semantics.
 
 ## Verification
 

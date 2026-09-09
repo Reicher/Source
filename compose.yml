@@ -50,12 +50,17 @@ services:
     environment:
       SOURCE_NODE_HOST: 0.0.0.0
       SOURCE_NODE_PORT: "8080"
+      # Docker publishes this listener only on the physical host's loopback.
+      SOURCE_ADMIN_HOST: 0.0.0.0
+      SOURCE_ADMIN_CONTAINER_MODE: "1"
+      SOURCE_ADMIN_PORT: "9090"
+      SOURCE_GATEWAY_HOST: ${SOURCE_GATEWAY_HOST:-127.0.0.1}
+      SOURCE_HTTPS_PORT: ${SOURCE_HTTPS_PORT:-8443}
+      PAIRING_INVITATION_TTL_SECONDS: ${PAIRING_INVITATION_TTL_SECONDS:-300}
+      ADMIN_SESSION_TTL_SECONDS: ${ADMIN_SESSION_TTL_SECONDS:-28800}
       SOURCE_NODE_STATE_ROOT: /state
       SOURCE_NODE_STORAGE_ROOT: /vaults
-      ACCESS_TOKEN_TTL_SECONDS: ${ACCESS_TOKEN_TTL_SECONDS:-900}
-      REFRESH_TOKEN_TTL_DAYS: ${REFRESH_TOKEN_TTL_DAYS:-30}
       MAX_SNAPSHOT_MIB: ${MAX_SNAPSHOT_MIB:-32}
-      USER_STORAGE_QUOTA_MIB: ${USER_STORAGE_QUOTA_MIB:-1024}
       SNAPSHOT_RETENTION_COUNT: ${SNAPSHOT_RETENTION_COUNT:-20}
       ALLOWED_STORAGE_APPS: ${ALLOWED_STORAGE_APPS:-thoughts}
       OLLAMA_URL: http://ollama:11434
@@ -65,6 +70,8 @@ services:
     volumes:
       - ${SOURCE_DATA_ROOT:-./data}/node:/state
       - ${SOURCE_DATA_ROOT:-./data}/vaults:/vaults
+    ports:
+      - "127.0.0.1:${SOURCE_ADMIN_PORT:-9090}:9090"
     networks:
       - source_edge
       - inference

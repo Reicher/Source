@@ -6,5 +6,6 @@ artifacts/
 *.tar.gz
 *.tgz
 .DS_Store
+node/node_modules/
 *.swp
 *~

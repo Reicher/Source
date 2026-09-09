@@ -1,18 +1,17 @@
 openapi: 3.1.0
 info:
   title: Source Node API
-  version: 1.0.0
+  version: 1.1.0
   description: >-
-    Early Source API for authenticated local-model chat and opaque,
-    client-encrypted application snapshots. Source Node never receives a
-    client's vault key.
+    LAN API for key-paired clients, local-model chat, and opaque encrypted
+    snapshots. Administrative endpoints are intentionally excluded because
+    they are served by the separate loopback-only admin listener.
 servers:
   - url: https://{sourceNodeHost}:8443/api/v1
     description: Source Node on a trusted local network
     variables:
       sourceNodeHost:
         default: 192.168.1.10
-        description: Reserved LAN address configured by the operator
 security:
   - bearerAuth: []
 paths:
@@ -27,96 +26,69 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Status"
-  /auth/login:
+  /pairing/start:
     post:
       security: []
-      operationId: login
+      operationId: startPairing
+      description: Validate an active invitation and issue a signed proof-of-possession challenge.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
-              additionalProperties: false
-              required: [username, password, deviceName]
-              properties:
-                username:
-                  type: string
-                  minLength: 3
-                  maxLength: 64
-                password:
-                  type: string
-                  minLength: 12
-                  maxLength: 256
-                deviceName:
-                  type: string
-                  minLength: 1
-                  maxLength: 100
+              $ref: "#/components/schemas/PairingStart"
       responses:
         "200":
-          description: New access and refresh credentials
+          description: Challenge for the client Ed25519 key
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Session"
-        "401":
-          $ref: "#/components/responses/Error"
-        "429":
-          $ref: "#/components/responses/Error"
-  /auth/refresh:
+                $ref: "#/components/schemas/PairingChallenge"
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /pairing/complete:
     post:
       security: []
-      operationId: refreshSession
+      operationId: completePairing
+      description: Verify the signature, atomically create the user/client, and consume the invitation.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
-              additionalProperties: false
-              required: [refreshToken]
-              properties:
-                refreshToken:
-                  type: string
+              $ref: "#/components/schemas/PairingCompletion"
       responses:
-        "200":
-          description: Rotated access and refresh credentials
+        "201":
+          description: Paired client credential. The credential is returned once.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Session"
-        "401":
-          $ref: "#/components/responses/Error"
-  /auth/logout:
-    post:
-      operationId: logout
-      responses:
-        "204":
-          description: Session revoked
-        "401":
-          $ref: "#/components/responses/Error"
+                $ref: "#/components/schemas/PairingResult"
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /me:
     get:
       operationId: getCurrentUser
       responses:
         "200":
-          description: Authenticated user
+          description: User and client represented by the client bearer credential
           content:
             application/json:
               schema:
                 type: object
-                required: [user]
+                required: [user, clientId]
                 properties:
-                  user:
-                    $ref: "#/components/schemas/User"
-        "401":
-          $ref: "#/components/responses/Error"
+                  user: { $ref: "#/components/schemas/User" }
+                  clientId: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
   /chat:
     post:
       operationId: chat
-      description: >-
-        Sends only the explicit message list to the local model. The hub never
-        loads storage snapshots or adds note context.
+      description: Sends only the explicit message list to the local model.
       requestBody:
         required: true
         content:
@@ -130,25 +102,20 @@ paths:
                   type: array
                   minItems: 1
                   maxItems: 20
-                  items:
-                    $ref: "#/components/schemas/ChatMessage"
+                  items: { $ref: "#/components/schemas/ChatMessage" }
       responses:
         "200":
-          description: Complete, non-streaming local-model response
+          description: Complete local-model response
           content:
             application/json:
               schema:
                 type: object
                 required: [message]
                 properties:
-                  message:
-                    $ref: "#/components/schemas/ChatMessage"
-        "401":
-          $ref: "#/components/responses/Error"
-        "429":
-          $ref: "#/components/responses/Error"
-        "503":
-          $ref: "#/components/responses/Error"
+                  message: { $ref: "#/components/schemas/ChatMessage" }
+        "401": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /storage/{appId}/snapshots:
     parameters:
       - $ref: "#/components/parameters/AppId"
@@ -165,26 +132,19 @@ paths:
                 properties:
                   snapshots:
                     type: array
-                    items:
-                      $ref: "#/components/schemas/Snapshot"
-        "401":
-          $ref: "#/components/responses/Error"
-        "403":
-          $ref: "#/components/responses/Error"
+                    items: { $ref: "#/components/schemas/Snapshot" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
   /storage/{appId}/snapshots/latest:
     parameters:
       - $ref: "#/components/parameters/AppId"
     get:
       operationId: getLatestSnapshot
       responses:
-        "200":
-          $ref: "#/components/responses/SnapshotBody"
-        "401":
-          $ref: "#/components/responses/Error"
-        "403":
-          $ref: "#/components/responses/Error"
-        "404":
-          $ref: "#/components/responses/Error"
+        "200": { $ref: "#/components/responses/SnapshotBody" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /storage/{appId}/snapshots/{snapshotId}:
     parameters:
       - $ref: "#/components/parameters/AppId"
@@ -195,16 +155,12 @@ paths:
         - name: X-Content-SHA256
           in: header
           required: false
-          schema:
-            type: string
-            pattern: "^[0-9a-fA-F]{64}$"
+          schema: { type: string, pattern: "^[0-9a-fA-F]{64}$" }
       requestBody:
         required: true
         content:
           application/octet-stream:
-            schema:
-              type: string
-              format: binary
+            schema: { type: string, format: binary }
       responses:
         "201":
           description: Ciphertext stored atomically
@@ -214,144 +170,129 @@ paths:
                 type: object
                 required: [snapshot]
                 properties:
-                  snapshot:
-                    $ref: "#/components/schemas/Snapshot"
-        "400":
-          $ref: "#/components/responses/Error"
-        "401":
-          $ref: "#/components/responses/Error"
-        "403":
-          $ref: "#/components/responses/Error"
-        "413":
-          $ref: "#/components/responses/Error"
+                  snapshot: { $ref: "#/components/schemas/Snapshot" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
     delete:
       operationId: deleteSnapshot
       responses:
-        "204":
-          description: Ciphertext and metadata deleted
-        "403":
-          $ref: "#/components/responses/Error"
-        "401":
-          $ref: "#/components/responses/Error"
-        "404":
-          $ref: "#/components/responses/Error"
+        "204": { description: Ciphertext and metadata deleted }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
+      description: Client credential returned once by successful pairing.
   parameters:
     AppId:
       name: appId
       in: path
       required: true
-      schema:
-        type: string
-        pattern: "^[a-z][a-z0-9-]{1,31}$"
-        example: thoughts
+      schema: { type: string, pattern: "^[a-z][a-z0-9-]{1,31}$" }
     SnapshotId:
       name: snapshotId
       in: path
       required: true
-      schema:
-        type: string
-        format: uuid
+      schema: { type: string, format: uuid }
   responses:
     Error:
       description: JSON error envelope
       content:
         application/json:
-          schema:
-            $ref: "#/components/schemas/Error"
+          schema: { $ref: "#/components/schemas/Error" }
     SnapshotBody:
       description: Opaque client-encrypted snapshot
       headers:
-        X-Snapshot-Id:
-          schema:
-            type: string
-            format: uuid
-        X-Snapshot-Created-At:
-          schema:
-            type: string
-            format: date-time
-        X-Content-SHA256:
-          schema:
-            type: string
+        X-Snapshot-Id: { schema: { type: string, format: uuid } }
+        X-Snapshot-Created-At: { schema: { type: string, format: date-time } }
+        X-Content-SHA256: { schema: { type: string } }
       content:
         application/octet-stream:
-          schema:
-            type: string
-            format: binary
+          schema: { type: string, format: binary }
   schemas:
     Status:
       type: object
       additionalProperties: false
       required: [service, apiVersion, llmAvailable]
       properties:
-        service:
-          type: string
-          const: source-node
-        apiVersion:
-          type: integer
-          const: 1
-        llmAvailable:
-          type: boolean
+        service: { type: string, const: source-node }
+        apiVersion: { type: integer, const: 1 }
+        llmAvailable: { type: boolean }
     User:
       type: object
       additionalProperties: false
-      required: [id, username]
+      required: [id, displayName]
       properties:
-        id:
-          type: string
-          format: uuid
-        username:
-          type: string
-    Session:
+        id: { type: string, format: uuid }
+        displayName: { type: string }
+    PairingStart:
       type: object
       additionalProperties: false
-      required: [accessToken, expiresAt, refreshToken, refreshExpiresAt, user]
+      required: [protocol, invitationId, invitationSecret, clientPublicKey, userDisplayName, clientDisplayName]
       properties:
-        accessToken:
-          type: string
-        expiresAt:
-          type: string
-          format: date-time
-        refreshToken:
-          type: string
-        refreshExpiresAt:
-          type: string
-          format: date-time
-        user:
-          $ref: "#/components/schemas/User"
+        protocol: { type: integer, const: 1 }
+        invitationId: { type: string, format: uuid }
+        invitationSecret: { type: string, description: One-time secret from the QR payload }
+        clientPublicKey: { type: string, description: Base64url DER SubjectPublicKeyInfo for an Ed25519 key }
+        userDisplayName: { type: string, minLength: 1, maxLength: 100 }
+        clientDisplayName: { type: string, minLength: 1, maxLength: 100 }
+    PairingChallenge:
+      type: object
+      additionalProperties: false
+      required: [protocol, handshakeId, challenge, signingPayload, nodeSignature, expiresAt]
+      properties:
+        protocol: { type: integer, const: 1 }
+        handshakeId: { type: string, format: uuid }
+        challenge: { type: string }
+        signingPayload: { type: string, description: Exact UTF-8 bytes the client signs }
+        nodeSignature: { type: string, description: Ed25519 signature over signingPayload }
+        expiresAt: { type: string, format: date-time }
+    PairingCompletion:
+      type: object
+      additionalProperties: false
+      required: [protocol, invitationId, invitationSecret, handshakeId, signature]
+      properties:
+        protocol: { type: integer, const: 1 }
+        invitationId: { type: string, format: uuid }
+        invitationSecret: { type: string }
+        handshakeId: { type: string, format: uuid }
+        signature: { type: string, description: Base64url Ed25519 signature over signingPayload }
+    PairingResult:
+      type: object
+      additionalProperties: false
+      required: [protocol, nodeId, user, client, clientCredential]
+      properties:
+        protocol: { type: integer, const: 1 }
+        nodeId: { type: string }
+        user: { $ref: "#/components/schemas/User" }
+        client:
+          type: object
+          required: [id, displayName]
+          properties:
+            id: { type: string }
+            displayName: { type: string }
+        clientCredential: { type: string, description: Bearer credential returned once }
     ChatMessage:
       type: object
       additionalProperties: false
       required: [role, content]
       properties:
-        role:
-          type: string
-          enum: [user, assistant]
-        content:
-          type: string
-          minLength: 1
-          maxLength: 4000
+        role: { type: string, enum: [user, assistant] }
+        content: { type: string, minLength: 1, maxLength: 4000 }
     Snapshot:
       type: object
       additionalProperties: false
       required: [id, bytes, sha256, createdAt]
       properties:
-        id:
-          type: string
-          format: uuid
-        bytes:
-          type: integer
-          minimum: 1
-        sha256:
-          type: string
-          pattern: "^[0-9a-f]{64}$"
-        createdAt:
-          type: integer
-          description: Unix epoch milliseconds
+        id: { type: string, format: uuid }
+        bytes: { type: integer, minimum: 1 }
+        sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        createdAt: { type: integer, description: Unix epoch milliseconds }
     Error:
       type: object
       additionalProperties: false
@@ -362,7 +303,5 @@ components:
           additionalProperties: false
           required: [code, message]
           properties:
-            code:
-              type: string
-            message:
-              type: string
+            code: { type: string }
+            message: { type: string }

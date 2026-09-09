@@ -1,249 +1,385 @@
 import assert from 'node:assert/strict';
+import { createPublicKey, generateKeyPairSync, randomUUID, sign, verify } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
-import { randomUUID } from 'node:crypto';
-import { createHubServer } from '../src/server.mjs';
-import { hashPassword } from '../src/security.mjs';
+import { loadConfig } from '../src/config.mjs';
+import { createSourceNode } from '../src/server.mjs';
 
 const quietLogger = { info() {}, warn() {}, error() {} };
+const adminPassword = 'correct horse source battery';
 
-async function request(baseUrl, pathname, options = {}) {
-  return fetch(`${baseUrl}${pathname}`, options);
+async function listen(source) {
+  await Promise.all([
+    new Promise((resolve) => source.server.listen(0, '127.0.0.1', resolve)),
+    new Promise((resolve) => source.adminServer.listen(0, '127.0.0.1', resolve)),
+  ]);
+  return {
+    api: `http://127.0.0.1:${source.server.address().port}`,
+    admin: `http://127.0.0.1:${source.adminServer.address().port}`,
+  };
 }
 
-async function responseJson(response) {
+async function json(response) {
   const body = await response.json();
   assert.ok(body);
   return body;
 }
 
-test('Source Node API keeps users isolated and the model behind authentication', async (suite) => {
-  const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'source-node-test-'));
-  let currentTime = 1_800_000_000_000;
-  const modelCalls = [];
-  const ollama = {
-    async status() { return true; },
-    async chat(messages) {
-      modelCalls.push(messages);
-      return { role: 'assistant', content: 'Lokalt svar' };
-    },
+async function initialize(admin) {
+  return fetch(`${admin}/admin/api/initialize`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin: admin },
+    body: JSON.stringify({
+      displayName: 'Source hemma',
+      password: adminPassword,
+      passwordConfirmation: adminPassword,
+    }),
+  });
+}
+
+async function login(admin) {
+  const response = await fetch(`${admin}/admin/api/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin: admin },
+    body: JSON.stringify({ password: adminPassword }),
+  });
+  assert.equal(response.status, 200);
+  const body = await json(response);
+  return {
+    cookie: response.headers.get('set-cookie').split(';')[0],
+    csrf: body.csrfToken,
   };
-  const { server, database } = createHubServer({
-    databasePath: path.join(temporaryRoot, 'state', 'hub.sqlite'),
-    storageRoot: path.join(temporaryRoot, 'vaults'),
-    accessTokenTtlMs: 60_000,
-    refreshTokenTtlMs: 120_000,
+}
+
+function adminHeaders(session, admin, jsonBody = false) {
+  return {
+    cookie: session.cookie,
+    origin: admin,
+    'x-source-csrf': session.csrf,
+    ...(jsonBody ? { 'content-type': 'application/json' } : {}),
+  };
+}
+
+async function invite(admin, session, quotaBytes = 5 * 1024 ** 3) {
+  const response = await fetch(`${admin}/admin/api/pairing-invitations`, {
+    method: 'POST',
+    headers: adminHeaders(session, admin, true),
+    body: JSON.stringify({ quotaBytes }),
+  });
+  assert.equal(response.status, 201);
+  return (await json(response)).invitation;
+}
+
+function simulatedClient() {
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  return {
+    privateKey,
+    publicKey: publicKey.export({ type: 'spki', format: 'der' }).toString('base64url'),
+  };
+}
+
+async function startPairing(api, invitation, client = simulatedClient()) {
+  const payload = new URL(invitation.payload);
+  const request = {
+    protocol: Number(payload.searchParams.get('v')),
+    invitationId: payload.searchParams.get('invite'),
+    invitationSecret: payload.searchParams.get('secret'),
+    clientPublicKey: client.publicKey,
+    userDisplayName: 'Robin',
+    clientDisplayName: 'Testtelefon',
+  };
+  const response = await fetch(`${api}/api/v1/pairing/start`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  return { response, request, client };
+}
+
+test('first-run admin lifecycle and complete key-based pairing', async (suite) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'source-node-pairing-'));
+  let now = 1_800_000_000_000;
+  const ollama = { async status() { return true; }, async chat() { return { role: 'assistant', content: 'Lokalt svar' }; } };
+  const options = {
+    databasePath: path.join(root, 'state', 'source.sqlite'),
+    storageRoot: path.join(root, 'vaults'),
+    pairingBaseUrl: 'https://192.168.1.10:8443/api/v1/pairing',
+    pairingInvitationTtlMs: 300_000,
     maximumSnapshotBytes: 1_024,
-    userStorageQuotaBytes: 2_048,
-    snapshotRetention: 2,
-    allowedStorageApps: new Set(['thoughts']),
-    clock: () => ++currentTime,
+    clock: () => now,
     ollama,
     logger: quietLogger,
-  });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  };
+  let source = createSourceNode(options);
+  let urls = await listen(source);
 
-  const passwords = { alice: 'alice-password-for-test', bob: 'bob-password-for-test' };
-  for (const [username, password] of Object.entries(passwords)) {
-    database.createUser({
-      username,
-      passwordHash: await hashPassword(password),
-      now: Date.now(),
+  try {
+    await suite.test('fresh Node requires setup and admin is loopback by default', async () => {
+      assert.equal(source.config.adminHost, '127.0.0.1');
+      assert.throws(
+        () => loadConfig({ adminHost: '0.0.0.0', containerAdmin: false }),
+        /must be loopback/,
+      );
+      const state = await fetch(`${urls.admin}/admin/api/state`);
+      assert.deepEqual(await json(state), {
+        initialized: false,
+        authenticated: false,
+        suggestedNodeName: os.hostname(),
+      });
+      const dashboard = await fetch(`${urls.admin}/admin/api/dashboard`);
+      assert.equal(dashboard.status, 401);
+      const ui = await fetch(`${urls.admin}/`);
+      const html = await ui.text();
+      assert.equal(ui.status, 200);
+      assert.match(html, /Initialize this Node/);
+      assert.doesNotMatch(html, /<(?:script|link)[^>]+(?:src|href)=["']https?:/i);
     });
-  }
 
-  async function login(username) {
-    const response = await request(baseUrl, '/api/v1/auth/login', {
+    let nodeId;
+    await suite.test('initialization is persistent and stores only a password hash', async () => {
+      const mismatch = await fetch(`${urls.admin}/admin/api/initialize`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin: urls.admin },
+        body: JSON.stringify({ displayName: 'Source hemma', password: adminPassword, passwordConfirmation: 'something else entirely' }),
+      });
+      assert.equal(mismatch.status, 400);
+      assert.equal(source.database.isInitialized(), false);
+
+      const response = await initialize(urls.admin);
+      assert.equal(response.status, 201);
+      const state = source.database.getNodeState({ includeSecrets: true });
+      nodeId = state.nodeId;
+      assert.equal(state.displayName, 'Source hemma');
+      assert.match(state.nodeId, /^srcnode_/);
+      assert.match(state.adminPasswordHash, /^argon2id\$/);
+      assert.equal(state.adminPasswordHash.includes(adminPassword), false);
+      assert.equal(JSON.stringify(source.database.getNodeState()).includes('privateKey'), false);
+
+      const again = await initialize(urls.admin);
+      assert.equal(again.status, 409);
+      assert.equal(source.database.getNodeState().nodeId, nodeId);
+    });
+
+    const session = await login(urls.admin);
+
+    await suite.test('admin authentication and CSRF are enforced', async () => {
+      const noAuth = await fetch(`${urls.admin}/admin/api/pairing-invitations`, {
+        method: 'POST', headers: { 'content-type': 'application/json', origin: urls.admin }, body: JSON.stringify({ quotaBytes: 1024 ** 3 }),
+      });
+      assert.equal(noAuth.status, 401);
+      const noCsrf = await fetch(`${urls.admin}/admin/api/pairing-invitations`, {
+        method: 'POST', headers: { cookie: session.cookie, 'content-type': 'application/json', origin: urls.admin }, body: JSON.stringify({ quotaBytes: 1024 ** 3 }),
+      });
+      assert.equal(noCsrf.status, 403);
+      const dashboard = await fetch(`${urls.admin}/admin/api/dashboard`, { headers: { cookie: session.cookie } });
+      assert.equal(dashboard.status, 200);
+      assert.equal((await json(dashboard)).node.nodeId, nodeId);
+    });
+
+    await suite.test('invalid, cancelled and expired invitations cannot pair', async () => {
+      const first = await invite(urls.admin, session);
+      assert.equal(new URL(first.payload).protocol, 'source:');
+      assert.equal(new URL(first.payload).searchParams.get('node_id'), nodeId);
+      const qr = await fetch(`${urls.admin}/admin/api/pairing-invitations/${first.id}/qr.svg`, {
+        headers: { cookie: session.cookie },
+      });
+      assert.equal(qr.status, 200);
+      assert.match(await qr.text(), /<svg[^>]+>/);
+      const secondWhileActive = await fetch(`${urls.admin}/admin/api/pairing-invitations`, {
+        method: 'POST', headers: adminHeaders(session, urls.admin, true), body: JSON.stringify({ quotaBytes: 1024 ** 3 }),
+      });
+      assert.equal(secondWhileActive.status, 409);
+
+      const wrong = structuredClone(first);
+      const wrongUrl = new URL(wrong.payload);
+      wrongUrl.searchParams.set('secret', 'x'.repeat(43));
+      wrong.payload = wrongUrl.toString();
+      assert.equal((await startPairing(urls.api, wrong)).response.status, 404);
+
+      const begun = await startPairing(urls.api, first);
+      assert.equal(begun.response.status, 200);
+      const begunChallenge = await json(begun.response);
+      const cancel = await fetch(`${urls.admin}/admin/api/pairing-invitations/${first.id}`, {
+        method: 'DELETE', headers: adminHeaders(session, urls.admin),
+      });
+      assert.equal(cancel.status, 204);
+      assert.equal((await startPairing(urls.api, first)).response.status, 404);
+      const afterCancel = await fetch(`${urls.api}/api/v1/pairing/complete`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          protocol: 1,
+          invitationId: begun.request.invitationId,
+          invitationSecret: begun.request.invitationSecret,
+          handshakeId: begunChallenge.handshakeId,
+          signature: sign(null, Buffer.from(begunChallenge.signingPayload), begun.client.privateKey).toString('base64url'),
+        }),
+      });
+      assert.equal(afterCancel.status, 404);
+      assert.equal(source.database.listUsers().length, 0);
+
+      const expiring = await invite(urls.admin, session);
+      assert.notEqual(expiring.id, first.id);
+      assert.notEqual(new URL(expiring.payload).searchParams.get('secret'), new URL(first.payload).searchParams.get('secret'));
+      now += 300_001;
+      assert.equal((await startPairing(urls.api, expiring)).response.status, 404);
+      assert.equal(source.pairing.getInvitation().state, 'expired');
+      now += 1;
+    });
+
+    let credential;
+    await suite.test('successful proof creates user and client atomically and QR cannot replay', async () => {
+      const invitation = await invite(urls.admin, session, 7 * 1024 ** 3);
+      const started = await startPairing(urls.api, invitation);
+      assert.equal(started.response.status, 200);
+      const challenge = await json(started.response);
+      const nodeKey = createPublicKey({
+        key: Buffer.from(new URL(invitation.payload).searchParams.get('node_key'), 'base64url'),
+        type: 'spki',
+        format: 'der',
+      });
+      assert.equal(
+        verify(null, Buffer.from(challenge.signingPayload), nodeKey, Buffer.from(challenge.nodeSignature, 'base64url')),
+        true,
+      );
+      const signature = sign(null, Buffer.from(challenge.signingPayload), started.client.privateKey).toString('base64url');
+      const completionBody = {
+        protocol: 1,
+        invitationId: started.request.invitationId,
+        invitationSecret: started.request.invitationSecret,
+        handshakeId: challenge.handshakeId,
+        signature,
+      };
+      const completed = await fetch(`${urls.api}/api/v1/pairing/complete`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(completionBody),
+      });
+      assert.equal(completed.status, 201);
+      const paired = await json(completed);
+      credential = paired.clientCredential;
+      const storedCredential = source.database.database.prepare('SELECT credential_hash AS credentialHash FROM clients').get();
+      assert.notEqual(storedCredential.credentialHash, credential);
+      assert.equal(storedCredential.credentialHash.includes(credential), false);
+      assert.equal(source.database.listUsers()[0].quotaBytes, 7 * 1024 ** 3);
+      assert.equal(source.database.listUsers()[0].clientCount, 1);
+      assert.equal(source.database.listUsers()[0].displayName, 'Robin');
+
+      const replay = await fetch(`${urls.api}/api/v1/pairing/complete`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(completionBody),
+      });
+      assert.equal(replay.status, 404);
+      assert.equal(source.database.listUsers().length, 1);
+
+      const dashboard = await fetch(`${urls.admin}/admin/api/dashboard`, { headers: { cookie: session.cookie } });
+      assert.equal((await json(dashboard)).users[0].clientCount, 1);
+    });
+
+    await suite.test('paired client credential authenticates the normal API', async () => {
+      const me = await fetch(`${urls.api}/api/v1/me`, { headers: { authorization: `Bearer ${credential}` } });
+      assert.equal(me.status, 200);
+      assert.equal((await json(me)).user.displayName, 'Robin');
+      const snapshotId = randomUUID();
+      const upload = await fetch(`${urls.api}/api/v1/storage/thoughts/snapshots/${snapshotId}`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${credential}`, 'content-type': 'application/octet-stream' },
+        body: Buffer.alloc(64, 7),
+      });
+      assert.equal(upload.status, 201, 'the paired user quota permits the snapshot');
+      const oldPasswordLogin = await fetch(`${urls.api}/api/v1/auth/login`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+      });
+      assert.equal(oldPasswordLogin.status, 401);
+    });
+
+    await suite.test('restart preserves identity/users but invalidates active invitation', async () => {
+      const active = await invite(urls.admin, session);
+      assert.equal((await startPairing(urls.api, active)).response.status, 200);
+      await source.close();
+      source = createSourceNode(options);
+      urls = await listen(source);
+      assert.equal(source.database.getNodeState().nodeId, nodeId);
+      assert.equal(source.database.listUsers().length, 1);
+      assert.equal((await startPairing(urls.api, active)).response.status, 404);
+      const me = await fetch(`${urls.api}/api/v1/me`, { headers: { authorization: `Bearer ${credential}` } });
+      assert.equal(me.status, 200);
+    });
+  } finally {
+    await source.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('invalid client proof and malformed keys do not create a user', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'source-node-proof-'));
+  const source = createSourceNode({
+    databasePath: path.join(root, 'state.sqlite'), storageRoot: path.join(root, 'vaults'),
+    ollama: { async status() { return false; } }, logger: quietLogger,
+  });
+  const urls = await listen(source);
+  try {
+    await initialize(urls.admin);
+    const session = await login(urls.admin);
+    const invitation = await invite(urls.admin, session);
+    const malformed = await startPairing(urls.api, invitation, { publicKey: 'not-a-key' });
+    assert.equal(malformed.response.status, 400);
+
+    const started = await startPairing(urls.api, invitation);
+    const challenge = await json(started.response);
+    const failed = await fetch(`${urls.api}/api/v1/pairing/complete`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        username,
-        password: passwords[username],
-        deviceName: 'Testtelefon',
+        protocol: 1,
+        invitationId: started.request.invitationId,
+        invitationSecret: started.request.invitationSecret,
+        handshakeId: challenge.handshakeId,
+        signature: Buffer.alloc(64).toString('base64url'),
       }),
     });
-    assert.equal(response.status, 200);
-    return responseJson(response);
-  }
-
-  try {
-    await suite.test('status is minimal and does not require authentication', async () => {
-      const response = await request(baseUrl, '/api/v1/status');
-      assert.equal(response.status, 200);
-      assert.deepEqual(await responseJson(response), {
-        service: 'source-node',
-        apiVersion: 1,
-        llmAvailable: true,
-      });
-    });
-
-    const alice = await login('alice');
-    const bob = await login('bob');
-
-    await suite.test('invalid credentials are rejected without account disclosure', async () => {
-      const response = await request(baseUrl, '/api/v1/auth/login', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ username: 'alice', password: 'incorrect-password', deviceName: 'Telefon' }),
-      });
-      assert.equal(response.status, 401);
-      assert.equal((await responseJson(response)).error.code, 'invalid_credentials');
-    });
-
-    await suite.test('opaque snapshots are isolated by the authenticated user', async () => {
-      const snapshotId = randomUUID();
-      const ciphertext = Buffer.alloc(96, 0xa7);
-      const upload = await request(
-        baseUrl,
-        `/api/v1/storage/thoughts/snapshots/${snapshotId}`,
-        {
-          method: 'PUT',
-          headers: {
-            authorization: `Bearer ${alice.accessToken}`,
-            'content-type': 'application/octet-stream',
-          },
-          body: ciphertext,
-        },
-      );
-      assert.equal(upload.status, 201);
-
-      const aliceList = await request(baseUrl, '/api/v1/storage/thoughts/snapshots', {
-        headers: { authorization: `Bearer ${alice.accessToken}` },
-      });
-      assert.equal((await responseJson(aliceList)).snapshots.length, 1);
-
-      const bobList = await request(baseUrl, '/api/v1/storage/thoughts/snapshots', {
-        headers: { authorization: `Bearer ${bob.accessToken}` },
-      });
-      assert.deepEqual((await responseJson(bobList)).snapshots, []);
-
-      const download = await request(baseUrl, '/api/v1/storage/thoughts/snapshots/latest', {
-        headers: { authorization: `Bearer ${alice.accessToken}` },
-      });
-      assert.equal(download.status, 200);
-      assert.deepEqual(Buffer.from(await download.arrayBuffer()), ciphertext);
-
-      const bobDownload = await request(baseUrl, '/api/v1/storage/thoughts/snapshots/latest', {
-        headers: { authorization: `Bearer ${bob.accessToken}` },
-      });
-      assert.equal(bobDownload.status, 404);
-
-      for (let index = 0; index < 2; index += 1) {
-        const response = await request(
-          baseUrl,
-          `/api/v1/storage/thoughts/snapshots/${randomUUID()}`,
-          {
-            method: 'PUT',
-            headers: {
-              authorization: `Bearer ${alice.accessToken}`,
-              'content-type': 'application/octet-stream',
-            },
-            body: Buffer.alloc(96, index + 1),
-          },
-        );
-        assert.equal(response.status, 201);
-      }
-      const retained = await request(baseUrl, '/api/v1/storage/thoughts/snapshots', {
-        headers: { authorization: `Bearer ${alice.accessToken}` },
-      });
-      assert.equal((await responseJson(retained)).snapshots.length, 2);
-    });
-
-    await suite.test('storage app identifiers are allowlisted', async () => {
-      const response = await request(baseUrl, '/api/v1/storage/unknown/snapshots', {
-        headers: { authorization: `Bearer ${alice.accessToken}` },
-      });
-      assert.equal(response.status, 403);
-      assert.equal((await responseJson(response)).error.code, 'app_not_allowed');
-    });
-
-    await suite.test('snapshot size and checksum are enforced before storage', async () => {
-      const mismatch = await request(
-        baseUrl,
-        `/api/v1/storage/thoughts/snapshots/${randomUUID()}`,
-        {
-          method: 'PUT',
-          headers: {
-            authorization: `Bearer ${alice.accessToken}`,
-            'content-type': 'application/octet-stream',
-            'x-content-sha256': '0'.repeat(64),
-          },
-          body: Buffer.alloc(64, 4),
-        },
-      );
-      assert.equal(mismatch.status, 400);
-      assert.equal((await responseJson(mismatch)).error.code, 'snapshot_hash_mismatch');
-
-      const tooLarge = await request(
-        baseUrl,
-        `/api/v1/storage/thoughts/snapshots/${randomUUID()}`,
-        {
-          method: 'PUT',
-          headers: {
-            authorization: `Bearer ${alice.accessToken}`,
-            'content-type': 'application/octet-stream',
-          },
-          body: Buffer.alloc(1_025, 5),
-        },
-      );
-      assert.equal(tooLarge.status, 413);
-    });
-
-    await suite.test('chat accepts only explicit messages and requires authentication', async () => {
-      const unauthenticated = await request(baseUrl, '/api/v1/chat', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ messages: [{ role: 'user', content: 'Hej' }] }),
-      });
-      assert.equal(unauthenticated.status, 401);
-
-      const response = await request(baseUrl, '/api/v1/chat', {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${alice.accessToken}`,
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({ messages: [{ role: 'user', content: 'Hej lokala modell' }] }),
-      });
-      assert.equal(response.status, 200);
-      assert.deepEqual((await responseJson(response)).message, {
-        role: 'assistant',
-        content: 'Lokalt svar',
-      });
-      assert.deepEqual(modelCalls, [[{ role: 'user', content: 'Hej lokala modell' }]]);
-    });
-
-    await suite.test('refresh rotates credentials and logout revokes the access token', async () => {
-      const refreshedResponse = await request(baseUrl, '/api/v1/auth/refresh', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ refreshToken: alice.refreshToken }),
-      });
-      assert.equal(refreshedResponse.status, 200);
-      const refreshed = await responseJson(refreshedResponse);
-      assert.notEqual(refreshed.accessToken, alice.accessToken);
-
-      const oldAccess = await request(baseUrl, '/api/v1/me', {
-        headers: { authorization: `Bearer ${alice.accessToken}` },
-      });
-      assert.equal(oldAccess.status, 401);
-
-      const logout = await request(baseUrl, '/api/v1/auth/logout', {
-        method: 'POST',
-        headers: { authorization: `Bearer ${refreshed.accessToken}` },
-      });
-      assert.equal(logout.status, 204);
-
-      const revoked = await request(baseUrl, '/api/v1/me', {
-        headers: { authorization: `Bearer ${refreshed.accessToken}` },
-      });
-      assert.equal(revoked.status, 401);
-    });
+    assert.equal(failed.status, 401);
+    assert.equal(source.database.listUsers().length, 0);
   } finally {
-    await new Promise((resolve) => server.close(resolve));
-    await fs.rm(temporaryRoot, { recursive: true, force: true });
+    await source.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('legacy password users and their encrypted storage are removed during schema replacement', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'source-node-legacy-'));
+  const databasePath = path.join(root, 'state', 'source.sqlite');
+  const storageRoot = path.join(root, 'vaults');
+  const legacyUserId = randomUUID();
+  await fs.mkdir(path.dirname(databasePath), { recursive: true });
+  await fs.mkdir(path.join(storageRoot, legacyUserId), { recursive: true });
+  await fs.writeFile(path.join(storageRoot, legacyUserId, 'legacy.bin'), 'ciphertext');
+  const legacy = new DatabaseSync(databasePath);
+  legacy.exec(`
+    CREATE TABLE users (
+      id TEXT PRIMARY KEY,
+      username TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      disabled_at INTEGER
+    ) STRICT;
+  `);
+  legacy.prepare('INSERT INTO users (id, username, password_hash, created_at) VALUES (?, ?, ?, ?)')
+    .run(legacyUserId, 'legacy', 'old-password-hash', Date.now());
+  legacy.close();
+
+  const source = createSourceNode({
+    databasePath,
+    storageRoot,
+    ollama: { async status() { return false; } },
+    logger: quietLogger,
+  });
+  try {
+    assert.deepEqual(source.database.listUsers(), []);
+    assert.equal(source.database.database.prepare("SELECT COUNT(*) AS count FROM pragma_table_info('users') WHERE name = 'password_hash'").get().count, 0);
+    await assert.rejects(fs.access(path.join(storageRoot, legacyUserId)), { code: 'ENOENT' });
+  } finally {
+    await source.close();
+    await fs.rm(root, { recursive: true, force: true });
   }
 });

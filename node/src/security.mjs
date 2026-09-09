@@ -1,6 +1,9 @@
 import {
   argon2Sync,
   createHash,
+  createPrivateKey,
+  createPublicKey,
+  generateKeyPairSync,
   randomBytes,
   timingSafeEqual,
 } from 'node:crypto';
@@ -71,23 +74,49 @@ export function validatePassword(password) {
   }
 }
 
-export function normalizeUsername(username) {
-  if (typeof username !== 'string') throw new Error('Username is required');
-  const normalized = username.trim().toLowerCase();
-  if (!/^[a-z0-9][a-z0-9._-]{2,63}$/.test(normalized)) {
-    throw new Error('Username must be 3-64 lowercase letters, digits, dot, underscore or dash');
-  }
-  return normalized;
-}
-
-export function generatePassword() {
-  return `${randomBytes(12).toString('base64url')}-${randomBytes(6).toString('base64url')}`;
-}
-
 export function generateToken() {
   return randomBytes(32).toString('base64url');
 }
 
 export function tokenHash(token) {
   return createHash('sha256').update(token, 'utf8').digest('hex');
+}
+
+export function generateNodeIdentity() {
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const publicKeyDer = publicKey.export({ type: 'spki', format: 'der' });
+  return {
+    nodeId: `srcnode_${createHash('sha256').update(publicKeyDer).digest('base64url')}`,
+    publicKey: publicKeyDer.toString('base64url'),
+    privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+  };
+}
+
+export function parseEd25519PublicKey(encoded) {
+  if (typeof encoded !== 'string' || encoded.length < 40 || encoded.length > 256) {
+    throw new Error('Invalid Ed25519 public key');
+  }
+  const der = Buffer.from(encoded, 'base64url');
+  const key = createPublicKey({ key: der, type: 'spki', format: 'der' });
+  if (key.asymmetricKeyType !== 'ed25519') throw new Error('Invalid Ed25519 public key');
+  const canonical = key.export({ type: 'spki', format: 'der' });
+  if (!canonical.equals(der)) throw new Error('Invalid Ed25519 public key');
+  return { key, der, encoded: canonical.toString('base64url') };
+}
+
+export function loadNodePrivateKey(encoded) {
+  const key = createPrivateKey(encoded);
+  if (key.asymmetricKeyType !== 'ed25519') throw new Error('Invalid Node private key');
+  return key;
+}
+
+export function clientIdFromPublicKey(publicKeyDer) {
+  return `srcclient_${createHash('sha256').update(publicKeyDer).digest('base64url')}`;
+}
+
+export function safeTokenHashEqual(token, expectedHash) {
+  if (typeof token !== 'string' || typeof expectedHash !== 'string' || !/^[0-9a-f]{64}$/.test(expectedHash)) return false;
+  const actual = Buffer.from(tokenHash(token), 'hex');
+  const expected = Buffer.from(expectedHash, 'hex');
+  return timingSafeEqual(actual, expected);
 }

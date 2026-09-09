@@ -1,4 +1,5 @@
 import path from 'node:path';
+import os from 'node:os';
 
 function positiveInteger(name, fallback) {
   const raw = process.env[name];
@@ -21,20 +22,32 @@ function identifierList(name, fallback) {
 
 export function loadConfig(overrides = {}) {
   const stateRoot = overrides.stateRoot ?? process.env.SOURCE_NODE_STATE_ROOT ?? '/state';
+  const gatewayHost = overrides.gatewayHost ?? process.env.SOURCE_GATEWAY_HOST ?? '127.0.0.1';
+  const httpsPort = overrides.httpsPort ?? positiveInteger('SOURCE_HTTPS_PORT', 8443);
+  const adminHost = overrides.adminHost ?? process.env.SOURCE_ADMIN_HOST ?? '127.0.0.1';
+  const containerAdmin = overrides.containerAdmin ?? process.env.SOURCE_ADMIN_CONTAINER_MODE === '1';
+  if (!['127.0.0.1', '::1', 'localhost'].includes(adminHost) && !containerAdmin) {
+    throw new Error('SOURCE_ADMIN_HOST must be loopback (container deployments must explicitly set SOURCE_ADMIN_CONTAINER_MODE=1)');
+  }
   return {
     host: overrides.host ?? process.env.SOURCE_NODE_HOST ?? '0.0.0.0',
     port: overrides.port ?? positiveInteger('SOURCE_NODE_PORT', 8080),
+    adminHost,
+    adminPort: overrides.adminPort ?? positiveInteger('SOURCE_ADMIN_PORT', 9090),
+    adminSessionTtlMs:
+      overrides.adminSessionTtlMs ?? positiveInteger('ADMIN_SESSION_TTL_SECONDS', 8 * 60 * 60) * 1000,
+    pairingInvitationTtlMs:
+      overrides.pairingInvitationTtlMs ?? positiveInteger('PAIRING_INVITATION_TTL_SECONDS', 5 * 60) * 1000,
+    pairingBaseUrl:
+      overrides.pairingBaseUrl
+      ?? process.env.SOURCE_PAIRING_BASE_URL
+      ?? `https://${gatewayHost}:${httpsPort}/api/v1/pairing`,
+    suggestedNodeName: overrides.suggestedNodeName ?? os.hostname(),
     databasePath:
       overrides.databasePath ?? process.env.SOURCE_NODE_DATABASE_PATH ?? path.join(stateRoot, 'source-node.sqlite'),
     storageRoot: overrides.storageRoot ?? process.env.SOURCE_NODE_STORAGE_ROOT ?? '/vaults',
-    accessTokenTtlMs:
-      overrides.accessTokenTtlMs ?? positiveInteger('ACCESS_TOKEN_TTL_SECONDS', 15 * 60) * 1000,
-    refreshTokenTtlMs:
-      overrides.refreshTokenTtlMs ?? positiveInteger('REFRESH_TOKEN_TTL_DAYS', 30) * 86_400_000,
     maximumSnapshotBytes:
       overrides.maximumSnapshotBytes ?? positiveInteger('MAX_SNAPSHOT_MIB', 32) * 1024 * 1024,
-    userStorageQuotaBytes:
-      overrides.userStorageQuotaBytes ?? positiveInteger('USER_STORAGE_QUOTA_MIB', 1024) * 1024 * 1024,
     snapshotRetention:
       overrides.snapshotRetention ?? positiveInteger('SNAPSHOT_RETENTION_COUNT', 20),
     allowedStorageApps:

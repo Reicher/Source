@@ -1,0 +1,172 @@
+# First run, administration, and pairing
+
+## Lifecycle and trust boundary
+
+A fresh database has no `node_state` row. `POST /admin/api/initialize`
+validates the display name and repeated admin password, derives an Argon2id
+password hash, creates an Ed25519 Node key pair, and commits all permanent
+state in one SQLite transaction. The Node is initialized only when that
+transaction succeeds. Its stable Node ID is `srcnode_` plus the base64url
+SHA-256 digest of the DER-encoded public key. Changing a display name in a
+future release must not replace that identity.
+
+The Source process has two HTTP listeners:
+
+| Listener | Default | Purpose |
+| --- | --- | --- |
+| Source/LAN | `0.0.0.0:8080` behind the local-CA HTTPS gateway | Pairing and authenticated client APIs |
+| Administration | `127.0.0.1:9090` | First run, login, dashboard, users, invitations |
+
+The Compose deployment publishes the admin container port only as
+`127.0.0.1:9090` on the physical host. `SOURCE_ADMIN_HOST=0.0.0.0` is used
+inside that container solely so Docker's loopback-only host mapping can reach
+it. The admin listener is not routed through Caddy or attached to the LAN edge.
+Direct/non-container deployments retain the safe `127.0.0.1` default.
+
+The self-contained admin UI loads no remote script, stylesheet, image, font,
+analytics, or telemetry. Admin sessions are process-local, expire after eight
+hours by default, and use an HttpOnly, SameSite=Strict cookie. Mutations also
+require a per-session CSRF header and same-origin JSON requests. A restart logs
+all administrators out.
+
+## Permanent model
+
+`node_state` stores the Node name, ID, public/private Ed25519 key material,
+admin password hash, and creation time. Private key and password hash are never
+returned by an API. The SQLite state file is created with mode `0600`.
+
+`users` and `clients` are separate. A user has a random ID, random storage
+namespace, byte-valued quota, display name, and creation time. Each client has
+a key-derived stable ID, Ed25519 public key, display name, hashed API
+credential, timestamps, and revocation state. This permits more clients to be
+attached to a user later without changing the data model.
+
+The pre-pairing prototype's Node-side user passwords and sessions are not
+retained. On first startup of this version, a legacy `users.password_hash`
+schema is detected and the old users, sessions, snapshot metadata, and their
+server-side encrypted storage directories are removed before the new key-paired schema is created. The user/password model
+must not be reintroduced: Source user passwords belong exclusively to clients.
+
+## Invitation and QR format
+
+Only an authenticated administrator can create an invitation. At most one is
+active. It contains a 256-bit random secret, UUID, quota in bytes, creation
+time, five-minute default expiry, and transient handshakes. It exists only in
+process memory. Cancellation, expiry, successful pairing, or process restart
+clears the secret and all provisional handshakes.
+
+The QR is generated locally and encodes a deterministic URI whose parameters
+appear in this order:
+
+```text
+source://pair?v=1&node_id=...&node_key=...&name=...&endpoint=...&invite=...&secret=...&expires=...
+```
+
+- `v`: pairing protocol version (`1`)
+- `node_id`: stable Node ID
+- `node_key`: base64url DER SubjectPublicKeyInfo for the Node Ed25519 key
+- `name`: human-readable Node display name
+- `endpoint`: LAN HTTPS base URL ending in `/api/v1/pairing`
+- `invite`: invitation UUID
+- `secret`: one-time 256-bit base64url secret
+- `expires`: ISO 8601 expiry
+
+The future client should treat a scanned QR as a secret, validate its version,
+expiry, URL scheme/host, Node ID derived from `node_key`, and later verify the
+Node signature returned by the challenge endpoint.
+
+## Node-side protocol v1
+
+### 1. Start
+
+`POST {endpoint}/start`, `Content-Type: application/json`:
+
+```json
+{
+  "protocol": 1,
+  "invitationId": "UUID from QR",
+  "invitationSecret": "secret from QR",
+  "clientPublicKey": "base64url DER Ed25519 SubjectPublicKeyInfo",
+  "userDisplayName": "Robin",
+  "clientDisplayName": "Robin's phone"
+}
+```
+
+The Node checks the active invitation, protocol, names, key encoding, and
+duplicate client identity. It derives `clientId = "srcclient_" +
+base64url(SHA-256(clientPublicKeyDER))` and returns:
+
+```json
+{
+  "protocol": 1,
+  "handshakeId": "UUID",
+  "challenge": "base64url random bytes",
+  "signingPayload": "exact string to sign",
+  "nodeSignature": "base64url Ed25519 signature",
+  "expiresAt": "ISO 8601"
+}
+```
+
+`signingPayload` is the UTF-8 encoding of these newline-separated fields:
+
+```text
+source-pairing-v1
+NODE_ID
+INVITATION_ID
+HANDSHAKE_ID
+CHALLENGE
+CLIENT_ID
+base64url(UTF-8 USER_DISPLAY_NAME)
+base64url(UTF-8 CLIENT_DISPLAY_NAME)
+```
+
+The client verifies `nodeSignature` with `node_key` from the QR, then signs the
+exact `signingPayload` bytes with its own Ed25519 private key.
+
+### 2. Complete
+
+`POST {endpoint}/complete`:
+
+```json
+{
+  "protocol": 1,
+  "invitationId": "UUID from QR",
+  "invitationSecret": "secret from QR",
+  "handshakeId": "UUID from start",
+  "signature": "base64url client Ed25519 signature"
+}
+```
+
+Signature verification and SQLite user/client creation run without an async
+interleaving point. The database inserts both records in one immediate
+transaction. Only after it commits does the service clear and consume the
+invitation. The response contains user/client metadata and a 256-bit
+`clientCredential`, returned once; only its SHA-256 hash is stored. The client
+uses it as `Authorization: Bearer ...` for normal Source API calls.
+
+Failures expose bounded error codes rather than secrets or internal details.
+An absent, unknown, cancelled, expired, consumed, or pre-restart invitation
+returns the same `pairing_unavailable` response. An invalid signature does not
+consume the invitation or create a user. Replaying a completed request cannot
+create another user.
+
+## Local admin interface
+
+The UI uses these loopback-only interfaces:
+
+- `GET /admin/api/state`
+- `POST /admin/api/initialize`
+- `POST /admin/api/login`
+- `POST /admin/api/logout`
+- `GET /admin/api/dashboard`
+- `POST /admin/api/pairing-invitations`
+- `GET /admin/api/pairing-invitations/active`
+- `DELETE /admin/api/pairing-invitations/{id}`
+- `GET /admin/api/pairing-invitations/{id}/qr.svg`
+
+The dashboard contains administrative metadata and bounded system-health
+values only. It does not expose storage namespaces, ciphertext, private keys,
+password hashes, invitation secrets as text, or client credentials.
+
+The LAN API is specified in `contracts/source-api.openapi.yml`. Admin routes
+are deliberately not part of that LAN contract.

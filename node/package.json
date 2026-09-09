@@ -1,6 +1,6 @@
 {
   "name": "source-node",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -10,5 +10,8 @@
     "start": "node src/server.mjs",
     "admin": "node src/admin.mjs",
     "test": "node --test"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
   }
 }

@@ -42,12 +42,6 @@ function bearerToken(request) {
   return token.length >= 32 && token.length <= 256 ? token : null;
 }
 
-function clientAddress(request) {
-  const forwarded = request.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
-  return request.socket.remoteAddress ?? 'unknown';
-}
-
 async function readBody(request, maximumBytes) {
   const chunks = [];
   let length = 0;
@@ -71,18 +65,6 @@ async function readJson(request, maximumBytes = 64 * 1024) {
   } catch {
     throw new HttpError(400, 'invalid_json', 'Begäran innehåller ogiltig JSON.');
   }
-}
-
-function validateLogin(body) {
-  if (!body || typeof body !== 'object') throw new HttpError(400, 'invalid_request', 'Ogiltig begäran.');
-  if (typeof body.username !== 'string' || typeof body.password !== 'string') {
-    throw new HttpError(400, 'invalid_credentials', 'Användarnamn och lösenord krävs.');
-  }
-  const deviceName = typeof body.deviceName === 'string' ? body.deviceName.trim() : '';
-  if (deviceName.length < 1 || deviceName.length > 100) {
-    throw new HttpError(400, 'invalid_device_name', 'Enhetsnamnet måste vara 1–100 tecken.');
-  }
-  return { username: body.username.trim().toLowerCase(), password: body.password, deviceName };
 }
 
 function validateMessages(body) {
@@ -127,10 +109,9 @@ function authorizeStorageApp(config, appId) {
   return appId;
 }
 
-export function createRequestHandler({ database, config, ollama, logger = console }) {
+export function createRequestHandler({ database, config, ollama, pairing, logger = console }) {
   const auth = new AuthService(database, config);
   const storage = new SnapshotStorage(database, config);
-  const loginLimiter = new RateLimiter({ limit: 5, windowMs: 15 * 60_000, clock: config.clock });
   const chatLimiter = new RateLimiter({ limit: 10, windowMs: 60_000, clock: config.clock });
 
   return async function handle(request, response) {
@@ -157,41 +138,24 @@ export function createRequestHandler({ database, config, ollama, logger = consol
         return;
       }
 
-      if (route === 'POST /api/v1/auth/login') {
-        const limiterKey = clientAddress(request);
-        if (!loginLimiter.take(limiterKey)) {
-          throw new HttpError(429, 'too_many_attempts', 'För många inloggningsförsök. Försök senare.');
-        }
-        const credentials = validateLogin(await readJson(request));
-        const result = await auth.login(credentials);
-        if (!result) throw new HttpError(401, 'invalid_credentials', 'Fel användarnamn eller lösenord.');
+      if (route === 'POST /api/v1/pairing/start') {
         status = 200;
-        json(response, status, result);
+        json(response, status, pairing.start(await readJson(request)));
         return;
       }
 
-      if (route === 'POST /api/v1/auth/refresh') {
-        const body = await readJson(request);
-        const result = auth.refresh(body?.refreshToken);
-        if (!result) throw new HttpError(401, 'invalid_session', 'Sessionen är inte längre giltig.');
-        status = 200;
-        json(response, status, result);
+      if (route === 'POST /api/v1/pairing/complete') {
+        status = 201;
+        json(response, status, pairing.complete(await readJson(request)));
         return;
       }
 
       const session = auth.authenticate(bearerToken(request));
       if (!session) throw new HttpError(401, 'authentication_required', 'Giltig inloggning krävs.');
 
-      if (route === 'POST /api/v1/auth/logout') {
-        auth.logout(session.sessionId);
-        status = 204;
-        empty(response, status);
-        return;
-      }
-
       if (route === 'GET /api/v1/me') {
         status = 200;
-        json(response, status, { user: session.user });
+        json(response, status, { user: session.user, clientId: session.clientId });
         return;
       }
 
