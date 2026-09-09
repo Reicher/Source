@@ -85,6 +85,26 @@ paths:
                   user: { $ref: "#/components/schemas/User" }
                   clientId: { type: string }
         "401": { $ref: "#/components/responses/Error" }
+  /identity/challenge:
+    post:
+      operationId: proveNodeIdentity
+      description: >-
+        Returns a fresh Ed25519 proof of the permanent Node identity, bound to
+        the authenticated client and its nonce. Clients use this after DNS-SD
+        rediscovery before showing the Node as connected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NodeIdentityChallenge" }
+      responses:
+        "200":
+          description: Signed Node identity proof
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NodeIdentityProof" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
   /chat:
     post:
       operationId: chat
@@ -277,6 +297,26 @@ components:
             id: { type: string }
             displayName: { type: string }
         clientCredential: { type: string, description: Bearer credential returned once }
+    NodeIdentityChallenge:
+      type: object
+      additionalProperties: false
+      required: [protocol, nonce]
+      properties:
+        protocol: { type: integer, const: 1 }
+        nonce: { type: string, description: Fresh 256-bit base64url client nonce }
+    NodeIdentityProof:
+      type: object
+      additionalProperties: false
+      required: [protocol, nodeId, nodePublicKey, displayName, clientId, nonce, signingPayload, nodeSignature]
+      properties:
+        protocol: { type: integer, const: 1 }
+        nodeId: { type: string }
+        nodePublicKey: { type: string, description: Base64url DER Ed25519 SubjectPublicKeyInfo }
+        displayName: { type: string }
+        clientId: { type: string }
+        nonce: { type: string }
+        signingPayload: { type: string, description: Exact UTF-8 bytes signed by the Node }
+        nodeSignature: { type: string, description: Ed25519 signature over signingPayload }
     ChatMessage:
       type: object
       additionalProperties: false

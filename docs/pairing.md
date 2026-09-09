@@ -145,6 +145,38 @@ invitation. The response contains user/client metadata and a 256-bit
 `clientCredential`, returned once; only its SHA-256 hash is stored. The client
 uses it as `Authorization: Bearer ...` for normal Source API calls.
 
+## Discovery and reconnect proof
+
+An initialized Node advertises `_source._tcp` with DNS-SD/mDNS. The service
+port is the public HTTPS gateway port. Its TXT record contains only public,
+untrusted hints: `v=1`, `id=NODE_ID`, `name=NODE_DISPLAY_NAME`, and
+`api=/api/v1`. Discovery never grants
+trust. Container deployments use the small host-network `discovery` sidecar so
+multicast originates on the physical LAN interface.
+
+After finding a previously paired Node, the client sends an authenticated
+`POST /api/v1/identity/challenge` request containing `protocol: 1` and a fresh
+256-bit base64url `nonce`. The Node returns its public identity, the client ID,
+display name, nonce, exact signing payload, and an Ed25519 signature. The
+newline-separated payload is:
+
+```text
+source-node-auth-v1
+NODE_ID
+CLIENT_ID
+NONCE
+base64url(UTF-8 NODE_DISPLAY_NAME)
+```
+
+The client must compare the returned Node ID and key with its persisted trust,
+compare the client ID and nonce with its request, reconstruct the exact payload,
+and verify the signature before showing the Node as connected. A DNS-SD name,
+TXT record, hostname, or IP address alone is never authoritative.
+
+The LAN HTTPS certificate chains to the installation's local Source CA. That CA
+must be installed as a user trust anchor on Android before pairing; the client
+does not disable TLS verification.
+
 Failures expose bounded error codes rather than secrets or internal details.
 An absent, unknown, cancelled, expired, consumed, or pre-restart invitation
 returns the same `pairing_unavailable` response. An invalid signature does not

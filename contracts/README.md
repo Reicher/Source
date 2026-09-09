@@ -7,5 +7,10 @@ opaque client-encrypted application snapshots. The loopback-only admin API is
 documented separately in [`../docs/pairing.md`](../docs/pairing.md) and is not
 part of the LAN contract.
 
+Source Nodes advertise `_source._tcp` over DNS-SD. The advertisement is an
+untrusted routing hint; paired clients use the authenticated identity-challenge
+operation in the OpenAPI contract to verify the Node's permanent Ed25519 key
+after every rediscovery.
+
 The generated local CA certificate is an installation artifact, not part of
 the API contract. `scripts/export-ca.sh` writes it to `artifacts/source-node-ca.crt`.

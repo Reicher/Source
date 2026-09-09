@@ -18,6 +18,16 @@ jobs:
       - name: Test Source Node
         working-directory: node
         run: npm test
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK 36
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - name: Test Android Source Client
+        working-directory: clients/android
+        run: ./gradlew testDebugUnitTest lintDebug assembleDebug
       - name: Validate shell scripts
         run: for script in scripts/*.sh; do sh -n "$script"; done
       - name: Validate Compose configuration

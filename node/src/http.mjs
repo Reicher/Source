@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { URL } from 'node:url';
 import { AuthService } from './auth.mjs';
+import { proveNodeIdentity } from './node-identity.mjs';
 import { RateLimiter } from './rate-limit.mjs';
 import { SnapshotStorage } from './storage.mjs';
 
@@ -156,6 +157,12 @@ export function createRequestHandler({ database, config, ollama, pairing, logger
       if (route === 'GET /api/v1/me') {
         status = 200;
         json(response, status, { user: session.user, clientId: session.clientId });
+        return;
+      }
+
+      if (route === 'POST /api/v1/identity/challenge') {
+        status = 200;
+        json(response, status, proveNodeIdentity(database, session, await readJson(request)));
         return;
       }
 

@@ -6,6 +6,7 @@ import { createAdminHandler } from './admin-http.mjs';
 import { loadConfig } from './config.mjs';
 import { HubDatabase } from './database.mjs';
 import { createRequestHandler } from './http.mjs';
+import { SourceDiscovery } from './discovery.mjs';
 import { OllamaClient } from './ollama.mjs';
 import { PairingService } from './pairing.mjs';
 
@@ -45,17 +46,19 @@ export function createSourceNode(overrides = {}) {
   const state = runtime(overrides);
   const server = httpServer(createRequestHandler(state), state.config);
   const adminServer = httpServer(createAdminHandler(state), state.config);
+  const discovery = overrides.discovery ?? new SourceDiscovery(state);
   let closed = false;
   async function close() {
     if (closed) return;
     closed = true;
+    await discovery.stop();
     await Promise.all([server, adminServer].map((item) => new Promise((resolve, reject) => {
       if (!item.listening) return resolve();
       item.close((error) => error ? reject(error) : resolve());
     })));
     state.database.close();
   }
-  return { server, adminServer, close, ...state };
+  return { server, adminServer, discovery, close, ...state };
 }
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
@@ -67,6 +70,7 @@ if (isMain) {
   source.adminServer.listen(source.config.adminPort, source.config.adminHost, () => {
     console.log(`source admin listening on ${source.config.adminHost}:${source.config.adminPort}`);
   });
+  if (source.config.discoveryEnabled) source.discovery.start();
   const shutdown = () => source.close().finally(() => process.exit(0));
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);

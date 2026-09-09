@@ -20,6 +20,14 @@ function identifierList(name, fallback) {
   return new Set(values);
 }
 
+function booleanSetting(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  if (raw === '1' || raw === 'true') return true;
+  if (raw === '0' || raw === 'false') return false;
+  throw new Error(`${name} must be true/false or 1/0`);
+}
+
 export function loadConfig(overrides = {}) {
   const stateRoot = overrides.stateRoot ?? process.env.SOURCE_NODE_STATE_ROOT ?? '/state';
   const gatewayHost = overrides.gatewayHost ?? process.env.SOURCE_GATEWAY_HOST ?? '127.0.0.1';
@@ -32,6 +40,8 @@ export function loadConfig(overrides = {}) {
   return {
     host: overrides.host ?? process.env.SOURCE_NODE_HOST ?? '0.0.0.0',
     port: overrides.port ?? positiveInteger('SOURCE_NODE_PORT', 8080),
+    httpsPort,
+    discoveryEnabled: overrides.discoveryEnabled ?? booleanSetting('SOURCE_DISCOVERY_ENABLED', true),
     adminHost,
     adminPort: overrides.adminPort ?? positiveInteger('SOURCE_ADMIN_PORT', 9090),
     adminSessionTtlMs:

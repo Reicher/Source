@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createPublicKey, generateKeyPairSync, randomUUID, sign, verify } from 'node:crypto';
+import { createPublicKey, generateKeyPairSync, randomBytes, randomUUID, sign, verify } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -280,6 +280,37 @@ test('first-run admin lifecycle and complete key-based pairing', async (suite) =
       const me = await fetch(`${urls.api}/api/v1/me`, { headers: { authorization: `Bearer ${credential}` } });
       assert.equal(me.status, 200);
       assert.equal((await json(me)).user.displayName, 'Robin');
+      const nonce = randomBytes(32).toString('base64url');
+      const identityResponse = await fetch(`${urls.api}/api/v1/identity/challenge`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${credential}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ protocol: 1, nonce }),
+      });
+      assert.equal(identityResponse.status, 200);
+      const identity = await json(identityResponse);
+      const expectedIdentityPayload = [
+        'source-node-auth-v1',
+        nodeId,
+        identity.clientId,
+        nonce,
+        Buffer.from('Source hemma', 'utf8').toString('base64url'),
+      ].join('\n');
+      assert.equal(identity.signingPayload, expectedIdentityPayload);
+      assert.equal(identity.nodeId, nodeId);
+      assert.equal(identity.nonce, nonce);
+      assert.equal(
+        verify(
+          null,
+          Buffer.from(identity.signingPayload),
+          createPublicKey({ key: Buffer.from(identity.nodePublicKey, 'base64url'), type: 'spki', format: 'der' }),
+          Buffer.from(identity.nodeSignature, 'base64url'),
+        ),
+        true,
+      );
+      const unauthenticatedProof = await fetch(`${urls.api}/api/v1/identity/challenge`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ protocol: 1, nonce }),
+      });
+      assert.equal(unauthenticatedProof.status, 401);
       const snapshotId = randomUUID();
       const upload = await fetch(`${urls.api}/api/v1/storage/thoughts/snapshots/${snapshotId}`, {
         method: 'PUT',

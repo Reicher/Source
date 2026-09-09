@@ -18,10 +18,10 @@ provides:
 - authenticated chat through a local Ollama model;
 - a versioned OpenAPI contract.
 
-The standalone Source Client, general sync, client-side key management, and
-broader personal-data model are not implemented yet. The complete Node side of
-pairing is available for a future client. Thoughts is the first intended
-Source-compatible application.
+The first Android Source Client now lives in [`clients/android`](clients/android/README.md).
+It implements local identity, LAN discovery, QR pairing, and automatic trusted
+reconnect. General sync and the broader personal-data model are not implemented
+yet. Thoughts is the first intended Source-compatible application.
 
 ## Install Source Node
 

@@ -96,6 +96,11 @@ docker compose up -d --build
 docker compose ps
 ```
 
+The `discovery` sidecar uses host networking to publish `_source._tcp` mDNS on
+the physical LAN. Native Linux supports this directly; Docker Desktop must have
+host networking enabled. Permit local multicast UDP 5353 and the configured
+HTTPS port in the host firewall, but do not expose either through the router.
+
 Open `http://127.0.0.1:9090` on the physical Node to complete first-run setup,
 log in, view health, and add users. The gateway creates a local certificate authority on first start. Export only
 its public root certificate:
