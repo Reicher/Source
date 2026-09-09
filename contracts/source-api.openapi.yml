@@ -1,0 +1,368 @@
+openapi: 3.1.0
+info:
+  title: Source Node API
+  version: 1.0.0
+  description: >-
+    Early Source API for authenticated local-model chat and opaque,
+    client-encrypted application snapshots. Source Node never receives a
+    client's vault key.
+servers:
+  - url: https://{sourceNodeHost}:8443/api/v1
+    description: Source Node on a trusted local network
+    variables:
+      sourceNodeHost:
+        default: 192.168.1.10
+        description: Reserved LAN address configured by the operator
+security:
+  - bearerAuth: []
+paths:
+  /status:
+    get:
+      security: []
+      operationId: getStatus
+      responses:
+        "200":
+          description: Minimal reachability and model status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+  /auth/login:
+    post:
+      security: []
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [username, password, deviceName]
+              properties:
+                username:
+                  type: string
+                  minLength: 3
+                  maxLength: 64
+                password:
+                  type: string
+                  minLength: 12
+                  maxLength: 256
+                deviceName:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+      responses:
+        "200":
+          description: New access and refresh credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+  /auth/refresh:
+    post:
+      security: []
+      operationId: refreshSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [refreshToken]
+              properties:
+                refreshToken:
+                  type: string
+      responses:
+        "200":
+          description: Rotated access and refresh credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Error"
+  /auth/logout:
+    post:
+      operationId: logout
+      responses:
+        "204":
+          description: Session revoked
+        "401":
+          $ref: "#/components/responses/Error"
+  /me:
+    get:
+      operationId: getCurrentUser
+      responses:
+        "200":
+          description: Authenticated user
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user:
+                    $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Error"
+  /chat:
+    post:
+      operationId: chat
+      description: >-
+        Sends only the explicit message list to the local model. The hub never
+        loads storage snapshots or adds note context.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [messages]
+              properties:
+                messages:
+                  type: array
+                  minItems: 1
+                  maxItems: 20
+                  items:
+                    $ref: "#/components/schemas/ChatMessage"
+      responses:
+        "200":
+          description: Complete, non-streaming local-model response
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [message]
+                properties:
+                  message:
+                    $ref: "#/components/schemas/ChatMessage"
+        "401":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /storage/{appId}/snapshots:
+    parameters:
+      - $ref: "#/components/parameters/AppId"
+    get:
+      operationId: listSnapshots
+      responses:
+        "200":
+          description: Newest snapshots first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [snapshots]
+                properties:
+                  snapshots:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Snapshot"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+  /storage/{appId}/snapshots/latest:
+    parameters:
+      - $ref: "#/components/parameters/AppId"
+    get:
+      operationId: getLatestSnapshot
+      responses:
+        "200":
+          $ref: "#/components/responses/SnapshotBody"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /storage/{appId}/snapshots/{snapshotId}:
+    parameters:
+      - $ref: "#/components/parameters/AppId"
+      - $ref: "#/components/parameters/SnapshotId"
+    put:
+      operationId: putSnapshot
+      parameters:
+        - name: X-Content-SHA256
+          in: header
+          required: false
+          schema:
+            type: string
+            pattern: "^[0-9a-fA-F]{64}$"
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "201":
+          description: Ciphertext stored atomically
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [snapshot]
+                properties:
+                  snapshot:
+                    $ref: "#/components/schemas/Snapshot"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "413":
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: deleteSnapshot
+      responses:
+        "204":
+          description: Ciphertext and metadata deleted
+        "403":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    AppId:
+      name: appId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[a-z][a-z0-9-]{1,31}$"
+        example: thoughts
+    SnapshotId:
+      name: snapshotId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  responses:
+    Error:
+      description: JSON error envelope
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    SnapshotBody:
+      description: Opaque client-encrypted snapshot
+      headers:
+        X-Snapshot-Id:
+          schema:
+            type: string
+            format: uuid
+        X-Snapshot-Created-At:
+          schema:
+            type: string
+            format: date-time
+        X-Content-SHA256:
+          schema:
+            type: string
+      content:
+        application/octet-stream:
+          schema:
+            type: string
+            format: binary
+  schemas:
+    Status:
+      type: object
+      additionalProperties: false
+      required: [service, apiVersion, llmAvailable]
+      properties:
+        service:
+          type: string
+          const: source-node
+        apiVersion:
+          type: integer
+          const: 1
+        llmAvailable:
+          type: boolean
+    User:
+      type: object
+      additionalProperties: false
+      required: [id, username]
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+    Session:
+      type: object
+      additionalProperties: false
+      required: [accessToken, expiresAt, refreshToken, refreshExpiresAt, user]
+      properties:
+        accessToken:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        refreshToken:
+          type: string
+        refreshExpiresAt:
+          type: string
+          format: date-time
+        user:
+          $ref: "#/components/schemas/User"
+    ChatMessage:
+      type: object
+      additionalProperties: false
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [user, assistant]
+        content:
+          type: string
+          minLength: 1
+          maxLength: 4000
+    Snapshot:
+      type: object
+      additionalProperties: false
+      required: [id, bytes, sha256, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        bytes:
+          type: integer
+          minimum: 1
+        sha256:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        createdAt:
+          type: integer
+          description: Unix epoch milliseconds
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string

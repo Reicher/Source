@@ -1,0 +1,24 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Test Source Node
+        working-directory: node
+        run: npm test
+      - name: Validate shell scripts
+        run: for script in scripts/*.sh; do sh -n "$script"; done
+      - name: Validate Compose configuration
+        run: docker compose --env-file .env.example config --quiet

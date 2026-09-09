@@ -1,0 +1,29 @@
+{
+	admin off
+	auto_https disable_redirects
+	default_sni {$SOURCE_GATEWAY_HOST}
+}
+
+https://{$SOURCE_GATEWAY_HOST}:8443 {
+	tls internal
+	encode zstd gzip
+
+	request_body {
+		max_size 34MB
+	}
+
+	header {
+		-Server
+		Cache-Control "no-store"
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+	}
+
+	reverse_proxy node:8080 {
+		transport http {
+			dial_timeout 3s
+			response_header_timeout 130s
+		}
+	}
+}

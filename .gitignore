@@ -1,0 +1,10 @@
+.env
+data/
+backups/
+artifacts/
+*.tar
+*.tar.gz
+*.tgz
+.DS_Store
+*.swp
+*~
