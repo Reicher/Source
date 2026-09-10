@@ -50,7 +50,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.logger.Printf("%s %s %d %dms", r.Method, r.URL.Path, status, h.cfg.Now().Sub(started).Milliseconds())
 	}()
 	if r.URL.RawQuery != "" {
-		status = h.fail(w, apperror.New(400, "query_not_supported", "Query-parametrar stöds inte."))
+		status = h.fail(w, apperror.New(400, "query_not_supported", "Query parameters are not supported."))
 		return
 	}
 	route := r.Method + " " + r.URL.Path
@@ -100,7 +100,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if session == nil {
-		status = h.fail(w, apperror.New(401, "authentication_required", "Giltig inloggning krävs."))
+		status = h.fail(w, apperror.New(401, "authentication_required", "Valid authentication is required."))
 		return
 	}
 	if route == "GET /api/v1/me" {
@@ -136,7 +136,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !validExact(body.RecoveryKey, 43) || !validExact(body.RecoveryEnvelope, 80) {
-			status = h.fail(w, apperror.New(400, "invalid_recovery_material", "Återställningsmaterialet är ogiltigt."))
+			status = h.fail(w, apperror.New(400, "invalid_recovery_material", "Recovery material is invalid."))
 			return
 		}
 		ok, e := h.db.ConfigureRecovery(session.User.ID, security.TokenHash(body.RecoveryKey), body.RecoveryEnvelope)
@@ -145,7 +145,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !ok {
-			status = h.fail(w, apperror.New(409, "recovery_already_configured", "Återställningsnyckeln är redan konfigurerad."))
+			status = h.fail(w, apperror.New(409, "recovery_already_configured", "The recovery key is already configured."))
 			return
 		}
 		status = 201
@@ -154,7 +154,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if route == "POST /api/v1/ai/stream" {
 		if !h.chat.Take(session.User.ID) {
-			status = h.fail(w, apperror.New(429, "chat_rate_limited", "För många AI-frågor. Vänta en stund."))
+			status = h.fail(w, apperror.New(429, "chat_rate_limited", "Too many AI requests. Wait a moment."))
 			return
 		}
 		var body aiRequest
@@ -200,7 +200,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if m := listPath.FindStringSubmatch(r.URL.Path); r.Method == http.MethodGet && m != nil {
 		if !h.allowed(m[1]) {
-			status = h.fail(w, apperror.New(403, "app_not_allowed", "Appen har inte tillgång till lagringen."))
+			status = h.fail(w, apperror.New(403, "app_not_allowed", "The app does not have access to storage."))
 			return
 		}
 		items, e := h.storage.List(session.User.ID, m[1])
@@ -217,7 +217,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if m := latestPath.FindStringSubmatch(r.URL.Path); r.Method == http.MethodGet && m != nil {
 		if !h.allowed(m[1]) {
-			status = h.fail(w, apperror.New(403, "app_not_allowed", "Appen har inte tillgång till lagringen."))
+			status = h.fail(w, apperror.New(403, "app_not_allowed", "The app does not have access to storage."))
 			return
 		}
 		value, e := h.storage.Latest(session.User.ID, m[1])
@@ -226,7 +226,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if value == nil {
-			status = h.fail(w, apperror.New(404, "snapshot_not_found", "Ingen backup finns."))
+			status = h.fail(w, apperror.New(404, "snapshot_not_found", "No backup exists."))
 			return
 		}
 		status = 200
@@ -242,11 +242,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if m := itemPath.FindStringSubmatch(r.URL.Path); m != nil && r.Method == http.MethodPut {
 		if !h.allowed(m[1]) {
-			status = h.fail(w, apperror.New(403, "app_not_allowed", "Appen har inte tillgång till lagringen."))
+			status = h.fail(w, apperror.New(403, "app_not_allowed", "The app does not have access to storage."))
 			return
 		}
 		if !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/octet-stream") {
-			status = h.fail(w, apperror.New(415, "unsupported_media_type", "Snapshoten måste vara application/octet-stream."))
+			status = h.fail(w, apperror.New(415, "unsupported_media_type", "The snapshot must use application/octet-stream."))
 			return
 		}
 		body, e := readBody(r, h.cfg.MaximumSnapshotBytes)
@@ -255,14 +255,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(body) < 32 {
-			status = h.fail(w, apperror.New(400, "invalid_snapshot", "Snapshoten är för liten."))
+			status = h.fail(w, apperror.New(400, "invalid_snapshot", "The snapshot is too small."))
 			return
 		}
 		sum := sha256.Sum256(body)
 		actual := hex.EncodeToString(sum[:])
 		declared := r.Header.Get("X-Content-SHA256")
 		if declared != "" && strings.ToLower(declared) != actual {
-			status = h.fail(w, apperror.New(400, "snapshot_hash_mismatch", "Snapshotens checksumma stämmer inte."))
+			status = h.fail(w, apperror.New(400, "snapshot_hash_mismatch", "The snapshot checksum does not match."))
 			return
 		}
 		metadata, e := h.storage.Put(session.User.ID, m[1], m[2], body)
@@ -277,7 +277,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if m := itemPath.FindStringSubmatch(r.URL.Path); m != nil && r.Method == http.MethodDelete {
 		if !h.allowed(m[1]) {
-			status = h.fail(w, apperror.New(403, "app_not_allowed", "Appen har inte tillgång till lagringen."))
+			status = h.fail(w, apperror.New(403, "app_not_allowed", "The app does not have access to storage."))
 			return
 		}
 		ok, e := h.storage.Delete(session.User.ID, m[1], m[2])
@@ -286,7 +286,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !ok {
-			status = h.fail(w, apperror.New(404, "snapshot_not_found", "Backupen finns inte."))
+			status = h.fail(w, apperror.New(404, "snapshot_not_found", "The backup does not exist."))
 			return
 		}
 		status = 204
@@ -294,7 +294,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(204)
 		return
 	}
-	status = h.fail(w, apperror.New(404, "not_found", "Endpointen finns inte."))
+	status = h.fail(w, apperror.New(404, "not_found", "The endpoint does not exist."))
 }
 
 func (h *Handler) allowed(app string) bool { _, ok := h.cfg.AllowedStorageApps[app]; return ok }
@@ -302,7 +302,7 @@ func (h *Handler) fail(w http.ResponseWriter, e error) int {
 	status, code, message := apperror.Details(e)
 	if status >= 500 {
 		h.logger.Printf("source node request failed: %v", e)
-		message = "Servern kunde inte slutföra begäran."
+		message = "The server could not complete the request."
 	}
 	writeJSON(w, status, map[string]any{"error": map[string]any{"code": code, "message": message}})
 	return status
@@ -328,14 +328,14 @@ func bearer(r *http.Request) string {
 }
 func readJSON(_ http.ResponseWriter, r *http.Request, max int64, destination any) error {
 	if !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
-		return apperror.New(415, "unsupported_media_type", "Content-Type måste vara application/json.")
+		return apperror.New(415, "unsupported_media_type", "Content-Type must be application/json.")
 	}
 	body, e := readBody(r, max)
 	if e != nil {
 		return e
 	}
 	if e = json.Unmarshal(body, destination); e != nil {
-		return apperror.New(400, "invalid_json", "Begäran innehåller ogiltig JSON.")
+		return apperror.New(400, "invalid_json", "The request contains invalid JSON.")
 	}
 	return nil
 }
@@ -345,7 +345,7 @@ func readBody(r *http.Request, max int64) ([]byte, error) {
 		return nil, e
 	}
 	if int64(len(body)) > max {
-		return nil, apperror.New(413, "request_too_large", "Begäran är för stor.")
+		return nil, apperror.New(413, "request_too_large", "The request is too large.")
 	}
 	return body, nil
 }
@@ -365,29 +365,29 @@ type aiRequest struct {
 
 func validateAI(body aiRequest) ([]localai.Message, error) {
 	if body.ContractVersion != 1 || !uuid.MatchString(body.RunID) || len(body.ConversationID) < 1 || len(body.ConversationID) > 200 || body.Messages == nil {
-		return nil, apperror.New(400, "invalid_ai_request", "AI-begäran är ogiltig.")
+		return nil, apperror.New(400, "invalid_ai_request", "The AI request is invalid.")
 	}
 	if len(body.Messages) < 1 || len(body.Messages) > 20 {
-		return nil, apperror.New(400, "invalid_messages", "Skicka mellan 1 och 20 meddelanden.")
+		return nil, apperror.New(400, "invalid_messages", "Send between 1 and 20 messages.")
 	}
 	messages := make([]localai.Message, 0, len(body.Messages))
 	total := 0
 	for _, m := range body.Messages {
 		if m.Role != "user" && m.Role != "assistant" {
-			return nil, apperror.New(400, "invalid_message_role", "Endast user och assistant är tillåtna roller.")
+			return nil, apperror.New(400, "invalid_message_role", "Only user and assistant roles are allowed.")
 		}
 		if len(m.Content) != 1 || m.Content[0].Type != "text" {
-			return nil, apperror.New(400, "invalid_message", "Varje meddelande måste innehålla text.")
+			return nil, apperror.New(400, "invalid_message", "Every message must contain text.")
 		}
 		text := strings.TrimSpace(m.Content[0].Text)
 		if len(text) < 1 || len(text) > 4000 {
-			return nil, apperror.New(400, "invalid_message", "Varje meddelande måste vara 1–4000 tecken.")
+			return nil, apperror.New(400, "invalid_message", "Every message must contain 1–4000 characters.")
 		}
 		total += len(text)
 		messages = append(messages, localai.Message{Role: m.Role, Content: text})
 	}
 	if total > 16000 || messages[len(messages)-1].Role != "user" {
-		return nil, apperror.New(400, "invalid_messages", "Chatthistoriken är för stor eller slutar inte med en fråga.")
+		return nil, apperror.New(400, "invalid_messages", "The chat history is too large or does not end with a question.")
 	}
 	return messages, nil
 }

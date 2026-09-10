@@ -1,8 +1,10 @@
 package com.source.client.ui
 
 import android.app.Application
+import androidx.annotation.StringRes
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.source.client.R
 import com.source.client.SourceClientApplication
 import com.source.client.ai.SourceAiContent
 import com.source.client.ai.SourceAiEvent
@@ -18,6 +20,7 @@ import com.source.client.model.PairingInvitation
 import com.source.client.model.TrustedNode
 import com.source.client.model.VaultProfile
 import com.source.client.protocol.PairingPayloadException
+import com.source.client.protocol.PairingPayloadError
 import com.source.client.protocol.PairingPayloadParser
 import com.source.client.protocol.SourceApiException
 import com.source.client.security.VaultSession
@@ -120,10 +123,10 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     fun createIdentity(userName: String, password: String, confirmation: String) {
         val name = userName.trim()
         val error = when {
-            name.isEmpty() -> "Ange ett användarnamn."
-            name.length > 100 || name.any { it.isISOControl() } -> "Användarnamnet är ogiltigt."
-            password.isEmpty() -> "Ange ett lösenord."
-            password != confirmation -> "Lösenorden matchar inte."
+            name.isEmpty() -> message(R.string.error_user_name_required)
+            name.length > 100 || name.any { it.isISOControl() } -> message(R.string.error_user_name_invalid)
+            password.isEmpty() -> message(R.string.error_password_required)
+            password != confirmation -> message(R.string.error_passwords_mismatch)
             else -> null
         }
         if (error != null) {
@@ -142,7 +145,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             } catch (_: Exception) {
                 _screen.value = AppScreen.Setup(
                     canCancel = app.secureVault.profiles.isNotEmpty(),
-                    error = "Användaren kunde inte skapas på den här enheten.",
+                    error = message(R.string.error_user_creation_failed),
                 )
             } finally {
                 chars.fill('\u0000')
@@ -153,7 +156,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     fun unlock(password: String) {
         val locked = _screen.value as? AppScreen.Locked ?: return
         if (password.isEmpty()) {
-            _screen.value = locked.copy(error = "Ange ditt lösenord.")
+            _screen.value = locked.copy(error = message(R.string.error_enter_password))
             return
         }
         _screen.value = locked.copy(error = null, busy = true)
@@ -162,7 +165,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             try {
                 val unlocked = withContext(Dispatchers.Default) { app.secureVault.unlock(locked.profile.id, chars) }
                 if (unlocked == null) {
-                    _screen.value = locked.copy(error = "Fel lösenord.")
+                    _screen.value = locked.copy(error = message(R.string.error_incorrect_password))
                 } else {
                     session = unlocked
                     chatState = ChatUiState(messages = withContext(Dispatchers.Default) {
@@ -174,7 +177,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             } catch (_: Exception) {
                 session?.close()
                 session = null
-                _screen.value = locked.copy(error = "Source-data kunde inte läsas på den här enheten.")
+                _screen.value = locked.copy(error = message(R.string.error_source_data_unreadable))
             } finally {
                 chars.fill('\u0000')
             }
@@ -209,12 +212,12 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
         val content = raw.trim()
         if (content.isEmpty() || inferenceJob?.isActive == true) return
         if (recoveryRestorePending) {
-            chatState = chatState.copy(error = "Vänta medan din data återställs från noden.")
+            chatState = chatState.copy(error = message(R.string.error_recovery_restore_in_progress))
             publishChat()
             return
         }
         if (content.length > MAX_MESSAGE_CHARACTERS) {
-            chatState = chatState.copy(error = "Meddelandet får vara högst 4000 tecken.")
+            chatState = chatState.copy(error = message(R.string.error_message_too_long))
             publishChat()
             return
         }
@@ -361,14 +364,14 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
                         }
                     }
                     is SourceAiEvent.Completed -> completed = true
-                    is SourceAiEvent.Failed -> throw SourceApiException(event.code, "Nodens AI kunde inte slutföra svaret.")
+                    is SourceAiEvent.Failed -> throw SourceApiException(event.code, "The Node AI could not complete the response.")
                 }
             }
         } catch (error: Exception) {
             if (content.isNotEmpty()) {
                 throw SourceApiException(
                     "node_stream_interrupted_after_output",
-                    "Anslutningen till noden bröts mitt i svaret.",
+                    "The connection to the Node was interrupted during the response.",
                 )
             }
             throw error
@@ -429,11 +432,11 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
         val invitation = try {
             PairingPayloadParser.parse(raw)
         } catch (error: PairingPayloadException) {
-            _screen.value = scanner.copy(error = error.message)
+            _screen.value = scanner.copy(error = pairingErrorMessage(error.error))
             return
         }
         if (invitation.nodeId != scanner.node.nodeIdHint) {
-            _screen.value = scanner.copy(error = "QR-koden tillhör inte noden du valde.")
+            _screen.value = scanner.copy(error = message(R.string.error_qr_code_wrong_node))
             return
         }
         if (invitation.recovery) {
@@ -474,7 +477,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
         val recoveryScreen = _screen.value as? AppScreen.Recovery ?: return
         val recoveryKey = rawRecoveryKey.trim()
         if (!recoveryKey.matches(Regex("^[A-Za-z0-9_-]{43}$"))) {
-            _screen.value = recoveryScreen.copy(error = "Återställningsnyckeln är ogiltig.")
+            _screen.value = recoveryScreen.copy(error = message(R.string.error_recovery_key_invalid))
             return
         }
         val activeSession = session ?: return
@@ -509,7 +512,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
                 } catch (_: Exception) {
                     chatState = chatState.copy(
                         busy = false,
-                        error = "Användaren är återansluten, men datan kunde inte hämtas ännu. Klienten försöker igen.",
+                        error = message(R.string.error_recovery_data_pending),
                     )
                     publishChat()
                 }
@@ -680,7 +683,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
                         } catch (_: Exception) {
                             chatState = chatState.copy(
                                 busy = false,
-                                error = "Datan kunde inte hämtas ännu. Klienten försöker igen.",
+                                error = message(R.string.error_data_pending),
                             )
                             publishChat()
                         }
@@ -857,18 +860,58 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun readableChatError(error: Exception): String = when {
-        error is SourceApiException -> error.message ?: "Nodens AI kunde inte svara."
+        error is SourceApiException -> apiErrorMessage(error.code, R.string.error_node_ai_failed)
         error.message?.contains("model part", ignoreCase = true) == true ->
-            "Den lokala AI-modellen är inte installerad."
-        else -> "AI:n kunde inte svara. Försök igen."
+            message(R.string.error_local_model_unavailable)
+        else -> message(R.string.error_ai_failed)
     }
 
     private fun readableError(error: Exception): String = when {
-        error is SourceApiException && error.code == "pairing_unavailable" -> "Inbjudan är inte längre tillgänglig."
-        error is SourceApiException && error.code == "duplicate_client" -> "Den här klienten är redan parkopplad."
-        error is SourceApiException -> error.message ?: "Anslutningen misslyckades."
-        else -> "Source Node kunde inte nås."
+        error is SourceApiException -> apiErrorMessage(error.code, R.string.error_connection_failed)
+        else -> message(R.string.error_node_unreachable)
     }
+
+    private fun apiErrorMessage(code: String, @StringRes fallback: Int): String = message(
+        when (code) {
+            "pairing_unavailable" -> R.string.error_invitation_unavailable
+            "duplicate_client" -> R.string.error_client_already_paired
+            "pairing_proof_failed" -> R.string.error_pairing_proof_failed
+            "invalid_recovery_key" -> R.string.error_recovery_key_incorrect
+            "recovery_not_configured" -> R.string.error_recovery_not_configured
+            "authentication_required" -> R.string.error_authentication_required
+            "model_unavailable" -> R.string.error_node_model_unavailable
+            "chat_rate_limited" -> R.string.error_chat_rate_limited
+            "storage_quota_exceeded" -> R.string.error_storage_quota_exceeded
+            "node_stream_interrupted_after_output" -> R.string.error_node_stream_interrupted
+            else -> fallback
+        },
+    )
+
+    private fun pairingErrorMessage(error: PairingPayloadError): String = message(
+        when (error) {
+            PairingPayloadError.INVALID_SIZE -> R.string.error_qr_invalid_size
+            PairingPayloadError.NOT_SOURCE_CODE -> R.string.error_qr_not_source_code
+            PairingPayloadError.MISSING_CONTENT -> R.string.error_qr_missing_content
+            PairingPayloadError.UNEXPECTED_FIELDS -> R.string.error_qr_unexpected_fields
+            PairingPayloadError.UNSUPPORTED_PROTOCOL -> R.string.error_qr_unsupported_protocol
+            PairingPayloadError.INVALID_NODE_IDENTITY -> R.string.error_qr_invalid_node_identity
+            PairingPayloadError.INVALID_NODE_KEY -> R.string.error_qr_invalid_node_key
+            PairingPayloadError.NODE_IDENTITY_MISMATCH -> R.string.error_qr_node_identity_mismatch
+            PairingPayloadError.INVALID_NODE_NAME -> R.string.error_qr_invalid_node_name
+            PairingPayloadError.INVALID_INVITATION -> R.string.error_qr_invalid_invitation
+            PairingPayloadError.INVALID_EXPIRATION -> R.string.error_qr_invalid_expiration
+            PairingPayloadError.EXPIRED_INVITATION -> R.string.error_qr_expired_invitation
+            PairingPayloadError.INVALID_ACTION -> R.string.error_qr_invalid_action
+            PairingPayloadError.INVALID_CA_CERTIFICATE -> R.string.error_qr_invalid_ca_certificate
+            PairingPayloadError.EXPIRED_CA_CERTIFICATE -> R.string.error_qr_expired_ca_certificate
+            PairingPayloadError.INVALID_ENDPOINT -> R.string.error_qr_invalid_endpoint
+            PairingPayloadError.NON_LOCAL_ENDPOINT -> R.string.error_qr_non_local_endpoint
+            PairingPayloadError.MALFORMED -> R.string.error_qr_malformed
+            PairingPayloadError.INVALID_ENCODING -> R.string.error_qr_invalid_encoding
+        },
+    )
+
+    private fun message(@StringRes resourceId: Int): String = app.getString(resourceId)
 
     override fun onCleared() {
         app.nodeDiscovery.stop()

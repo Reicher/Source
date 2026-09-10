@@ -53,7 +53,7 @@ class SourceNodeApi {
             },
             invitation.tlsCaCertificate,
         )
-        if (start.getInt("protocol") != 1) throw SourceApiException("unsupported_pairing_protocol", "Protokollet stöds inte.")
+        if (start.getInt("protocol") != 1) throw SourceApiException("unsupported_pairing_protocol", "The pairing protocol is not supported.")
         val handshakeId = start.requiredString("handshakeId")
         val challenge = start.requiredString("challenge")
         val signingPayload = start.requiredString("signingPayload")
@@ -61,11 +61,11 @@ class SourceNodeApi {
         if (runCatching { java.util.UUID.fromString(handshakeId) }.isFailure ||
             !challenge.matches(Regex("^[A-Za-z0-9_-]{43}$")) ||
             !nodeSignature.matches(Regex("^[A-Za-z0-9_-]{80,100}$"))
-        ) throw SourceApiException("invalid_challenge", "Noden skickade ett ogiltigt svar.")
+        ) throw SourceApiException("invalid_challenge", "The Node returned an invalid response.")
         val expires = runCatching { java.time.Instant.parse(start.requiredString("expiresAt")).toEpochMilli() }.getOrNull()
-            ?: throw SourceApiException("invalid_challenge", "Noden skickade ett ogiltigt svar.")
+            ?: throw SourceApiException("invalid_challenge", "The Node returned an invalid response.")
         if (expires <= System.currentTimeMillis() || expires > invitation.expiresAtMillis) {
-            throw SourceApiException("expired_challenge", "Parkopplingsförsöket har gått ut.")
+            throw SourceApiException("expired_challenge", "The pairing attempt has expired.")
         }
         val expectedPayload = listOf(
             "source-pairing-v1", invitation.nodeId, invitation.invitationId, handshakeId, challenge,
@@ -78,7 +78,7 @@ class SourceNodeApi {
                 signingPayload,
                 nodeSignature,
             )
-        ) throw SourceApiException("node_proof_failed", "Nodens kryptografiska identitet kunde inte verifieras.")
+        ) throw SourceApiException("node_proof_failed", "The cryptographic identity of the Node could not be verified.")
 
         val complete = postJson(
             "${invitation.pairingEndpoint}/complete",
@@ -94,7 +94,7 @@ class SourceNodeApi {
             invitation.tlsCaCertificate,
         )
         if (complete.getInt("protocol") != 1 || complete.requiredString("nodeId") != invitation.nodeId) {
-            throw SourceApiException("node_identity_changed", "Nodidentiteten ändrades under parkopplingen.")
+            throw SourceApiException("node_identity_changed", "The Node identity changed during pairing.")
         }
         val user = complete.getJSONObject("user")
         val client = complete.getJSONObject("client")
@@ -105,7 +105,7 @@ class SourceNodeApi {
             runCatching { java.util.UUID.fromString(returnedUserId) }.isFailure ||
             !credential.matches(Regex("^[A-Za-z0-9_-]{43}$"))
         ) {
-            throw SourceApiException("client_identity_changed", "Noden returnerade fel klientidentitet.")
+            throw SourceApiException("client_identity_changed", "The Node returned the wrong client identity.")
         }
         PairingResult(
             trustedNode = TrustedNode(
@@ -148,7 +148,7 @@ class SourceNodeApi {
         val nodeSignature = proof.requiredString("nodeSignature")
         if (displayName.length !in 1..100 || displayName.any { it.isISOControl() } ||
             !nodeSignature.matches(Regex("^[A-Za-z0-9_-]{80,100}$"))
-        ) throw SourceApiException("invalid_response", "Noden skickade ett ogiltigt svar.")
+        ) throw SourceApiException("invalid_response", "The Node returned an invalid response.")
         val expectedPayload = listOf(
             "source-node-auth-v1", trusted.nodeId, trusted.clientId, nonce,
             SourceCrypto.base64Url(displayName.toByteArray(Charsets.UTF_8)),
@@ -164,7 +164,7 @@ class SourceNodeApi {
                 expectedPayload,
                 nodeSignature,
             )
-        if (!valid) throw SourceApiException("node_proof_failed", "Nodens identitet kunde inte verifieras.")
+        if (!valid) throw SourceApiException("node_proof_failed", "The Node identity could not be verified.")
         trusted.copy(displayName = displayName)
     }
 
@@ -215,11 +215,11 @@ class SourceNodeApi {
                 connection.inputStream.bufferedReader(Charsets.UTF_8).useLines { lines ->
                     lines.filter(String::isNotBlank).forEach { raw ->
                         val event = runCatching { JSONObject(raw) }.getOrElse {
-                            throw SourceApiException("invalid_response", "Noden skickade ogiltig AI-streamingdata.")
+                            throw SourceApiException("invalid_response", "The Node returned invalid AI streaming data.")
                         }
                         val eventRunId = event.optString("runId")
                         if (eventRunId != request.runId) {
-                            throw SourceApiException("invalid_response", "Noden skickade fel körnings-id.")
+                            throw SourceApiException("invalid_response", "The Node returned the wrong run identifier.")
                         }
                         trySend(when (event.optString("type")) {
                             "started" -> SourceAiEvent.Started(eventRunId)
@@ -237,12 +237,12 @@ class SourceNodeApi {
                                 event.requiredString("code"),
                                 event.optBoolean("retryable", false),
                             )
-                            else -> throw SourceApiException("invalid_response", "Noden skickade en okänd AI-händelse.")
+                            else -> throw SourceApiException("invalid_response", "The Node returned an unknown AI event.")
                         }).getOrThrow()
                     }
                 }
             } catch (error: SSLException) {
-                throw SourceApiException("tls_identity_mismatch", "Nodens HTTPS-identitet stämmer inte med QR-koden.")
+                throw SourceApiException("tls_identity_mismatch", "The HTTPS identity of the Node does not match the QR code.")
             } finally {
                 connection.disconnect()
             }
@@ -323,7 +323,7 @@ class SourceNodeApi {
             val raw = (if (status in 200..299) connection.inputStream else connection.errorStream)
                 ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
             val response = runCatching { JSONObject(raw) }.getOrElse {
-                throw SourceApiException("invalid_response", "Noden skickade ett ogiltigt svar.")
+                throw SourceApiException("invalid_response", "The Node returned an invalid response.")
             }
             if (status !in 200..299) {
                 val error = response.optJSONObject("error")
@@ -333,7 +333,7 @@ class SourceNodeApi {
         } catch (error: SSLException) {
             throw SourceApiException(
                 "tls_identity_mismatch",
-                "Nodens HTTPS-identitet stämmer inte med QR-koden.",
+                "The HTTPS identity of the Node does not match the QR code.",
             )
         } finally {
             connection.disconnect()
@@ -346,7 +346,7 @@ class SourceNodeApi {
         credential: String? = null,
     ): HttpsURLConnection {
         val connection = (URL(url).openConnection() as? HttpsURLConnection)
-            ?: throw SourceApiException("https_required", "Source Node måste använda HTTPS.")
+            ?: throw SourceApiException("https_required", "Source Node must use HTTPS.")
         connection.sslSocketFactory = sslSocketFactory(tlsCaCertificate)
         connection.connectTimeout = NETWORK_TIMEOUT_MILLIS
         connection.useCaches = false
@@ -369,7 +369,7 @@ class SourceNodeApi {
             CertificateFactory.getInstance("X.509").generateCertificate(
                 ByteArrayInputStream(SourceCrypto.base64UrlDecode(encodedCaCertificate)),
             ) as X509Certificate
-        }.getOrElse { throw SourceApiException("invalid_ca_certificate", "QR-kodens CA-certifikat är ogiltigt.") }
+        }.getOrElse { throw SourceApiException("invalid_ca_certificate", "The CA certificate in the QR code is invalid.") }
         val keyStore = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
             load(null, null)
             setCertificateEntry("source-node-ca", certificate)
@@ -381,21 +381,21 @@ class SourceNodeApi {
     }
 
     private fun mapError(code: String?): String = when (code) {
-        "pairing_unavailable" -> "Inbjudan har gått ut, avbrutits eller redan använts."
-        "duplicate_client" -> "Den här klientidentiteten är redan parkopplad."
-        "pairing_proof_failed" -> "Klientens identitet kunde inte verifieras."
-        "invalid_recovery_key" -> "Återställningsnyckeln är fel."
-        "recovery_not_configured" -> "Användaren har ingen återställningsnyckel."
-        "authentication_required" -> "Noden känner inte längre igen den här klienten."
-        "model_unavailable" -> "Nodens lokala AI-modell är inte tillgänglig."
-        "chat_rate_limited" -> "För många AI-frågor. Vänta en stund."
-        "storage_quota_exceeded" -> "Nodens lagringsutrymme för användaren är fullt."
-        else -> "Noden kunde inte slutföra begäran."
+        "pairing_unavailable" -> "The invitation has expired, was canceled, or has already been used."
+        "duplicate_client" -> "This client identity is already paired."
+        "pairing_proof_failed" -> "The client identity could not be verified."
+        "invalid_recovery_key" -> "The recovery key is incorrect."
+        "recovery_not_configured" -> "The user does not have a recovery key."
+        "authentication_required" -> "The Node no longer recognizes this client."
+        "model_unavailable" -> "The local AI model on the Node is unavailable."
+        "chat_rate_limited" -> "Too many AI requests. Wait a moment."
+        "storage_quota_exceeded" -> "The user storage space on the Node is full."
+        else -> "The Node could not complete the request."
     }
 
     private fun JSONObject.requiredString(name: String): String =
         optString(name).takeIf { it.isNotBlank() }
-            ?: throw SourceApiException("invalid_response", "Noden skickade ett ofullständigt svar.")
+            ?: throw SourceApiException("invalid_response", "The Node returned an incomplete response.")
 
     private companion object {
         const val NETWORK_TIMEOUT_MILLIS = 8_000

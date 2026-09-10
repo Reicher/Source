@@ -44,9 +44,9 @@ class ChatRoutingTest {
 
     @Test
     fun `context never starts with an orphaned assistant reply`() {
-        val omittedOlderUser = ChatMessage.user("En fråga utanför kontextfönstret")
-        val orphanedAssistant = ChatMessage.assistant("Ett äldre svar")
-        val newerMessages = (1..19).map { ChatMessage.user("Nyare fråga $it") }
+        val omittedOlderUser = ChatMessage.user("A question outside the context window")
+        val orphanedAssistant = ChatMessage.assistant("An older answer")
+        val newerMessages = (1..19).map { ChatMessage.user("Newer question $it") }
 
         val result = boundedChatContext(
             listOf(omittedOlderUser, orphanedAssistant) + newerMessages,

@@ -32,7 +32,7 @@ class PadModelAssetDeviceTest {
         assumeTrue(InstrumentationRegistry.getArguments().getString("sourceQwenBenchmark") == "true")
         val result = PadModelProbe.benchmark(
             target.assets,
-            prompt = "hej",
+            prompt = "hello",
         )
         instrumentation.sendStatus(2, android.os.Bundle().apply { putString("stream", "$result\n") })
         assertTrue(result, result.contains("promptTokens="))

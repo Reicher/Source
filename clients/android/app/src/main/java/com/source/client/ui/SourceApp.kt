@@ -54,6 +54,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -61,6 +62,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.source.client.R
 import com.source.client.model.ChatMessage
 import com.source.client.model.ChatRole
 import com.source.client.model.NodeStatus
@@ -112,8 +114,8 @@ private fun AccountsScreen(
     SourceColumn {
         Wordmark()
         Spacer(Modifier.height(40.dp))
-        Text("Välj användare", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium)
-        Text("Varje användare har separat krypterad data på telefonen.", color = Ink.copy(alpha = .64f))
+        Text(stringResource(R.string.select_user), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium)
+        Text(stringResource(R.string.users_have_separate_data), color = Ink.copy(alpha = .64f))
         Spacer(Modifier.height(24.dp))
         LazyColumn(
             modifier = Modifier.fillMaxWidth().weight(1f),
@@ -129,7 +131,7 @@ private fun AccountsScreen(
             }
         }
         Spacer(Modifier.height(10.dp))
-        Button(onClick = create, modifier = Modifier.fillMaxWidth()) { Text("Skapa ny användare") }
+        Button(onClick = create, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.create_new_user)) }
     }
 }
 
@@ -145,16 +147,16 @@ private fun SetupScreen(
     SourceColumn {
         Wordmark()
         Spacer(Modifier.height(40.dp))
-        Text("Skapa användare", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium)
-        Text("Användaren och dess lösenord sparas krypterat på telefonen. Parkoppla med en server senare.", color = Ink.copy(alpha = .64f))
+        Text(stringResource(R.string.create_user), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium)
+        Text(stringResource(R.string.create_user_description), color = Ink.copy(alpha = .64f))
         Spacer(Modifier.height(24.dp))
-        OutlinedTextField(name, { name = it }, Modifier.fillMaxWidth(), label = { Text("Användarnamn") }, singleLine = true)
+        OutlinedTextField(name, { name = it }, Modifier.fillMaxWidth(), label = { Text(stringResource(R.string.user_name)) }, singleLine = true)
         OutlinedTextField(
-            password, { password = it }, Modifier.fillMaxWidth(), label = { Text("Lösenord") }, singleLine = true,
+            password, { password = it }, Modifier.fillMaxWidth(), label = { Text(stringResource(R.string.password)) }, singleLine = true,
             visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
         )
         OutlinedTextField(
-            confirmation, { confirmation = it }, Modifier.fillMaxWidth(), label = { Text("Bekräfta lösenord") }, singleLine = true,
+            confirmation, { confirmation = it }, Modifier.fillMaxWidth(), label = { Text(stringResource(R.string.confirm_password)) }, singleLine = true,
             visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
         )
         state.error?.let { ErrorText(it) }
@@ -162,8 +164,8 @@ private fun SetupScreen(
             onClick = { submit(name, password, confirmation); password = ""; confirmation = "" },
             enabled = !state.busy,
             modifier = Modifier.fillMaxWidth(),
-        ) { if (state.busy) SmallProgress() else Text("Skapa användare") }
-        if (state.canCancel) TextButton(onClick = cancel, enabled = !state.busy) { Text("Avbryt") }
+        ) { if (state.busy) SmallProgress() else Text(stringResource(R.string.create_user)) }
+        if (state.canCancel) TextButton(onClick = cancel, enabled = !state.busy) { Text(stringResource(R.string.cancel)) }
     }
 }
 
@@ -173,17 +175,17 @@ private fun UnlockScreen(state: AppScreen.Locked, submit: (String) -> Unit, swit
     SourceColumn {
         Wordmark()
         Spacer(Modifier.height(56.dp))
-        Text("Logga in som ${state.profile.displayName}", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium)
+        Text(stringResource(R.string.sign_in_as, state.profile.displayName), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(20.dp))
         OutlinedTextField(
-            password, { password = it }, Modifier.fillMaxWidth(), label = { Text("Lösenord") }, singleLine = true,
+            password, { password = it }, Modifier.fillMaxWidth(), label = { Text(stringResource(R.string.password)) }, singleLine = true,
             visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
         )
         state.error?.let { ErrorText(it) }
         Button(onClick = { submit(password); password = "" }, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {
-            if (state.busy) SmallProgress() else Text("Logga in")
+            if (state.busy) SmallProgress() else Text(stringResource(R.string.sign_in))
         }
-        TextButton(onClick = switchUser, enabled = !state.busy) { Text("Byt användare") }
+        TextButton(onClick = switchUser, enabled = !state.busy) { Text(stringResource(R.string.switch_user)) }
     }
 }
 
@@ -217,10 +219,10 @@ private fun MainScreen(
             Modifier.fillMaxWidth().heightIn(min = 64.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("Source", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
+            Text(stringResource(R.string.app_name), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.weight(1f))
             IconButton(onClick = { settingsOpen = true }) {
-                Icon(Icons.Outlined.Settings, contentDescription = "Inställningar", tint = Ink.copy(alpha = .78f))
+                Icon(Icons.Outlined.Settings, contentDescription = stringResource(R.string.settings), tint = Ink.copy(alpha = .78f))
             }
         }
         NodeStatusSummary(state.status, connect, retry, Modifier.fillMaxWidth())
@@ -238,7 +240,7 @@ private fun MainScreen(
                     item(key = "stream-${message.id}") { ChatBubble(message) }
                 }
                 if (state.chat.busy && state.chat.streamingMessage == null) {
-                    item { Text("Svarar…", color = Ink.copy(alpha = .55f)) }
+                    item { Text(stringResource(R.string.answering), color = Ink.copy(alpha = .55f)) }
                 }
             }
         }
@@ -249,7 +251,7 @@ private fun MainScreen(
                 value = draft,
                 onValueChange = { draft = it },
                 modifier = Modifier.weight(1f),
-                placeholder = { Text("Meddelande") },
+                placeholder = { Text(stringResource(R.string.message)) },
                 enabled = !state.chat.busy,
                 maxLines = 5,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
@@ -272,7 +274,7 @@ private fun MainScreen(
                 enabled = state.chat.busy || draft.isNotBlank(),
                 modifier = Modifier.height(56.dp),
                 shape = RoundedCornerShape(14.dp),
-            ) { Text(if (state.chat.busy) "Avbryt" else "Skicka") }
+            ) { Text(stringResource(if (state.chat.busy) R.string.cancel else R.string.send)) }
         }
         Spacer(Modifier.height(12.dp))
     }
@@ -294,14 +296,14 @@ private fun MainScreen(
     recoveryKeyToShow?.let { recoveryKey ->
         AlertDialog(
             onDismissRequest = { recoveryKeyToShow = null },
-            title = { Text("Återställningsnyckel") },
+            title = { Text(stringResource(R.string.recovery_key)) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("Spara nyckeln säkert. Den behövs om alla anslutna enheter försvinner.")
+                    Text(stringResource(R.string.recovery_key_safety))
                     SelectionContainer { Text(recoveryKey) }
                 }
             },
-            confirmButton = { TextButton(onClick = { recoveryKeyToShow = null }) { Text("Klar") } },
+            confirmButton = { TextButton(onClick = { recoveryKeyToShow = null }) { Text(stringResource(R.string.done)) } },
         )
     }
 }
@@ -316,7 +318,7 @@ private fun SettingsDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Inställningar") },
+        title = { Text(stringResource(R.string.settings)) },
         text = {
             Column {
                 Text(
@@ -332,19 +334,19 @@ private fun SettingsDialog(
                         onClick = { onShowRecoveryKey(key) },
                         modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                     ) {
-                        Text("Visa återställningsnyckel", modifier = Modifier.fillMaxWidth())
+                        Text(stringResource(R.string.show_recovery_key), modifier = Modifier.fillMaxWidth())
                     }
                 }
                 TextButton(
                     onClick = onLogout,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                 ) {
-                    Text("Logga ut", modifier = Modifier.fillMaxWidth())
+                    Text(stringResource(R.string.sign_out), modifier = Modifier.fillMaxWidth())
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Klar") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.done)) }
         },
     )
 }
@@ -385,13 +387,13 @@ private fun NodeStatusSummary(
 ) {
     val node = (status as? NodeStatus.Found)?.nodes?.firstOrNull()
     val label = when (status) {
-        NodeStatus.Searching -> "This device"
-        NodeStatus.NoneFound -> "This device"
-        is NodeStatus.Found -> node?.displayName ?: "Node"
+        NodeStatus.Searching -> stringResource(R.string.this_device)
+        NodeStatus.NoneFound -> stringResource(R.string.this_device)
+        is NodeStatus.Found -> node?.displayName ?: stringResource(R.string.node)
         is NodeStatus.Connecting -> status.name
         is NodeStatus.Connected -> status.node.displayName
-        is NodeStatus.PairedOffline -> "This device"
-        is NodeStatus.Error -> "This device"
+        is NodeStatus.PairedOffline -> stringResource(R.string.this_device)
+        is NodeStatus.Error -> stringResource(R.string.this_device)
     }
     val indicatorColor = when (status) {
         is NodeStatus.Connected -> Moss
@@ -420,8 +422,8 @@ private fun NodeStatusSummary(
             overflow = TextOverflow.Ellipsis,
         )
         when {
-            node != null -> TextButton(onClick = { connect(node) }) { Text("Anslut") }
-            status is NodeStatus.Error && status.canRetry -> TextButton(onClick = retry) { Text("Försök igen") }
+            node != null -> TextButton(onClick = { connect(node) }) { Text(stringResource(R.string.connect)) }
+            status is NodeStatus.Error && status.canRetry -> TextButton(onClick = retry) { Text(stringResource(R.string.try_again)) }
         }
     }
 }
@@ -446,20 +448,20 @@ private fun ScannerPermissionScreen(state: AppScreen.Scanner, scanned: (String) 
                 Modifier.align(Alignment.TopCenter).fillMaxWidth().background(Color.Black.copy(alpha = .6f)).padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Text("Skanna QR-koden på ${state.node.displayName}", color = Color.White)
+                Text(stringResource(R.string.scan_node_qr_code, state.node.displayName), color = Color.White)
                 state.error?.let { Text(it, color = Color(0xFFFFB4AB), modifier = Modifier.padding(top = 8.dp)) }
             }
             OutlinedButton(onClick = close, Modifier.align(Alignment.BottomCenter).padding(28.dp), colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)) {
-                Text("Avbryt")
+                Text(stringResource(R.string.cancel))
             }
         }
     } else {
         SourceColumn(vertical = Arrangement.Center) {
             Wordmark()
-            Text("Kameraåtkomst behövs för att skanna nodens QR-kod.")
-            if (denied) ErrorText("Kameraåtkomst nekades. Du kan försöka igen.")
-            Button(onClick = { launcher.launch(Manifest.permission.CAMERA) }) { Text("Tillåt kamera") }
-            OutlinedButton(onClick = close) { Text("Avbryt") }
+            Text(stringResource(R.string.camera_permission_required))
+            if (denied) ErrorText(stringResource(R.string.camera_permission_denied))
+            Button(onClick = { launcher.launch(Manifest.permission.CAMERA) }) { Text(stringResource(R.string.allow_camera)) }
+            OutlinedButton(onClick = close) { Text(stringResource(R.string.cancel)) }
         }
     }
 }
@@ -468,7 +470,7 @@ private fun ScannerPermissionScreen(state: AppScreen.Scanner, scanned: (String) 
 private fun PairingScreen(name: String) {
     SourceColumn(vertical = Arrangement.Center) {
         CircularProgressIndicator(color = Moss)
-        Text("Ansluter till $name…", style = MaterialTheme.typography.headlineSmall)
+        Text(stringResource(R.string.connecting_to_node, name), style = MaterialTheme.typography.headlineSmall)
     }
 }
 
@@ -482,14 +484,14 @@ private fun RecoveryScreen(
     SourceColumn(vertical = Arrangement.Center) {
         Wordmark()
         Spacer(Modifier.height(32.dp))
-        Text("Återställ användare", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium)
-        Text("Ange återställningsnyckeln för ${state.invitation.nodeName}.", color = Ink.copy(alpha = .64f))
+        Text(stringResource(R.string.recover_user), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium)
+        Text(stringResource(R.string.enter_recovery_key_for_node, state.invitation.nodeName), color = Ink.copy(alpha = .64f))
         Spacer(Modifier.height(20.dp))
         OutlinedTextField(
             recoveryKey,
             { recoveryKey = it },
             Modifier.fillMaxWidth(),
-            label = { Text("Återställningsnyckel") },
+            label = { Text(stringResource(R.string.recovery_key)) },
             singleLine = true,
         )
         state.error?.let { ErrorText(it) }
@@ -501,8 +503,8 @@ private fun RecoveryScreen(
             },
             enabled = recoveryKey.isNotBlank() && !state.busy,
             modifier = Modifier.fillMaxWidth(),
-        ) { if (state.busy) SmallProgress() else Text("Återställ") }
-        TextButton(onClick = cancel, enabled = !state.busy) { Text("Avbryt") }
+        ) { if (state.busy) SmallProgress() else Text(stringResource(R.string.recover)) }
+        TextButton(onClick = cancel, enabled = !state.busy) { Text(stringResource(R.string.cancel)) }
     }
 }
 
@@ -516,7 +518,7 @@ private fun SourceColumn(vertical: Arrangement.Vertical = Arrangement.Top, conte
     )
 }
 
-@Composable private fun Wordmark() = Text("Source", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.SemiBold)
+@Composable private fun Wordmark() = Text(stringResource(R.string.app_name), style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.SemiBold)
 
 @Composable private fun ErrorText(message: String) = Text(message, color = MaterialTheme.colorScheme.error)
 @Composable private fun SmallProgress() = CircularProgressIndicator(Modifier.height(20.dp), strokeWidth = 2.dp, color = Color.White)

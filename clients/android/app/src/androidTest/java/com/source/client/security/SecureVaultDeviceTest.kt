@@ -26,7 +26,7 @@ class SecureVaultDeviceTest {
     @Test
     fun identityCanBeCreatedPersistedAndUnlockedWithAndroidKeystore() {
         val vault = SecureVault(context, preferencesName, alias)
-        val password = "lokalt testlösenord".toCharArray()
+        val password = "local test password".toCharArray()
         val created = vault.create("Robin", password)
         val clientId = created.vault.identity.clientId
         created.close()
@@ -34,7 +34,7 @@ class SecureVaultDeviceTest {
         assertTrue(vault.isInitialized)
         assertTrue(clientId.startsWith("srcclient_"))
         val profileId = vault.profiles.single().id
-        assertNull(SecureVault(context, preferencesName, alias).unlock(profileId, "fel lösenord".toCharArray()))
+        assertNull(SecureVault(context, preferencesName, alias).unlock(profileId, "wrong password".toCharArray()))
 
         val unlocked = SecureVault(context, preferencesName, alias).unlock(profileId, password)
         assertEquals(clientId, unlocked?.vault?.identity?.clientId)
@@ -47,16 +47,16 @@ class SecureVaultDeviceTest {
     @Test
     fun conversationIsEncryptedPersistedAndRestorableFromSnapshot() {
         val vault = SecureVault(context, preferencesName, alias)
-        val password = "lokalt testlösenord".toCharArray()
+        val password = "local test password".toCharArray()
         val created = vault.create("Robin", password)
         val messages = listOf(
-            ChatMessage.user("En hemlig fråga"),
-            ChatMessage.assistant("Ett lokalt svar"),
+            ChatMessage.user("A secret question"),
+            ChatMessage.assistant("A local answer"),
         )
 
         vault.saveConversation(created, messages)
         val snapshot = vault.createConversationSnapshot(created, messages)
-        assertFalse(snapshot.toString(Charsets.UTF_8).contains("En hemlig fråga"))
+        assertFalse(snapshot.toString(Charsets.UTF_8).contains("A secret question"))
         created.close()
 
         val reopened = SecureVault(context, preferencesName, alias).unlock(vault.profiles.single().id, password)!!
@@ -72,15 +72,15 @@ class SecureVaultDeviceTest {
     @Test
     fun nodeDataKeyRestoresSnapshotIntoANewLocalVault() {
         val vault = SecureVault(context, preferencesName, alias)
-        val first = vault.create("Första telefonen", "ett".toCharArray())
-        val messages = listOf(ChatMessage.user("Data från den gamla telefonen"))
+        val first = vault.create("First phone", "one".toCharArray())
+        val messages = listOf(ChatMessage.user("Data from the old phone"))
         val dataKey = SourceCrypto.base64UrlDecode(
             SourceCrypto.generateRecoveryMaterial("srcnode_${"n".repeat(43)}").dataKey,
         )
         val snapshot = vault.createConversationSnapshot(first, messages, dataKey)
         first.close()
 
-        val replacement = vault.create("Ny telefon", "två".toCharArray())
+        val replacement = vault.create("New phone", "two".toCharArray())
         assertEquals(messages, vault.restoreConversationSnapshot(replacement, snapshot, dataKey))
         assertEquals(messages, vault.loadConversation(replacement))
         replacement.close()
@@ -90,7 +90,7 @@ class SecureVaultDeviceTest {
     @Test
     fun multipleUsersKeepPasswordsIdentitiesAndConversationsSeparate() {
         val vault = SecureVault(context, preferencesName, alias)
-        val robinPassword = "robins lösenord".toCharArray()
+        val robinPassword = "Robin password".toCharArray()
         val testPassword = "test".toCharArray()
         val robin = vault.create("Robin", robinPassword)
         vault.saveConversation(robin, listOf(ChatMessage.user("Robins privata chatt")))
@@ -119,7 +119,7 @@ class SecureVaultDeviceTest {
     @Test
     fun legacySingleUserVaultMigratesWithoutLosingItsIdentity() {
         val vault = SecureVault(context, preferencesName, alias)
-        val password = "gammalt lösenord".toCharArray()
+        val password = "old password".toCharArray()
         val created = vault.create("Robin", password)
         val originalClientId = created.vault.identity.clientId
         created.close()
@@ -144,7 +144,7 @@ class SecureVaultDeviceTest {
 
         val migrated = SecureVault(context, preferencesName, alias)
         val migratedProfile = migrated.profiles.single()
-        assertEquals("Befintlig användare", migratedProfile.displayName)
+        assertEquals("Existing user", migratedProfile.displayName)
         val reopened = migrated.unlock(migratedProfile.id, password)!!
         assertEquals(originalClientId, reopened.vault.identity.clientId)
         assertEquals("Robin", migrated.profiles.single().displayName)

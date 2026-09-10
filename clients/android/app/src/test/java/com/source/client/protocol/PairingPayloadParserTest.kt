@@ -22,7 +22,7 @@ class PairingPayloadParserTest {
         assertEquals(1, invitation.protocol)
         assertEquals(nodeId, invitation.nodeId)
         assertEquals(caCertificate, invitation.tlsCaCertificate)
-        assertEquals("Plattservern hemma", invitation.nodeName)
+        assertEquals("Home server", invitation.nodeName)
         assertEquals("https://192.168.1.10:8443/api/v1/pairing", invitation.pairingEndpoint)
         assertEquals(false, invitation.recovery)
         assertEquals(true, PairingPayloadParser.parse("${payload()}&action=recover", now).recovery)
@@ -68,7 +68,7 @@ class PairingPayloadParserTest {
             "node_id" to nodeIdOverride,
             "node_key" to encodedKey,
             "ca" to caOverride,
-            "name" to "Plattservern hemma",
+            "name" to "Home server",
             "endpoint" to endpoint,
             "invite" to UUID.fromString("11111111-2222-3333-4444-555555555555").toString(),
             "secret" to "s".repeat(43),

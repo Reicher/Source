@@ -41,7 +41,7 @@ func (f *fakeAI) StreamChat(_ context.Context, m []localai.Message, yield func(l
 	if e := yield(localai.Event{Type: "delta", Text: "Lokalt "}); e != nil {
 		return e
 	}
-	if e := yield(localai.Event{Type: "delta", Text: "svar"}); e != nil {
+	if e := yield(localai.Event{Type: "delta", Text: "answer"}); e != nil {
 		return e
 	}
 	return yield(localai.Event{Type: "completed", FinishReason: "stop"})
@@ -83,7 +83,7 @@ func TestSourceAPIEndToEnd(t *testing.T) {
 	state := request(t, http.MethodGet, adm.URL+"/admin/api/state", nil, nil)
 	wantStatus(t, state, 200)
 	varBody(t, state.Body, map[string]any{"initialized": false, "authenticated": false, "suggestedNodeName": "test-node"})
-	initialize := request(t, http.MethodPost, adm.URL+"/admin/api/initialize", map[string]string{"Content-Type": "application/json", "Origin": adm.URL}, []byte(`{"displayName":"Source hemma","password":"correct horse source battery","passwordConfirmation":"correct horse source battery"}`))
+	initialize := request(t, http.MethodPost, adm.URL+"/admin/api/initialize", map[string]string{"Content-Type": "application/json", "Origin": adm.URL}, []byte(`{"displayName":"Source at home","password":"correct horse source battery","passwordConfirmation":"correct horse source battery"}`))
 	wantStatus(t, initialize, 201)
 	initialize.Body.Close()
 	login := request(t, http.MethodPost, adm.URL+"/admin/api/login", map[string]string{"Content-Type": "application/json", "Origin": adm.URL}, []byte(`{"password":"correct horse source battery"}`))
@@ -168,7 +168,7 @@ func TestSourceAPIEndToEnd(t *testing.T) {
 	}
 
 	runID, _ := security.UUID()
-	stream := jsonRequest(t, http.MethodPost, api.URL+"/api/v1/ai/stream", map[string]string{"Authorization": "Bearer " + credential}, map[string]any{"contractVersion": 1, "runId": runID, "conversationId": "conversation-test", "messages": []any{map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": "Hej"}}}}})
+	stream := jsonRequest(t, http.MethodPost, api.URL+"/api/v1/ai/stream", map[string]string{"Authorization": "Bearer " + credential}, map[string]any{"contractVersion": 1, "runId": runID, "conversationId": "conversation-test", "messages": []any{map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": "Hello"}}}}})
 	wantStatus(t, stream, 200)
 	streamBody, _ := io.ReadAll(stream.Body)
 	stream.Body.Close()
@@ -211,7 +211,7 @@ func TestSourceAPIEndToEnd(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	recoveryStart := jsonRequest(t, http.MethodPost, api.URL+"/api/v1/pairing/start", nil, map[string]any{"protocol": 1, "invitationId": recoveryPayload.Query().Get("invite"), "invitationSecret": recoveryPayload.Query().Get("secret"), "clientPublicKey": base64.RawURLEncoding.EncodeToString(newDER), "userDisplayName": "Robin", "clientDisplayName": "Ny telefon"})
+	recoveryStart := jsonRequest(t, http.MethodPost, api.URL+"/api/v1/pairing/start", nil, map[string]any{"protocol": 1, "invitationId": recoveryPayload.Query().Get("invite"), "invitationSecret": recoveryPayload.Query().Get("secret"), "clientPublicKey": base64.RawURLEncoding.EncodeToString(newDER), "userDisplayName": "Robin", "clientDisplayName": "New phone"})
 	wantStatus(t, recoveryStart, 200)
 	var recoveryChallenge map[string]any
 	decode(t, recoveryStart.Body, &recoveryChallenge)

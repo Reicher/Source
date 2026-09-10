@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import com.source.client.R
 import com.source.client.model.ChatMessage
 import com.source.client.model.ChatRole
 import com.source.client.model.LocalIdentity
@@ -281,14 +282,14 @@ class SecureVault(
         }
         editor.putString(
             KEY_PROFILES,
-            encodeProfiles(listOf(VaultProfile(LEGACY_PROFILE_ID, "Befintlig användare"))),
+            encodeProfiles(listOf(VaultProfile(LEGACY_PROFILE_ID, context.getString(R.string.existing_user)))),
         ).commit()
     }
 
     private fun randomBytes(size: Int) = ByteArray(size).also(random::nextBytes)
 
     private fun androidClientName(userName: String): String {
-        val model = Build.MODEL.trim().take(60).ifBlank { "Android" }
+        val model = Build.MODEL.trim().take(60).ifBlank { context.getString(R.string.android_device_name) }
         return "$userName · $model".take(100)
     }
 

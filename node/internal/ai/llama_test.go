@@ -22,7 +22,7 @@ func TestLlamaStreamsOnlyVisibleContent(t *testing.T) {
 			t.Error(e)
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hidden\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hej\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"!\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hidden\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"!\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
 	}))
 	defer server.Close()
 	client := New(config.Config{LlamaURL: server.URL, LlamaModel: "source-model", LlamaMaximumOutputTokens: 2048, LlamaTimeout: time.Second})
@@ -30,11 +30,11 @@ func TestLlamaStreamsOnlyVisibleContent(t *testing.T) {
 		t.Fatal("health endpoint was not available")
 	}
 	var events []Event
-	e := client.StreamChat(context.Background(), []Message{{Role: "user", Content: "Hej"}}, func(event Event) error { events = append(events, event); return nil })
+	e := client.StreamChat(context.Background(), []Message{{Role: "user", Content: "Hello"}}, func(event Event) error { events = append(events, event); return nil })
 	if e != nil {
 		t.Fatal(e)
 	}
-	if len(events) != 3 || events[0].Text != "Hej" || events[1].Text != "!" || events[2].Type != "completed" || events[2].FinishReason != "stop" {
+	if len(events) != 3 || events[0].Text != "Hello" || events[1].Text != "!" || events[2].Type != "completed" || events[2].FinishReason != "stop" {
 		t.Fatalf("unexpected events: %#v", events)
 	}
 	if _, ok := request["system"]; ok {

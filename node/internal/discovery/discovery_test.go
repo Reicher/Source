@@ -25,7 +25,7 @@ func TestAdvertisementContainsOnlyPublicRoutingHints(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = db.InitializeNode("Source hemma", identity, "hash", 1); e != nil {
+	if _, e = db.InitializeNode("Source at home", identity, "hash", 1); e != nil {
 		t.Fatal(e)
 	}
 	service := New(db, config.Config{HTTPSPort: 8443}, log.New(io.Discard, "", 0))
@@ -44,7 +44,7 @@ func TestAdvertisementContainsOnlyPublicRoutingHints(t *testing.T) {
 		t.Fatalf("unexpected service: %q %q %q %d", name, kind, domain, port)
 	}
 	joined := strings.Join(text, "\n")
-	for _, want := range []string{"v=1", "id=" + identity.NodeID, "name=Source hemma", "api=/api/v1"} {
+	for _, want := range []string{"v=1", "id=" + identity.NodeID, "name=Source at home", "api=/api/v1"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("TXT missing %q: %v", want, text)
 		}

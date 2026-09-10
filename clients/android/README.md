@@ -92,7 +92,7 @@ The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
    in each pairing QR automatically.
 3. Install and open the debug APK, then create or select a local user and log in.
 4. Create a pairing invitation on the Node. The client should discover the Node,
-   show **Anslut**, request camera access, scan the QR, and show **Ansluten**.
+   show **Connect**, request camera access, scan the QR, and show **Connected**.
 5. Force-stop and reopen the app. After the local password is entered, it should
    rediscover and authenticate without another QR scan.
 6. Turn Wi-Fi off and on, and restart the Node. The state should move through

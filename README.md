@@ -65,6 +65,13 @@ The active Qwen/llama.cpp cutover is tracked in
 
 ## Development
 
+### Project language
+
+Use English throughout the repository: source code, comments, logs, API error
+messages, administration and client interfaces, tests, and documentation.
+Android user-facing text must be defined in `res/values/strings.xml`, even when
+English is the only supported language.
+
 Source Node requires Go 1.25 or newer:
 
 ```sh

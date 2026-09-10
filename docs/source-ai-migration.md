@@ -75,8 +75,9 @@ Jinja `enable_thinking=false` on Android. This adds no system message, persona,
 The Node measurements were made on an Intel Core i5-1250P (16 logical CPUs,
 AVX2/FMA) with 15 GiB RAM and 4 GiB swap. The deployed service uses eight
 threads, an 8,192-token context and a 13 GiB container limit. A final request
-through the deployed Source adapter returned `Hej! Vad kan jag hjälpa dig med
-idag? 😊` after 153 seconds and 758 generated tokens. This is correct baseline
+through the deployed Source adapter returned a Swedish greeting equivalent to
+`Hello! How can I help you today? 😊` after 153 seconds and 758 generated
+tokens. This is correct baseline
 behavior, but far too slow for a greeting; latency and thinking policy remain
 an explicit product decision rather than a hidden prompt workaround.
 

@@ -7,8 +7,8 @@ import org.junit.Test
 class ChatMessageTest {
     @Test
     fun chatFactoriesUseApiRolesAndUniqueIds() {
-        val user = ChatMessage.user("Hej")
-        val assistant = ChatMessage.assistant("Hej tillbaka")
+        val user = ChatMessage.user("Hello")
+        val assistant = ChatMessage.assistant("Hello back")
 
         assertEquals("user", user.role.apiValue)
         assertEquals("assistant", assistant.role.apiValue)

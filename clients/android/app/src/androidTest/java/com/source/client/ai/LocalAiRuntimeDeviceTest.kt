@@ -38,9 +38,9 @@ class LocalAiRuntimeDeviceTest {
                     runId = runId,
                     conversationId = "device-test",
                     messages = listOf(
-                        SourceAiMessage(SourceAiRole.USER, listOf(SourceAiContent.Text("vad är tio gånger tio?"))),
-                        SourceAiMessage(SourceAiRole.ASSISTANT, listOf(SourceAiContent.Text("Tio gånger tio är 100!"))),
-                        SourceAiMessage(SourceAiRole.USER, listOf(SourceAiContent.Text("vad är du för ai-modell?"))),
+                        SourceAiMessage(SourceAiRole.USER, listOf(SourceAiContent.Text("what is ten times ten?"))),
+                        SourceAiMessage(SourceAiRole.ASSISTANT, listOf(SourceAiContent.Text("Ten times ten is 100!"))),
+                        SourceAiMessage(SourceAiRole.USER, listOf(SourceAiContent.Text("what AI model are you?"))),
                     ),
                 ),
             ).toList()
@@ -58,8 +58,8 @@ class LocalAiRuntimeDeviceTest {
         assertTrue(answer.isNotBlank())
         assertFalse(answer.contains("<think>", ignoreCase = true))
         assertFalse(answer.contains("</think>", ignoreCase = true))
-        assertFalse(answer.contains("internetåtkomst", ignoreCase = true))
-        assertFalse(answer.contains("assistent från Source", ignoreCase = true))
+        assertFalse(answer.contains("internet access", ignoreCase = true))
+        assertFalse(answer.contains("assistant from Source", ignoreCase = true))
         assertFalse("The new question repeated the previous arithmetic answer: $answer", answer.contains("100"))
 
         val cancellationStarted = CompletableDeferred<Unit>()
@@ -72,7 +72,7 @@ class LocalAiRuntimeDeviceTest {
                     messages = listOf(
                         SourceAiMessage(
                             SourceAiRole.USER,
-                            listOf(SourceAiContent.Text("Skriv en mycket lång och detaljerad berättelse.")),
+                            listOf(SourceAiContent.Text("Write a very long and detailed story.")),
                         ),
                     ),
                 ),

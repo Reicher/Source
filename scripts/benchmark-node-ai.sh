@@ -15,7 +15,7 @@ esac
 
 response=$(curl -fsS \
     -H 'content-type: application/json' \
-    -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"hej\"}],\"stream\":false,\"temperature\":0.6,\"top_p\":0.9,\"seed\":42,\"max_tokens\":$maximum_tokens}" \
+    -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stream\":false,\"temperature\":0.6,\"top_p\":0.9,\"seed\":42,\"max_tokens\":$maximum_tokens}" \
     "$url/v1/chat/completions")
 
 printf '%s' "$response" | (cd "$repo_root/node" && go run ./cmd/benchmark-summary)
