@@ -61,7 +61,7 @@ func TestSourceAPIEndToEnd(t *testing.T) {
 		StorageRoot:              filepath.Join(root, "vaults"),
 		MaximumSnapshotBytes:     1024, SnapshotRetention: 20,
 		AllowedStorageApps: map[string]struct{}{"thoughts": {}, "source-client": {}},
-		LlamaModel:         "source-qwen3.5-9b", LlamaTimeout: time.Second,
+		AIModel:            "source-qwen3.5-9b", AITimeout: time.Second,
 		Now: func() time.Time { return now },
 	}
 	if e := os.MkdirAll(cfg.StorageRoot, 0700); e != nil {

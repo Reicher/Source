@@ -54,7 +54,6 @@ under `/vaults/<storage namespace>/<application>/snapshots`, separate from
 metadata. Node identity is an Ed25519 key stored in SQLite as PKCS#8/SPKI DER.
 Administrator passwords and recovery keys use the existing Argon2id encoding.
 
-The implementation can open the previous JavaScript service's schema and data,
-although this migration does not require backward compatibility. It never
-deletes existing users or snapshots automatically; destructive reset and user
-deletion remain explicit administrator actions.
+The schema is upgraded by ordered, transactional migrations tracked in the
+`schema_version` table. Unversioned databases from earlier prototypes are not
+supported and should be replaced before starting this version.

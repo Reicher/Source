@@ -25,7 +25,7 @@ func TestLlamaStreamsOnlyVisibleContent(t *testing.T) {
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hidden\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"!\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
 	}))
 	defer server.Close()
-	client := New(config.Config{LlamaURL: server.URL, LlamaModel: "source-model", LlamaMaximumOutputTokens: 2048, LlamaTimeout: time.Second})
+	client := New(config.Config{AIBackendURL: server.URL, AIModel: "source-model", AIMaximumOutputTokens: 2048, AITimeout: time.Second})
 	if !client.Status(context.Background()) {
 		t.Fatal("health endpoint was not available")
 	}
@@ -46,7 +46,7 @@ func TestLlamaStreamsOnlyVisibleContent(t *testing.T) {
 }
 
 func TestLlamaRejectsHiddenSystemMessages(t *testing.T) {
-	client := New(config.Config{LlamaURL: "http://127.0.0.1", LlamaTimeout: time.Second})
+	client := New(config.Config{AIBackendURL: "http://127.0.0.1", AITimeout: time.Second})
 	e := client.StreamChat(context.Background(), []Message{{Role: "system", Content: "hidden"}}, func(Event) error { return nil })
 	if e == nil {
 		t.Fatal("system message was accepted")

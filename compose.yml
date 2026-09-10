@@ -62,17 +62,17 @@ services:
       SOURCE_PAIRING_CA_CERTIFICATE_PATH: /artifacts/source-node-ca.crt
       # A host-network sidecar advertises the public gateway over mDNS.
       SOURCE_DISCOVERY_ENABLED: "0"
-      PAIRING_INVITATION_TTL_SECONDS: ${PAIRING_INVITATION_TTL_SECONDS:-300}
-      ADMIN_SESSION_TTL_SECONDS: ${ADMIN_SESSION_TTL_SECONDS:-28800}
+      SOURCE_PAIRING_INVITATION_TTL_SECONDS: ${SOURCE_PAIRING_INVITATION_TTL_SECONDS:-300}
+      SOURCE_ADMIN_SESSION_TTL_SECONDS: ${SOURCE_ADMIN_SESSION_TTL_SECONDS:-28800}
       SOURCE_NODE_STATE_ROOT: /state
       SOURCE_NODE_STORAGE_ROOT: /vaults
-      MAX_SNAPSHOT_MIB: ${MAX_SNAPSHOT_MIB:-32}
-      SNAPSHOT_RETENTION_COUNT: ${SNAPSHOT_RETENTION_COUNT:-20}
-      ALLOWED_STORAGE_APPS: ${ALLOWED_STORAGE_APPS:-thoughts,source-client}
-      LLAMA_URL: http://llama:8080
-      LLAMA_MODEL: ${LLAMA_MODEL:-source-qwen3.5-9b}
-      LLAMA_MAX_OUTPUT_TOKENS: ${LLAMA_MAX_OUTPUT_TOKENS:-2048}
-      LLAMA_TIMEOUT_SECONDS: ${LLAMA_TIMEOUT_SECONDS:-300}
+      SOURCE_SNAPSHOT_MAX_MIB: ${SOURCE_SNAPSHOT_MAX_MIB:-32}
+      SOURCE_SNAPSHOT_RETENTION_COUNT: ${SOURCE_SNAPSHOT_RETENTION_COUNT:-20}
+      SOURCE_ALLOWED_STORAGE_APPS: ${SOURCE_ALLOWED_STORAGE_APPS:-thoughts,source-client}
+      SOURCE_AI_BACKEND_URL: http://llama:8080
+      SOURCE_AI_MODEL: ${SOURCE_AI_MODEL:-source-qwen3.5-9b}
+      SOURCE_AI_MAX_OUTPUT_TOKENS: ${SOURCE_AI_MAX_OUTPUT_TOKENS:-2048}
+      SOURCE_AI_TIMEOUT_SECONDS: ${SOURCE_AI_TIMEOUT_SECONDS:-300}
     volumes:
       - ${SOURCE_DATA_ROOT:-./data}/node:/state
       - ${SOURCE_DATA_ROOT:-./data}/vaults:/vaults
@@ -137,7 +137,7 @@ services:
       - --model
       - /models/${LLAMA_MODEL_FILE:-Qwen_Qwen3.5-9B-Q5_K_M.gguf}
       - --alias
-      - ${LLAMA_MODEL:-source-qwen3.5-9b}
+      - ${SOURCE_AI_MODEL:-source-qwen3.5-9b}
       - --host
       - 0.0.0.0
       - --port
@@ -145,7 +145,7 @@ services:
       - --ctx-size
       - "${LLAMA_CONTEXT_TOKENS:-8192}"
       - --n-predict
-      - "${LLAMA_MAX_OUTPUT_TOKENS:-2048}"
+      - "${SOURCE_AI_MAX_OUTPUT_TOKENS:-2048}"
       - --threads
       - "${LLAMA_THREADS:-8}"
       - --parallel

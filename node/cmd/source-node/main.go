@@ -58,7 +58,7 @@ func run() error {
 	if e = os.MkdirAll(cfg.StorageRoot, 0700); e != nil {
 		return e
 	}
-	api := &http.Server{Addr: fmt.Sprintf("%s:%d", cfg.Host, cfg.Port), Handler: httpapi.New(db, cfg, ai, pairs, logger), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: max(cfg.LlamaTimeout+5*time.Second, 30*time.Second), IdleTimeout: 5 * time.Second, MaxHeaderBytes: 16 * 1024}
+	api := &http.Server{Addr: fmt.Sprintf("%s:%d", cfg.Host, cfg.Port), Handler: httpapi.New(db, cfg, ai, pairs, logger), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: max(cfg.AITimeout+5*time.Second, 30*time.Second), IdleTimeout: 5 * time.Second, MaxHeaderBytes: 16 * 1024}
 	adm := &http.Server{Addr: fmt.Sprintf("%s:%d", cfg.AdminHost, cfg.AdminPort), Handler: admin.New(db, cfg, ai, pairs, logger), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 5 * time.Second, MaxHeaderBytes: 16 * 1024}
 	fail := make(chan error, 2)
 	go func() { logger.Printf("source node listening on %s", api.Addr); fail <- api.ListenAndServe() }()

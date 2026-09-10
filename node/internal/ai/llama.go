@@ -32,7 +32,7 @@ type Client struct {
 }
 
 func New(cfg config.Config) *Client {
-	return &Client{url: strings.TrimRight(cfg.LlamaURL, "/"), model: cfg.LlamaModel, maximumOutputTokens: cfg.LlamaMaximumOutputTokens, timeout: cfg.LlamaTimeout, http: &http.Client{}}
+	return &Client{url: strings.TrimRight(cfg.AIBackendURL, "/"), model: cfg.AIModel, maximumOutputTokens: cfg.AIMaximumOutputTokens, timeout: cfg.AITimeout, http: &http.Client{}}
 }
 func (c *Client) Status(ctx context.Context) bool {
 	ctx, cancel := context.WithTimeout(ctx, min(c.timeout, 1500*time.Millisecond))

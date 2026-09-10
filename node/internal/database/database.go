@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 
 	_ "modernc.org/sqlite"
 	"source.local/node/internal/security"
@@ -61,15 +60,9 @@ func Open(path string) (*DB, error) {
 		sqldb.Close()
 		return nil, err
 	}
-	if _, err = sqldb.Exec(schema); err != nil {
+	if err = applyMigrations(sqldb); err != nil {
 		sqldb.Close()
 		return nil, err
-	}
-	for _, definition := range []string{"recovery_key_hash TEXT", "recovery_envelope TEXT"} {
-		if _, alterErr := sqldb.Exec("ALTER TABLE users ADD COLUMN " + definition); alterErr != nil && !strings.Contains(alterErr.Error(), "duplicate column name") {
-			sqldb.Close()
-			return nil, alterErr
-		}
 	}
 	if path != ":memory:" {
 		_ = os.Chmod(path, 0600)
@@ -319,11 +312,3 @@ type CodedError struct{ Code, Message string }
 
 func (e CodedError) Error() string     { return e.Message }
 func coded(code, message string) error { return CodedError{code, message} }
-
-const schema = `
-CREATE TABLE IF NOT EXISTS node_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),display_name TEXT NOT NULL,node_id TEXT NOT NULL UNIQUE,public_key TEXT NOT NULL,private_key TEXT NOT NULL,admin_password_hash TEXT NOT NULL,created_at INTEGER NOT NULL) STRICT;
-CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,display_name TEXT NOT NULL,storage_namespace TEXT NOT NULL UNIQUE,quota_bytes INTEGER NOT NULL CHECK(quota_bytes>0),created_at INTEGER NOT NULL,disabled_at INTEGER,recovery_key_hash TEXT,recovery_envelope TEXT) STRICT;
-CREATE TABLE IF NOT EXISTS clients(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,display_name TEXT NOT NULL,public_key TEXT NOT NULL UNIQUE,credential_hash TEXT NOT NULL UNIQUE,protocol_version INTEGER NOT NULL,paired_at INTEGER NOT NULL,last_seen_at INTEGER,revoked_at INTEGER) STRICT;
-CREATE INDEX IF NOT EXISTS clients_user_idx ON clients(user_id);CREATE INDEX IF NOT EXISTS clients_credential_idx ON clients(credential_hash);
-CREATE TABLE IF NOT EXISTS snapshots(user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,app_id TEXT NOT NULL,snapshot_id TEXT NOT NULL,byte_count INTEGER NOT NULL,sha256 TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(user_id,app_id,snapshot_id)) STRICT;
-CREATE INDEX IF NOT EXISTS snapshots_latest_idx ON snapshots(user_id,app_id,created_at DESC);`

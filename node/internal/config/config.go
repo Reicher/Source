@@ -26,10 +26,10 @@ type Config struct {
 	MaximumSnapshotBytes     int64
 	SnapshotRetention        int
 	AllowedStorageApps       map[string]struct{}
-	LlamaURL                 string
-	LlamaModel               string
-	LlamaMaximumOutputTokens int
-	LlamaTimeout             time.Duration
+	AIBackendURL             string
+	AIModel                  string
+	AIMaximumOutputTokens    int
+	AITimeout                time.Duration
 	Now                      func() time.Time
 }
 
@@ -48,27 +48,27 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	adminTTL, err := positiveInt("ADMIN_SESSION_TTL_SECONDS", 8*60*60)
+	adminTTL, err := positiveInt("SOURCE_ADMIN_SESSION_TTL_SECONDS", 8*60*60)
 	if err != nil {
 		return Config{}, err
 	}
-	pairingTTL, err := positiveInt("PAIRING_INVITATION_TTL_SECONDS", 5*60)
+	pairingTTL, err := positiveInt("SOURCE_PAIRING_INVITATION_TTL_SECONDS", 5*60)
 	if err != nil {
 		return Config{}, err
 	}
-	maxMiB, err := positiveInt("MAX_SNAPSHOT_MIB", 32)
+	maxMiB, err := positiveInt("SOURCE_SNAPSHOT_MAX_MIB", 32)
 	if err != nil {
 		return Config{}, err
 	}
-	retention, err := positiveInt("SNAPSHOT_RETENTION_COUNT", 20)
+	retention, err := positiveInt("SOURCE_SNAPSHOT_RETENTION_COUNT", 20)
 	if err != nil {
 		return Config{}, err
 	}
-	maxTokens, err := positiveInt("LLAMA_MAX_OUTPUT_TOKENS", 2048)
+	maxTokens, err := positiveInt("SOURCE_AI_MAX_OUTPUT_TOKENS", 2048)
 	if err != nil {
 		return Config{}, err
 	}
-	llamaTimeout, err := positiveInt("LLAMA_TIMEOUT_SECONDS", 300)
+	aiTimeout, err := positiveInt("SOURCE_AI_TIMEOUT_SECONDS", 300)
 	if err != nil {
 		return Config{}, err
 	}
@@ -76,7 +76,7 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	apps, err := identifiers("ALLOWED_STORAGE_APPS", "thoughts,source-client")
+	apps, err := identifiers("SOURCE_ALLOWED_STORAGE_APPS", "thoughts,source-client")
 	if err != nil {
 		return Config{}, err
 	}
@@ -101,9 +101,9 @@ func Load() (Config, error) {
 		DatabasePath:             env("SOURCE_NODE_DATABASE_PATH", filepath.Join(stateRoot, "source-node.sqlite")),
 		StorageRoot:              env("SOURCE_NODE_STORAGE_ROOT", "/vaults"),
 		MaximumSnapshotBytes:     int64(maxMiB) * 1024 * 1024, SnapshotRetention: retention,
-		AllowedStorageApps: apps, LlamaURL: env("LLAMA_URL", "http://llama:8080"),
-		LlamaModel: env("LLAMA_MODEL", "source-qwen3.5-9b"), LlamaMaximumOutputTokens: maxTokens,
-		LlamaTimeout: time.Duration(llamaTimeout) * time.Second, Now: time.Now,
+		AllowedStorageApps: apps, AIBackendURL: env("SOURCE_AI_BACKEND_URL", "http://llama:8080"),
+		AIModel: env("SOURCE_AI_MODEL", "source-qwen3.5-9b"), AIMaximumOutputTokens: maxTokens,
+		AITimeout: time.Duration(aiTimeout) * time.Second, Now: time.Now,
 	}, nil
 }
 

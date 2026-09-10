@@ -3,11 +3,11 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 url=${LLAMA_BENCHMARK_URL:-http://127.0.0.1:18080}
-model=${LLAMA_MODEL:-source-qwen3.5-9b}
+model=${SOURCE_AI_MODEL:-source-qwen3.5-9b}
 maximum_tokens=${LLAMA_BENCHMARK_MAX_TOKENS:-2048}
 
 case "$model" in
-    *[!A-Za-z0-9._-]*) printf 'Invalid LLAMA_MODEL.\n' >&2; exit 1 ;;
+    *[!A-Za-z0-9._-]*) printf 'Invalid SOURCE_AI_MODEL.\n' >&2; exit 1 ;;
 esac
 case "$maximum_tokens" in
     ''|*[!0-9]*) printf 'LLAMA_BENCHMARK_MAX_TOKENS must be an integer.\n' >&2; exit 1 ;;
