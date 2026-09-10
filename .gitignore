@@ -1,5 +1,8 @@
 .env
 data/
+.deps/
+.models/
+.cxx/
 backups/
 artifacts/
 *.tar
@@ -12,7 +15,7 @@ clients/android/.kotlin/
 clients/android/local.properties
 clients/android/app/build/
 clients/android/build/
-clients/android/app/src/main/assets/source-client-model.litertlm
-clients/android/app/src/main/assets/source-client-model.litertlm.download
+clients/android/source_ai_model_*/build/
+clients/android/source_ai_model_*/src/main/assets/*.part
 *.swp
 *~

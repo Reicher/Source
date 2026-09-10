@@ -6,14 +6,36 @@ plugins {
 android {
     namespace = "com.source.client"
     compileSdk = 36
+    ndkVersion = "28.1.13356709"
 
     defaultConfig {
         applicationId = "com.source.client"
         minSdk = 33
         targetSdk = 36
-        versionCode = 5
-        versionName = "0.3.0"
+        versionCode = 7
+        versionName = "0.4.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
+        externalNativeBuild {
+            cmake {
+                arguments += listOf(
+                    "-DLLAMA_CPP_ROOT=${rootProject.projectDir.resolve("../../.deps/llama.cpp").canonicalPath}",
+                    "-DCMAKE_BUILD_TYPE=Release",
+                    "-DBUILD_SHARED_LIBS=OFF",
+                    "-DLLAMA_BUILD_COMMON=ON",
+                    "-DLLAMA_BUILD_TESTS=OFF",
+                    "-DLLAMA_BUILD_EXAMPLES=OFF",
+                    "-DLLAMA_BUILD_SERVER=OFF",
+                    "-DLLAMA_BUILD_TOOLS=OFF",
+                    "-DLLAMA_CURL=OFF",
+                    "-DGGML_NATIVE=OFF",
+                    "-DGGML_OPENMP=OFF",
+                    "-DGGML_BACKEND_DL=OFF",
+                )
+            }
+        }
     }
 
     buildTypes {
@@ -36,6 +58,19 @@ android {
     }
 
     buildFeatures { compose = true }
+
+    assetPacks += listOf(":source_ai_model_1", ":source_ai_model_2", ":source_ai_model_3")
+
+    androidResources {
+        noCompress += "part"
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.31.6"
+        }
+    }
 }
 
 dependencies {
@@ -50,7 +85,6 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material:material-icons-core")
     implementation("androidx.compose.material3:material3")
-    implementation("com.google.ai.edge.litertlm:litertlm-android:0.16.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     val cameraX = "1.6.2"

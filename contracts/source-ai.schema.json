@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://source.local/contracts/source-ai-v1.schema.json",
+  "title": "Source AI contract",
+  "type": "object",
+  "$defs": {
+    "contentPart": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "text"],
+          "properties": {
+            "type": { "const": "text" },
+            "text": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "uri"],
+          "properties": {
+            "type": { "const": "image" },
+            "uri": { "type": "string", "minLength": 1 },
+            "mimeType": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "content"],
+      "properties": {
+        "role": { "enum": ["user", "assistant"] },
+        "content": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/contentPart" }
+        }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contractVersion", "runId", "conversationId", "messages"],
+      "properties": {
+        "contractVersion": { "const": 1 },
+        "runId": { "type": "string", "format": "uuid" },
+        "conversationId": { "type": "string", "minLength": 1 },
+        "messages": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/message" }
+        }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contractVersion", "modalities", "streaming", "cancellation", "maximumContextTokens", "promptPolicy", "reasoning"],
+      "properties": {
+        "contractVersion": { "const": 1 },
+        "modalities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["text", "vision"] }
+        },
+        "streaming": { "type": "boolean" },
+        "cancellation": { "type": "boolean" },
+        "maximumContextTokens": { "type": "integer", "minimum": 1 },
+        "promptPolicy": { "const": "none-v1" },
+        "reasoning": { "const": "off" }
+      }
+    },
+    "event": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "runId"],
+          "properties": {
+            "type": { "const": "started" },
+            "runId": { "type": "string", "format": "uuid" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "runId", "sequence", "text"],
+          "properties": {
+            "type": { "const": "delta" },
+            "runId": { "type": "string", "format": "uuid" },
+            "sequence": { "type": "integer", "minimum": 0 },
+            "text": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "runId", "finishReason"],
+          "properties": {
+            "type": { "const": "completed" },
+            "runId": { "type": "string", "format": "uuid" },
+            "finishReason": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "runId", "code", "retryable"],
+          "properties": {
+            "type": { "const": "failed" },
+            "runId": { "type": "string", "format": "uuid" },
+            "code": { "type": "string", "minLength": 1 },
+            "retryable": { "type": "boolean" }
+          }
+        }
+      ]
+    }
+  }
+}

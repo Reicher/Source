@@ -34,7 +34,7 @@ for path in \
     "$data_root/vaults" \
     "$data_root/gateway/data" \
     "$data_root/gateway/config" \
-    "$data_root/ollama"
+    "$data_root/models"
 do
     if [ ! -d "$path" ]; then
         printf 'missing: %s\n' "$path" >&2

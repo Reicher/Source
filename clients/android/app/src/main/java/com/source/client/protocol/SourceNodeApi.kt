@@ -1,12 +1,18 @@
 package com.source.client.protocol
 
 import com.source.client.model.LocalIdentity
-import com.source.client.model.ChatMessage
 import com.source.client.model.PairingInvitation
 import com.source.client.model.PairingResult
 import com.source.client.model.TrustedNode
+import com.source.client.ai.SOURCE_AI_CONTRACT_VERSION
+import com.source.client.ai.SourceAiEvent
+import com.source.client.ai.SourceAiRequest
 import com.source.client.security.SourceCrypto
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -162,30 +168,90 @@ class SourceNodeApi {
         trusted.copy(displayName = displayName)
     }
 
-    suspend fun chat(
+    fun streamAi(
         apiBaseUrl: String,
         trusted: TrustedNode,
-        messages: List<ChatMessage>,
-    ): ChatMessage = withContext(Dispatchers.IO) {
-        val response = postJson(
-            "${apiBaseUrl.removeSuffix("/")}/chat",
-            JSONObject().put("messages", JSONArray().apply {
-                messages.forEach { message ->
-                    put(JSONObject().put("role", message.role.apiValue).put("content", message.content))
-                }
-            }),
+        request: SourceAiRequest,
+    ): Flow<SourceAiEvent> = channelFlow {
+        val connection = openConnection(
+            "${apiBaseUrl.removeSuffix("/")}/ai/stream",
             trusted.tlsCaCertificate,
             trusted.clientCredential,
-            CHAT_TIMEOUT_MILLIS,
         )
-        val message = response.optJSONObject("message")
-            ?: throw SourceApiException("invalid_response", "Noden skickade ett ofullständigt svar.")
-        val role = message.requiredString("role")
-        val content = message.requiredString("content").trim()
-        if (role != "assistant" || content.length > MAX_MESSAGE_CHARACTERS) {
-            throw SourceApiException("invalid_response", "Noden skickade ett ogiltigt AI-svar.")
+        val worker = launch(Dispatchers.IO) {
+            try {
+                connection.requestMethod = "POST"
+                connection.readTimeout = CHAT_TIMEOUT_MILLIS
+                connection.doOutput = true
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.setRequestProperty("Accept", "application/x-ndjson")
+                val body = JSONObject().apply {
+                    put("contractVersion", SOURCE_AI_CONTRACT_VERSION)
+                    put("runId", request.runId)
+                    put("conversationId", request.conversationId)
+                    put("messages", JSONArray().apply {
+                        request.messages.forEach { message ->
+                            put(JSONObject().apply {
+                                put("role", message.role.name.lowercase())
+                                put("content", JSONArray().apply {
+                                    message.content.forEach { part ->
+                                        when (part) {
+                                            is com.source.client.ai.SourceAiContent.Text ->
+                                                put(JSONObject().put("type", "text").put("text", part.text))
+                                            is com.source.client.ai.SourceAiContent.Image ->
+                                                put(JSONObject().put("type", "image").put("uri", part.uri).apply {
+                                                    part.mimeType?.let { put("mimeType", it) }
+                                                })
+                                        }
+                                    }
+                                })
+                            })
+                        }
+                    })
+                }
+                connection.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+                val status = connection.responseCode
+                if (status !in 200..299) throw apiError(connection, status)
+                connection.inputStream.bufferedReader(Charsets.UTF_8).useLines { lines ->
+                    lines.filter(String::isNotBlank).forEach { raw ->
+                        val event = runCatching { JSONObject(raw) }.getOrElse {
+                            throw SourceApiException("invalid_response", "Noden skickade ogiltig AI-streamingdata.")
+                        }
+                        val eventRunId = event.optString("runId")
+                        if (eventRunId != request.runId) {
+                            throw SourceApiException("invalid_response", "Noden skickade fel körnings-id.")
+                        }
+                        trySend(when (event.optString("type")) {
+                            "started" -> SourceAiEvent.Started(eventRunId)
+                            "delta" -> SourceAiEvent.Delta(
+                                eventRunId,
+                                event.getLong("sequence"),
+                                event.requiredString("text"),
+                            )
+                            "completed" -> SourceAiEvent.Completed(
+                                eventRunId,
+                                event.requiredString("finishReason"),
+                            )
+                            "failed" -> SourceAiEvent.Failed(
+                                eventRunId,
+                                event.requiredString("code"),
+                                event.optBoolean("retryable", false),
+                            )
+                            else -> throw SourceApiException("invalid_response", "Noden skickade en okänd AI-händelse.")
+                        }).getOrThrow()
+                    }
+                }
+            } catch (error: SSLException) {
+                throw SourceApiException("tls_identity_mismatch", "Nodens HTTPS-identitet stämmer inte med QR-koden.")
+            } finally {
+                connection.disconnect()
+            }
         }
-        ChatMessage.assistant(content)
+        worker.invokeOnCompletion { cause -> close(cause) }
+        awaitClose {
+            connection.disconnect()
+            worker.cancel()
+        }
     }
 
     suspend fun uploadConversationSnapshot(
@@ -333,8 +399,7 @@ class SourceNodeApi {
 
     private companion object {
         const val NETWORK_TIMEOUT_MILLIS = 8_000
-        const val CHAT_TIMEOUT_MILLIS = 125_000
-        const val MAX_MESSAGE_CHARACTERS = 4_000
+        const val CHAT_TIMEOUT_MILLIS = 310_000
         const val CHAT_STORAGE_APP = "source-client"
     }
 }

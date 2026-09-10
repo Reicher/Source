@@ -6,12 +6,12 @@ import { loadConfig } from './config.mjs';
 import { SourceDatabase } from './database.mjs';
 import { createRequestHandler } from './http.mjs';
 import { SourceDiscovery } from './discovery.mjs';
-import { OllamaClient } from './ollama.mjs';
+import { LlamaCppClient } from './llama-cpp.mjs';
 import { PairingService } from './pairing.mjs';
 
 function httpServer(handler, config) {
   return http.createServer({
-    requestTimeout: Math.max(config.ollamaTimeoutMs + 5_000, 30_000),
+    requestTimeout: Math.max(config.llamaTimeoutMs + 5_000, 30_000),
     headersTimeout: 10_000,
     keepAliveTimeout: 5_000,
     maxHeaderSize: 16 * 1024,
@@ -22,10 +22,10 @@ function runtime(overrides = {}) {
   const config = loadConfig(overrides);
   fs.mkdirSync(config.storageRoot, { recursive: true, mode: 0o700 });
   const database = overrides.database ?? new SourceDatabase(config.databasePath);
-  const ollama = overrides.ollama ?? new OllamaClient(config);
+  const ai = overrides.ai ?? new LlamaCppClient(config);
   const pairing = overrides.pairing ?? new PairingService(database, config);
   const logger = overrides.logger ?? console;
-  return { config, database, ollama, pairing, logger };
+  return { config, database, ai, pairing, logger };
 }
 
 export function createSourceNode(overrides = {}) {

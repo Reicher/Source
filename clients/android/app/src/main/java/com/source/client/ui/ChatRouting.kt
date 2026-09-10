@@ -2,6 +2,7 @@ package com.source.client.ui
 
 import com.source.client.model.AiSelection
 import com.source.client.model.ChatMessage
+import com.source.client.model.ChatRole
 import com.source.client.protocol.SourceApiException
 
 internal enum class AiRuntimeTarget { THIS_DEVICE, NODE }
@@ -24,6 +25,7 @@ internal fun boundedChatContext(messages: List<ChatMessage>): List<ChatMessage> 
         selected.addFirst(message)
         characters += message.content.length
     }
+    while (selected.firstOrNull()?.role == ChatRole.ASSISTANT) selected.removeFirst()
     return selected.toList()
 }
 

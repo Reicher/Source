@@ -37,7 +37,7 @@ Source-compatible client on a trusted LAN
                  |
                  | internal HTTP
                  v
-            Source Node -------- inference -------- Ollama
+            Source Node -------- inference -------- llama.cpp
                  |
                  +-- user/client identity state and metadata
                  +-- opaque client-encrypted snapshots
@@ -53,7 +53,7 @@ The gateway publishes the Source HTTPS port at exactly `SOURCE_BIND_IP`;
 wildcard addresses are rejected by preflight. The same gateway publishes an
 independent HTTP listener at exactly `127.0.0.1` and proxies it over an internal
 network to the Node's admin listener. It is never published on the configured
-LAN address. Ollama has no host port. Do not create router forwarding for
+LAN address. llama.cpp has no host port. Do not create router forwarding for
 either Source port.
 
 ## Security boundaries
@@ -74,7 +74,7 @@ either Source port.
 - Request bodies, chat text, passwords, and tokens are not logged.
 - Snapshot identifiers and application namespaces are validated and allowlisted.
 - Snapshots are written atomically and may be checked against a SHA-256 header.
-- Ollama has no published port or normal outbound network.
+- llama.cpp has no published port or normal outbound network.
 
 Stored snapshots are zero-knowledge with respect to the normal Source Node
 service. This does not protect plaintext chat from a malicious host
@@ -179,7 +179,7 @@ docker compose up -d
 ```
 
 The archive contains account state, ciphertext, metadata, and gateway state so
-the local CA identity can be restored. Ollama model files are excluded because
+the local CA identity can be restored. llama.cpp model files are excluded because
 they can be provisioned again.
 
 Node-wide restore is intentionally manual: keep the current data directory, unpack the

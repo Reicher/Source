@@ -1,117 +1,108 @@
 package com.source.client.ai
 
 import android.content.Context
-import com.google.ai.edge.litertlm.Backend
-import com.google.ai.edge.litertlm.Content
-import com.google.ai.edge.litertlm.Contents
-import com.google.ai.edge.litertlm.ConversationConfig
-import com.google.ai.edge.litertlm.Engine
-import com.google.ai.edge.litertlm.EngineConfig
-import com.google.ai.edge.litertlm.Message
-import com.google.ai.edge.litertlm.SamplerConfig
-import com.source.client.model.ChatMessage
-import com.source.client.model.ChatRole
-import java.io.File
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.buffer
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 
-class LocalAiRuntime(context: Context) {
-    private val applicationContext = context.applicationContext
+class LocalAiRuntime(context: Context) : SourceAiRuntime {
+    private val native = LlamaCppNative(context.applicationContext)
     private val inferenceMutex = Mutex()
-    private var engine: Engine? = null
+    private val runtimeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    suspend fun chat(messages: List<ChatMessage>): ChatMessage = withContext(Dispatchers.IO) {
-        require(messages.lastOrNull()?.role == ChatRole.USER) { "The final chat message must be from the user" }
-        inferenceMutex.withLock {
-            val prompt = messages.last().content
-            require(prompt.isNotBlank()) { "The chat message cannot be empty" }
-            require(prompt.length <= MAX_INPUT_CHARACTERS) { "The chat message is too long" }
-            val contextMessages = conversationContext(messages.dropLast(1)).map { message ->
-                when (message.role) {
-                    ChatRole.USER -> Message.user(message.content)
-                    ChatRole.ASSISTANT -> Message.model(message.content)
+    override val capabilities = SourceAiCapabilities(
+        capabilities = setOf(SourceAiCapability.TEXT),
+        streaming = true,
+        cancellation = true,
+        maximumContextTokens = CONTEXT_TOKENS,
+    )
+
+    override fun stream(request: SourceAiRequest): Flow<SourceAiEvent> = callbackFlow {
+        validate(request)
+        trySend(SourceAiEvent.Started(request.runId))
+        var sequence = 0L
+        val generation = launch(Dispatchers.IO) {
+            inferenceMutex.withLock {
+                try {
+                    val result = native.generate(
+                        request = request,
+                        contextTokens = CONTEXT_TOKENS,
+                        maximumOutputTokens = MAXIMUM_OUTPUT_TOKENS,
+                        threads = INFERENCE_THREADS,
+                        onToken = { text ->
+                            if (text.isNotEmpty()) {
+                                trySend(SourceAiEvent.Delta(request.runId, sequence++, text))
+                            }
+                        },
+                    )
+                    if (result.finishReason != "cancelled") {
+                        trySend(
+                            SourceAiEvent.Completed(
+                                runId = request.runId,
+                                finishReason = result.finishReason,
+                                inputTokens = result.inputTokens,
+                                outputTokens = result.outputTokens,
+                            ),
+                        )
+                    }
+                    close()
+                } catch (_: CancellationException) {
+                    close()
+                } catch (error: Exception) {
+                    trySend(
+                        SourceAiEvent.Failed(
+                            runId = request.runId,
+                            code = errorCode(error),
+                            retryable = false,
+                        ),
+                    )
+                    close(error)
                 }
             }
-            val config = ConversationConfig(
-                systemInstruction = Contents.of(SYSTEM_PROMPT),
-                initialMessages = contextMessages,
-                samplerConfig = SamplerConfig(topK = 40, topP = 0.9, temperature = 0.6),
-                maxOutputToken = MAX_OUTPUT_TOKENS,
-            )
-            initializedEngine().createConversation(config).use { conversation ->
-                val response = conversation.sendMessage(prompt)
-                val content = response.contents.contents
-                    .filterIsInstance<Content.Text>()
-                    .joinToString(separator = "") { it.text }
-                    .trim()
-                check(content.isNotEmpty()) { "The local model returned an empty response" }
-                ChatMessage(role = ChatRole.ASSISTANT, content = content)
-            }
+        }
+        awaitClose {
+            native.cancel(request.runId)
+            generation.cancel()
+        }
+    }.buffer(Channel.UNLIMITED)
+
+    fun cancel(runId: String) = native.cancel(runId)
+
+    fun releaseMemory() {
+        runtimeScope.launch {
+            inferenceMutex.withLock { native.close() }
         }
     }
 
-    private fun initializedEngine(): Engine {
-        engine?.let { return it }
-        return Engine(
-            EngineConfig(
-                modelPath = installedModel().absolutePath,
-                backend = Backend.CPU(),
-                cacheDir = applicationContext.cacheDir.absolutePath,
-            ),
-        ).also {
-            try {
-                it.initialize()
-                engine = it
-            } catch (error: Exception) {
-                it.close()
-                throw error
-            }
-        }
+    private fun validate(request: SourceAiRequest) {
+        require(request.messages.isNotEmpty()) { "At least one message is required" }
+        require(request.messages.last().role == SourceAiRole.USER) { "The final message must be from the user" }
+        require(request.messages.size <= MAXIMUM_MESSAGES) { "Too many AI messages" }
+        require(request.messages.all { message ->
+            message.content.isNotEmpty() && message.content.all { it is SourceAiContent.Text }
+        }) { "The local runtime supports non-empty text messages only" }
     }
 
-    private fun installedModel(): File {
-        val modelDirectory = File(applicationContext.filesDir, "models")
-        check(modelDirectory.exists() || modelDirectory.mkdirs()) { "Could not create the local model directory" }
-        val destination = File(modelDirectory, MODEL_ASSET_NAME)
-        if (destination.isFile && destination.length() > 0) return destination
-        val temporary = File(modelDirectory, ".$MODEL_ASSET_NAME.tmp")
-        try {
-            applicationContext.assets.open(MODEL_ASSET_NAME).use { input ->
-                temporary.outputStream().use { output -> input.copyTo(output) }
-            }
-            check(temporary.length() > 0) { "The packaged local model is empty" }
-            if (!temporary.renameTo(destination)) {
-                temporary.copyTo(destination, overwrite = true)
-                check(temporary.delete()) { "Could not remove the temporary local model" }
-            }
-        } finally {
-            if (temporary.exists()) temporary.delete()
-        }
-        return destination
+    private fun errorCode(error: Exception): String = when {
+        error.message?.contains("token budget", ignoreCase = true) == true -> "context_exhausted"
+        error.message?.contains("output budget", ignoreCase = true) == true -> "output_exhausted"
+        error.message?.contains("model part", ignoreCase = true) == true -> "model_missing"
+        else -> "inference_failed"
     }
 
-    private fun conversationContext(messages: List<ChatMessage>): List<ChatMessage> {
-        val kept = ArrayDeque<ChatMessage>()
-        var characters = 0
-        for (message in messages.asReversed()) {
-            if (kept.size >= MAX_CONTEXT_MESSAGES || characters + message.content.length > MAX_CONTEXT_CHARACTERS) break
-            kept.addFirst(message)
-            characters += message.content.length
-        }
-        while (kept.firstOrNull()?.role == ChatRole.ASSISTANT) kept.removeFirst()
-        return kept.toList()
-    }
-
-    companion object {
-        const val MODEL_ASSET_NAME = "source-client-model.litertlm"
-        private const val MAX_CONTEXT_MESSAGES = 12
-        private const val MAX_CONTEXT_CHARACTERS = 4_000
-        private const val MAX_INPUT_CHARACTERS = 4_000
-        private const val MAX_OUTPUT_TOKENS = 256
-        private const val SYSTEM_PROMPT =
-            "Du är en privat, lokalt körd assistent i Source. Svara på samma språk som användaren och var tydlig och kortfattad. " +
-                "Du har ingen internetåtkomst och får inte låtsas att du har sökt på nätet."
+    private companion object {
+        const val CONTEXT_TOKENS = 4_096
+        const val MAXIMUM_OUTPUT_TOKENS = 1_024
+        const val INFERENCE_THREADS = 4
+        const val MAXIMUM_MESSAGES = 64
     }
 }

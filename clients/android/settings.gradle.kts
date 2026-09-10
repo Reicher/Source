@@ -16,6 +16,9 @@ dependencyResolutionManagement {
 
 rootProject.name = "SourceClientAndroid"
 include(":app")
+include(":source_ai_model_1")
+include(":source_ai_model_2")
+include(":source_ai_model_3")
 
 plugins {
     id("com.android.application") version "9.3.0" apply false

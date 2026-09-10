@@ -105,11 +105,24 @@ test('first-run admin lifecycle and complete key-based pairing', async (suite) =
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'source-node-pairing-'));
   let now = 1_800_000_000_000;
   let receivedChatMessages;
-  const ollama = {
+  const ai = {
     async status() { return true; },
-    async chat(messages) {
+    async *streamChat(messages) {
       receivedChatMessages = messages;
-      return { role: 'assistant', content: 'Lokalt svar' };
+      yield { type: 'delta', text: 'Lokalt ' };
+      yield { type: 'delta', text: 'svar' };
+      yield { type: 'completed', finishReason: 'stop' };
+    },
+    capabilities() {
+      return {
+        contractVersion: 1,
+        modalities: ['text'],
+        streaming: true,
+        cancellation: true,
+        maximumContextTokens: 8192,
+        promptPolicy: 'none-v1',
+        reasoning: 'off',
+      };
     },
   };
   const options = {
@@ -120,7 +133,7 @@ test('first-run admin lifecycle and complete key-based pairing', async (suite) =
     pairingCaCertificatePath,
     maximumSnapshotBytes: 1_024,
     clock: () => now,
-    ollama,
+    ai,
     logger: quietLogger,
   };
   let source = createSourceNode(options);
@@ -346,29 +359,49 @@ test('first-run admin lifecycle and complete key-based pairing', async (suite) =
       assert.equal(oldPasswordLogin.status, 401);
     });
 
-    await suite.test('paired client can chat through the authenticated local-model endpoint', async () => {
+    await suite.test('paired client can stream through the authenticated Source AI endpoint', async () => {
       const messages = [
         { role: 'user', content: 'Hej' },
         { role: 'assistant', content: 'Hej!' },
         { role: 'user', content: 'Hur mår du?' },
       ];
-      const unauthenticated = await fetch(`${urls.api}/api/v1/chat`, {
+      const runId = randomUUID();
+      const requestBody = {
+        contractVersion: 1,
+        runId,
+        conversationId: 'conversation-test',
+        messages: messages.map((message) => ({
+          role: message.role,
+          content: [{ type: 'text', text: message.content }],
+        })),
+      };
+      const unauthenticated = await fetch(`${urls.api}/api/v1/ai/stream`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ messages }),
+        body: JSON.stringify(requestBody),
       });
       assert.equal(unauthenticated.status, 401);
+      const streamed = await fetch(`${urls.api}/api/v1/ai/stream`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${credential}`, 'content-type': 'application/json' },
+        body: JSON.stringify(requestBody),
+      });
+      assert.equal(streamed.status, 200);
+      assert.match(streamed.headers.get('content-type'), /^application\/x-ndjson/);
+      assert.deepEqual((await streamed.text()).trim().split('\n').map(JSON.parse), [
+        { type: 'started', runId },
+        { type: 'delta', runId, sequence: 0, text: 'Lokalt ' },
+        { type: 'delta', runId, sequence: 1, text: 'svar' },
+        { type: 'completed', runId, finishReason: 'stop' },
+      ]);
+      assert.deepEqual(receivedChatMessages, messages);
 
-      const response = await fetch(`${urls.api}/api/v1/chat`, {
+      const removedLegacyRoute = await fetch(`${urls.api}/api/v1/chat`, {
         method: 'POST',
         headers: { authorization: `Bearer ${credential}`, 'content-type': 'application/json' },
         body: JSON.stringify({ messages }),
       });
-      assert.equal(response.status, 200);
-      assert.deepEqual(await json(response), {
-        message: { role: 'assistant', content: 'Lokalt svar' },
-      });
-      assert.deepEqual(receivedChatMessages, messages);
+      assert.equal(removedLegacyRoute.status, 404);
     });
 
     await suite.test('paired client can round-trip an encrypted Source Client snapshot', async () => {
@@ -530,7 +563,7 @@ test('invalid client proof and malformed keys do not create a user', async () =>
   const source = createSourceNode({
     databasePath: path.join(root, 'state.sqlite'), storageRoot: path.join(root, 'vaults'),
     pairingCaCertificatePath,
-    ollama: { async status() { return false; } }, logger: quietLogger,
+    ai: { async status() { return false; } }, logger: quietLogger,
   });
   const urls = await listen(source);
   try {

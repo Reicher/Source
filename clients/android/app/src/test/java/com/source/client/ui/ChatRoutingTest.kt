@@ -41,4 +41,17 @@ class ChatRoutingTest {
         assertEquals(messages.takeLast(16).map(ChatMessage::id), result.map(ChatMessage::id))
         assertTrue(result.sumOf { it.content.length } <= 16_000)
     }
+
+    @Test
+    fun `context never starts with an orphaned assistant reply`() {
+        val omittedOlderUser = ChatMessage.user("En fråga utanför kontextfönstret")
+        val orphanedAssistant = ChatMessage.assistant("Ett äldre svar")
+        val newerMessages = (1..19).map { ChatMessage.user("Nyare fråga $it") }
+
+        val result = boundedChatContext(
+            listOf(omittedOlderUser, orphanedAssistant) + newerMessages,
+        )
+
+        assertEquals(newerMessages.map(ChatMessage::id), result.map(ChatMessage::id))
+    }
 }

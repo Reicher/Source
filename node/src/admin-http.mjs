@@ -149,7 +149,7 @@ function clearSessionCookie() {
   return `${ADMIN_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`;
 }
 
-async function dashboard(database, config, ollama) {
+async function dashboard(database, config, ai) {
   const node = database.getNodeState();
   const users = database.listUsers();
   const memoryTotal = os.totalmem();
@@ -170,7 +170,7 @@ async function dashboard(database, config, ollama) {
       memory: { totalBytes: memoryTotal, usedBytes: memoryTotal - memoryFree, availableBytes: memoryFree },
       disk: diskStatus(config.storageRoot),
       temperatureCelsius: temperature(),
-      ai: { available: await ollama.status(), model: config.ollamaModel },
+      ai: { available: await ai.status(), model: config.llamaModel },
       lan: { host: config.host, port: config.port, pairingEndpoint: config.pairingBaseUrl },
       users: users.length,
       pairedClients: users.reduce((total, user) => total + user.clientCount, 0),
@@ -182,7 +182,7 @@ async function dashboard(database, config, ollama) {
   };
 }
 
-export function createAdminHandler({ database, config, ollama, pairing, logger = console }) {
+export function createAdminHandler({ database, config, ai, pairing, logger = console }) {
   const sessions = new AdminSessions(config);
   const loginLimiter = new RateLimiter({ limit: 5, windowMs: 15 * 60_000, clock: config.clock });
 
@@ -283,7 +283,7 @@ export function createAdminHandler({ database, config, ollama, pairing, logger =
       if (route === 'GET /admin/api/dashboard') {
         authenticated(request);
         status = 200;
-        json(response, status, await dashboard(database, config, ollama));
+        json(response, status, await dashboard(database, config, ai));
         return;
       }
 

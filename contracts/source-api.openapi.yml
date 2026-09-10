@@ -129,41 +129,30 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "413": { $ref: "#/components/responses/Error" }
         "415": { $ref: "#/components/responses/Error" }
-  /chat:
+  /ai/stream:
     post:
-      operationId: chat
-      description: Sends only the explicit message list to the local model.
+      operationId: streamAi
+      description: >-
+        Streams the shared Source AI v1 event contract as newline-delimited JSON.
+        Only explicit user and assistant text is sent to the model; no Source
+        system prompt is added. Closing the response cancels generation.
       requestBody:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [messages]
-              properties:
-                messages:
-                  type: array
-                  minItems: 1
-                  maxItems: 20
-                  description: At most 16000 characters in total; the final message must have role user.
-                  items: { $ref: "#/components/schemas/ChatMessage" }
+            schema: { $ref: "#/components/schemas/SourceAiRequest" }
       responses:
         "200":
-          description: Complete local-model response
+          description: Source AI events, one JSON object per line
           content:
-            application/json:
+            application/x-ndjson:
               schema:
-                type: object
-                required: [message]
-                properties:
-                  message: { $ref: "#/components/schemas/ChatMessage" }
+                type: string
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
         "413": { $ref: "#/components/responses/Error" }
         "415": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/Error" }
-        "503": { $ref: "#/components/responses/Error" }
   /storage/{appId}/snapshots:
     parameters:
       - $ref: "#/components/parameters/AppId"
@@ -264,14 +253,62 @@ components:
         application/octet-stream:
           schema: { type: string, format: binary }
   schemas:
+    SourceAiRequest:
+      type: object
+      additionalProperties: false
+      required: [contractVersion, runId, conversationId, messages]
+      properties:
+        contractVersion: { type: integer, const: 1 }
+        runId: { type: string, format: uuid }
+        conversationId: { type: string, minLength: 1, maxLength: 200 }
+        messages:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            type: object
+            additionalProperties: false
+            required: [role, content]
+            properties:
+              role: { type: string, enum: [user, assistant] }
+              content:
+                type: array
+                minItems: 1
+                maxItems: 1
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [type, text]
+                  properties:
+                    type: { type: string, const: text }
+                    text: { type: string, minLength: 1, maxLength: 4000 }
     Status:
       type: object
       additionalProperties: false
-      required: [service, apiVersion, llmAvailable]
+      required: [service, apiVersion, llmAvailable, ai]
       properties:
         service: { type: string, const: source-node }
         apiVersion: { type: integer, const: 1 }
         llmAvailable: { type: boolean }
+        ai:
+          oneOf:
+            - { type: "null" }
+            - $ref: "#/components/schemas/AiCapabilities"
+    AiCapabilities:
+      type: object
+      additionalProperties: false
+      required: [contractVersion, modalities, streaming, cancellation, maximumContextTokens, promptPolicy, reasoning]
+      properties:
+        contractVersion: { type: integer, const: 1 }
+        modalities:
+          type: array
+          uniqueItems: true
+          items: { type: string, enum: [text, vision] }
+        streaming: { type: boolean }
+        cancellation: { type: boolean }
+        maximumContextTokens: { type: integer, minimum: 1 }
+        promptPolicy: { type: string, const: none-v1 }
+        reasoning: { type: string, const: off }
     User:
       type: object
       additionalProperties: false

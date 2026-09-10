@@ -26,7 +26,7 @@ provides:
   per-user quotas and a data model prepared for additional client identities;
 - opaque storage for client-encrypted snapshots, protected by a node-specific
   recovery key held by the user;
-- authenticated chat through a local Ollama model;
+- authenticated chat through a pinned local llama.cpp runtime;
 - a versioned OpenAPI contract.
 
 The first Android Source Client now lives in [`clients/android`](clients/android/README.md).
@@ -60,6 +60,8 @@ LAN address. Never forward the Source port from a router to the public internet.
 
 See [`docs/operations.md`](docs/operations.md) for setup, user administration,
 security boundaries, verification, backup, and restore guidance.
+The active Qwen/llama.cpp cutover is tracked in
+[`docs/source-ai-migration.md`](docs/source-ai-migration.md).
 
 ## Development
 

@@ -4,8 +4,14 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.source.client.SourceClientApplication
+import com.source.client.ai.SourceAiContent
+import com.source.client.ai.SourceAiEvent
+import com.source.client.ai.SourceAiMessage
+import com.source.client.ai.SourceAiRequest
+import com.source.client.ai.SourceAiRole
 import com.source.client.model.AiSelection
 import com.source.client.model.ChatMessage
+import com.source.client.model.ChatRole
 import com.source.client.model.DiscoveredNode
 import com.source.client.model.NodeStatus
 import com.source.client.model.PairingInvitation
@@ -16,7 +22,6 @@ import com.source.client.protocol.PairingPayloadParser
 import com.source.client.protocol.SourceApiException
 import com.source.client.security.VaultSession
 import com.source.client.security.SourceCrypto
-import java.io.FileNotFoundException
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -26,6 +31,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -33,6 +39,7 @@ import kotlinx.coroutines.withContext
 
 data class ChatUiState(
     val messages: List<ChatMessage> = emptyList(),
+    val streamingMessage: ChatMessage? = null,
     val selection: AiSelection = AiSelection.AUTO,
     val busy: Boolean = false,
     val error: String? = null,
@@ -76,6 +83,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     private var connectJob: Job? = null
     private var heartbeatJob: Job? = null
     private var inferenceJob: Job? = null
+    private var activeAiRunId: String? = null
     private var lastConnectedService: String? = null
     private var lastConnectedApiBaseUrl: String? = null
 
@@ -174,6 +182,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun logout() {
+        activeAiRunId = null
         inferenceJob?.cancel()
         connectJob?.cancel()
         heartbeatJob?.cancel()
@@ -210,8 +219,15 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         val activeSession = session ?: return
+        val runId = UUID.randomUUID().toString()
+        activeAiRunId = runId
         val userMessage = ChatMessage.user(content)
-        chatState = chatState.copy(messages = chatState.messages + userMessage, busy = true, error = null)
+        chatState = chatState.copy(
+            messages = chatState.messages + userMessage,
+            streamingMessage = null,
+            busy = true,
+            error = null,
+        )
         conversationRevision += 1
         publishChat()
         backupDirty = true
@@ -225,7 +241,13 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
                 val resolved = resolveAiRuntime(selected, connected != null)
                 val assistant = if (resolved == AiRuntimeTarget.NODE && connected != null) {
                     try {
-                        app.nodeApi.chat(connected.discovered.apiBaseUrl, connected.trusted, context)
+                        streamNodeAnswer(
+                            connected.discovered.apiBaseUrl,
+                            connected.trusted,
+                            context,
+                            runId,
+                            activeSession.vault.identity.userId,
+                        )
                     } catch (error: CancellationException) {
                         throw error
                     } catch (error: Exception) {
@@ -234,28 +256,144 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
                             connectedNode = null
                             updateNodeStatus(NodeStatus.PairedOffline(connected.trusted))
                         }
-                        app.localAiRuntime.chat(context)
+                        streamLocalAnswer(context, runId, activeSession.vault.identity.userId)
                     }
                 } else {
-                    app.localAiRuntime.chat(context)
+                    streamLocalAnswer(context, runId, activeSession.vault.identity.userId)
                 }
+                if (activeAiRunId != runId) return@launch
                 chatState = chatState.copy(
                     messages = chatState.messages + assistant.copy(content = assistant.content.take(MAX_MESSAGE_CHARACTERS)),
+                    streamingMessage = null,
                     busy = false,
                     error = null,
                 )
                 conversationRevision += 1
                 persistConversation(activeSession)
             } catch (error: CancellationException) {
+                if (activeAiRunId == runId) chatState = chatState.copy(streamingMessage = null, busy = false)
                 throw error
             } catch (error: Exception) {
-                chatState = chatState.copy(busy = false, error = readableChatError(error))
+                chatState = chatState.copy(
+                    streamingMessage = null,
+                    busy = false,
+                    error = readableChatError(error),
+                )
             } finally {
+                if (activeAiRunId == runId) activeAiRunId = null
                 publishChat()
                 backupConversationIfNeeded()
             }
         }
     }
+
+    fun cancelInference() {
+        val runId = activeAiRunId ?: return
+        activeAiRunId = null
+        app.localAiRuntime.cancel(runId)
+        inferenceJob?.cancel()
+        inferenceJob = null
+        chatState = chatState.copy(streamingMessage = null, busy = false, error = null)
+        publishChat()
+    }
+
+    private suspend fun streamLocalAnswer(
+        messages: List<ChatMessage>,
+        runId: String,
+        conversationId: String,
+    ): ChatMessage {
+        val draft = ChatMessage(id = runId, role = ChatRole.ASSISTANT, content = "")
+        val content = StringBuilder()
+        var completed = false
+        val request = SourceAiRequest(
+            runId = runId,
+            conversationId = conversationId,
+            messages = messages.map { message ->
+                SourceAiMessage(
+                    role = when (message.role) {
+                        ChatRole.USER -> SourceAiRole.USER
+                        ChatRole.ASSISTANT -> SourceAiRole.ASSISTANT
+                    },
+                    content = listOf(SourceAiContent.Text(message.content)),
+                )
+            },
+        )
+        app.localAiRuntime.stream(request).collect { event ->
+            check(event.runId == runId) { "The local runtime returned the wrong run identifier" }
+            when (event) {
+                is SourceAiEvent.Started -> Unit
+                is SourceAiEvent.Delta -> {
+                    content.append(event.text)
+                    if (activeAiRunId == runId) {
+                        chatState = chatState.copy(streamingMessage = draft.copy(content = content.toString()))
+                        publishChat()
+                    }
+                }
+                is SourceAiEvent.Completed -> completed = true
+                is SourceAiEvent.Failed -> error("Local AI failed: ${event.code}")
+            }
+        }
+        check(completed && content.isNotBlank()) { "The local model returned an incomplete response" }
+        return draft.copy(content = content.toString().trim())
+    }
+
+    private suspend fun streamNodeAnswer(
+        apiBaseUrl: String,
+        trusted: TrustedNode,
+        messages: List<ChatMessage>,
+        runId: String,
+        conversationId: String,
+    ): ChatMessage {
+        val draft = ChatMessage(id = runId, role = ChatRole.ASSISTANT, content = "")
+        val content = StringBuilder()
+        var completed = false
+        val request = sourceAiRequest(messages, runId, conversationId)
+        try {
+            app.nodeApi.streamAi(apiBaseUrl, trusted, request).collect { event ->
+                check(event.runId == runId) { "The Node returned the wrong run identifier" }
+                when (event) {
+                    is SourceAiEvent.Started -> Unit
+                    is SourceAiEvent.Delta -> {
+                        content.append(event.text)
+                        if (activeAiRunId == runId) {
+                            chatState = chatState.copy(streamingMessage = draft.copy(content = content.toString()))
+                            publishChat()
+                        }
+                    }
+                    is SourceAiEvent.Completed -> completed = true
+                    is SourceAiEvent.Failed -> throw SourceApiException(event.code, "Nodens AI kunde inte slutföra svaret.")
+                }
+            }
+        } catch (error: Exception) {
+            if (content.isNotEmpty()) {
+                throw SourceApiException(
+                    "node_stream_interrupted_after_output",
+                    "Anslutningen till noden bröts mitt i svaret.",
+                )
+            }
+            throw error
+        }
+        check(completed && content.isNotBlank()) { "The Node returned an incomplete response" }
+        return draft.copy(content = content.toString().trim())
+    }
+
+    private fun sourceAiRequest(
+        messages: List<ChatMessage>,
+        runId: String,
+        conversationId: String,
+    ) = SourceAiRequest(
+        runId = runId,
+        conversationId = conversationId,
+        messages = messages.map { message ->
+            SourceAiMessage(
+                role = when (message.role) {
+                    ChatRole.USER -> SourceAiRole.USER
+                    ChatRole.ASSISTANT -> SourceAiRole.ASSISTANT
+                },
+                content = listOf(SourceAiContent.Text(message.content)),
+            )
+        },
+    )
 
     fun onForeground() {
         foreground = true
@@ -720,7 +858,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun readableChatError(error: Exception): String = when {
         error is SourceApiException -> error.message ?: "Nodens AI kunde inte svara."
-        error is FileNotFoundException || error.message?.contains("source-client-model.litertlm") == true ->
+        error.message?.contains("model part", ignoreCase = true) == true ->
             "Den lokala AI-modellen är inte installerad."
         else -> "AI:n kunde inte svara. Försök igen."
     }

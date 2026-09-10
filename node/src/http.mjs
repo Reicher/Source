@@ -94,6 +94,33 @@ function validateMessages(body) {
   return messages;
 }
 
+function validateAiStreamRequest(body) {
+  if (body?.contractVersion !== 1
+    || typeof body.runId !== 'string'
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.runId)
+    || typeof body.conversationId !== 'string'
+    || body.conversationId.length < 1
+    || body.conversationId.length > 200
+    || !Array.isArray(body.messages)) {
+    throw new HttpError(400, 'invalid_ai_request', 'AI-begäran är ogiltig.');
+  }
+  const messages = validateMessages({
+    messages: body.messages.map((message) => ({
+      role: message?.role,
+      content: Array.isArray(message?.content)
+        && message.content.length === 1
+        && message.content[0]?.type === 'text'
+        ? message.content[0].text
+        : null,
+    })),
+  });
+  return { runId: body.runId, messages };
+}
+
+function ndjson(response, value) {
+  response.write(`${JSON.stringify(value)}\n`);
+}
+
 function snapshotHeaders(metadata) {
   return {
     'content-type': 'application/octet-stream',
@@ -123,7 +150,7 @@ function recoveryMaterial(body) {
   return body;
 }
 
-export function createRequestHandler({ database, config, ollama, pairing, logger = console }) {
+export function createRequestHandler({ database, config, ai, pairing, logger = console }) {
   const auth = new AuthService(database, config);
   const storage = new SnapshotStorage(database, config);
   const chatLimiter = new RateLimiter({ limit: 10, windowMs: 60_000, clock: config.clock });
@@ -147,7 +174,8 @@ export function createRequestHandler({ database, config, ollama, pairing, logger
         json(response, status, {
           service: 'source-node',
           apiVersion: 1,
-          llmAvailable: await ollama.status(),
+          llmAvailable: await ai.status(),
+          ai: ai.capabilities?.() ?? null,
         });
         return;
       }
@@ -193,20 +221,46 @@ export function createRequestHandler({ database, config, ollama, pairing, logger
         return;
       }
 
-      if (route === 'POST /api/v1/chat') {
+      if (route === 'POST /api/v1/ai/stream') {
         if (!chatLimiter.take(session.user.id)) {
           throw new HttpError(429, 'chat_rate_limited', 'För många AI-frågor. Vänta en stund.');
         }
-        const messages = validateMessages(await readJson(request));
-        let message;
-        try {
-          message = await ollama.chat(messages);
-        } catch (error) {
-          logger.warn?.('local model request failed', { error: error.message });
-          throw new HttpError(503, 'model_unavailable', 'Den lokala modellen är inte tillgänglig.');
+        const { runId, messages } = validateAiStreamRequest(await readJson(request));
+        const cancellation = new AbortController();
+        const cancelInference = () => cancellation.abort(new Error('Client disconnected'));
+        if (request.aborted || response.destroyed) cancelInference();
+        else {
+          request.once('aborted', cancelInference);
+          response.once('close', cancelInference);
         }
         status = 200;
-        json(response, status, { message });
+        response.writeHead(status, {
+          'content-type': 'application/x-ndjson; charset=utf-8',
+          'cache-control': 'no-store, no-transform',
+          'x-accel-buffering': 'no',
+        });
+        response.flushHeaders?.();
+        ndjson(response, { type: 'started', runId });
+        let sequence = 0;
+        try {
+          for await (const event of ai.streamChat(messages, cancellation.signal)) {
+            if (event.type === 'delta') {
+              ndjson(response, { type: 'delta', runId, sequence, text: event.text });
+              sequence += 1;
+            } else if (event.type === 'completed') {
+              ndjson(response, { type: 'completed', runId, finishReason: event.finishReason });
+            }
+          }
+        } catch (error) {
+          logger.warn?.('streaming local model request failed', { error: error.message });
+          if (!response.destroyed && !cancellation.signal.aborted) {
+            ndjson(response, { type: 'failed', runId, code: 'model_unavailable', retryable: true });
+          }
+        } finally {
+          request.removeListener('aborted', cancelInference);
+          response.removeListener('close', cancelInference);
+        }
+        response.end();
         return;
       }
 

@@ -16,16 +16,22 @@ Source monorepo. It intentionally implements only the first vertical slices:
 8. back up the encrypted conversation as an opaque Source snapshot.
 
 The app has no cloud SDK, account service, telemetry, analytics, or background
-service. Its ZXing QR decoder and LiteRT-LM runtime run on-device and have no
-runtime service or internet integration.
+service. Its QR decoder and AI runtimes run on-device and have no runtime
+service or internet integration.
 
 ## Local client model
 
-Source Client uses the CPU-compatible, Apache-2.0 Qwen3 0.6B no-think INT4
-LiteRT-LM model. The checksum-pinned model is provisioned before the Android
-build and packaged in the APK. There is deliberately no model download or
-model-management UI inside Source Client. The model artifact and its license
-are published by the [LiteRT Community](https://huggingface.co/litert-community/Qwen3-0.6B-int4).
+Source Client uses the pinned Qwen3.5-4B Q4_K_M GGUF and llama.cpp.
+The model is delivered in three install-time Play Asset Delivery packs and is
+read directly as one virtual seekable file, without joining it or copying it to
+private app storage. There is deliberately no model download or model-management
+UI inside Source Client. See `../../docs/source-ai-migration.md` for the pinned
+revision, checksum, verified device spike and remaining cutover work.
+
+The local engine remains loaded across foreground requests, streams only the
+visible answer, supports cancellation during decode, and truncates complete
+conversation history against the official chat template's real token count.
+Android memory-pressure callbacks release the model after the UI is hidden.
 
 `Auto` uses an authenticated Node when one is connected and otherwise uses
 `This device`. A selected Node that becomes unavailable also falls back to the
@@ -72,10 +78,9 @@ Instrumentation uses the separate `com.source.client.instrumented` application
 ID, so running it on a physical device cannot uninstall or clear the normal
 `com.source.client` app.
 
-The provisioning step downloads and verifies the Apache-2.0 Qwen3 0.6B
-no-think model used for fully offline Client inference. The model is packaged
-in the APK as `source-client-model.litertlm`; the running app never downloads a
-model or contacts an AI service.
+The provisioning step downloads and SHA-256 verifies the pinned client models
+needed during the migration. The running app never downloads a model or
+contacts an AI service.
 
 The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 

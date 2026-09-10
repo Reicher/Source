@@ -92,6 +92,7 @@ fun SourceApp(screen: AppScreen, viewModel: SourceViewModel) {
                     viewModel::scan,
                     viewModel::retry,
                     viewModel::sendMessage,
+                    viewModel::cancelInference,
                     viewModel::logout,
                 )
                 is AppScreen.Scanner -> ScannerPermissionScreen(screen, viewModel::onQrScanned, viewModel::cancelScanner)
@@ -192,14 +193,17 @@ private fun MainScreen(
     connect: (com.source.client.model.DiscoveredNode) -> Unit,
     retry: () -> Unit,
     send: (String) -> Unit,
+    cancelInference: () -> Unit,
     logout: () -> Unit,
 ) {
     var draft by rememberSaveable { mutableStateOf("") }
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
     var recoveryKeyToShow by rememberSaveable { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
-    LaunchedEffect(state.chat.messages.size) {
-        if (state.chat.messages.isNotEmpty()) listState.animateScrollToItem(state.chat.messages.lastIndex)
+    LaunchedEffect(state.chat.messages.size, state.chat.streamingMessage?.content?.length) {
+        val lastIndex = state.chat.messages.size +
+            if (state.chat.streamingMessage != null || state.chat.busy) 0 else -1
+        if (lastIndex >= 0) listState.scrollToItem(lastIndex)
     }
     Column(
         Modifier
@@ -230,7 +234,12 @@ private fun MainScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 items(state.chat.messages, key = ChatMessage::id) { ChatBubble(it) }
-                if (state.chat.busy) item { Text("Svarar…", color = Ink.copy(alpha = .55f)) }
+                state.chat.streamingMessage?.let { message ->
+                    item(key = "stream-${message.id}") { ChatBubble(message) }
+                }
+                if (state.chat.busy && state.chat.streamingMessage == null) {
+                    item { Text("Svarar…", color = Ink.copy(alpha = .55f)) }
+                }
             }
         }
         state.chat.error?.let { ErrorText(it) }
@@ -253,11 +262,17 @@ private fun MainScreen(
             )
             Spacer(Modifier.width(8.dp))
             Button(
-                onClick = { send(draft); draft = "" },
-                enabled = draft.isNotBlank() && !state.chat.busy,
+                onClick = {
+                    if (state.chat.busy) cancelInference()
+                    else {
+                        send(draft)
+                        draft = ""
+                    }
+                },
+                enabled = state.chat.busy || draft.isNotBlank(),
                 modifier = Modifier.height(56.dp),
                 shape = RoundedCornerShape(14.dp),
-            ) { Text("Skicka") }
+            ) { Text(if (state.chat.busy) "Avbryt" else "Skicka") }
         }
         Spacer(Modifier.height(12.dp))
     }

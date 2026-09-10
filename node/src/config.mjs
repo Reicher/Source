@@ -66,10 +66,12 @@ export function loadConfig(overrides = {}) {
       overrides.snapshotRetention ?? positiveInteger('SNAPSHOT_RETENTION_COUNT', 20),
     allowedStorageApps:
       overrides.allowedStorageApps ?? identifierList('ALLOWED_STORAGE_APPS', 'thoughts,source-client'),
-    ollamaUrl: overrides.ollamaUrl ?? process.env.OLLAMA_URL ?? 'http://ollama:11434',
-    ollamaModel: overrides.ollamaModel ?? process.env.OLLAMA_MODEL ?? 'qwen3:4b',
-    ollamaTimeoutMs:
-      overrides.ollamaTimeoutMs ?? positiveInteger('OLLAMA_TIMEOUT_SECONDS', 120) * 1000,
+    llamaUrl: overrides.llamaUrl ?? process.env.LLAMA_URL ?? 'http://llama:8080',
+    llamaModel: overrides.llamaModel ?? process.env.LLAMA_MODEL ?? 'source-qwen3.5-9b',
+    llamaMaximumOutputTokens:
+      overrides.llamaMaximumOutputTokens ?? positiveInteger('LLAMA_MAX_OUTPUT_TOKENS', 2_048),
+    llamaTimeoutMs:
+      overrides.llamaTimeoutMs ?? positiveInteger('LLAMA_TIMEOUT_SECONDS', 300) * 1000,
     clock: overrides.clock ?? Date.now,
   };
 }

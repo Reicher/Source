@@ -26,7 +26,7 @@ install -d -m 0700 \
     "$data_root/gateway" \
     "$data_root/gateway/data" \
     "$data_root/gateway/config" \
-    "$data_root/ollama"
+    "$data_root/models"
 install -d -m 0755 "$repo_root/artifacts"
 
 printf '%s\n' "Source directories created."
