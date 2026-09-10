@@ -119,7 +119,7 @@ double milliseconds_since(std::chrono::steady_clock::time_point start) {
 } // namespace
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_source_client_ai_PadModelProbe_probeNative(
+Java_com_source_client_ai_ModelAssetDiagnostics_probeNative(
     JNIEnv * env,
     jobject,
     jobject asset_manager,
@@ -166,7 +166,7 @@ Java_com_source_client_ai_PadModelProbe_probeNative(
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_source_client_ai_PadModelProbe_benchmarkNative(
+Java_com_source_client_ai_ModelAssetDiagnostics_benchmarkNative(
     JNIEnv * env,
     jobject,
     jobject asset_manager,

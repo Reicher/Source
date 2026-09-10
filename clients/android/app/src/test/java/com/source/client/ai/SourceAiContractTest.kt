@@ -13,4 +13,9 @@ class SourceAiContractTest {
         assertEquals("none-v1", PROMPT_POLICY_NONE_V1)
         assertEquals(setOf(SourceAiReasoning.OFF), SourceAiReasoning.entries.toSet())
     }
+
+    @Test
+    fun `local streaming uses a finite event buffer`() {
+        assertEquals(64, LOCAL_AI_EVENT_BUFFER_CAPACITY)
+    }
 }

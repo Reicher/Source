@@ -2,19 +2,13 @@ package com.source.client.ai
 
 import android.content.res.AssetManager
 
-object PadModelProbe {
-    val partNames = arrayOf(
-        "source-client-model-1-of-3.gguf.part",
-        "source-client-model-2-of-3.gguf.part",
-        "source-client-model-3-of-3.gguf.part",
-    )
-
+internal object ModelAssetDiagnostics {
     init {
         System.loadLibrary("source-ai-pad")
     }
 
     fun probe(assetManager: AssetManager, loadTensors: Boolean = false): String =
-        probeNative(assetManager, partNames, loadTensors)
+        probeNative(assetManager, BundledModelAssets.partNames, loadTensors)
 
     fun benchmark(
         assetManager: AssetManager,
@@ -24,7 +18,7 @@ object PadModelProbe {
         threads: Int = 4,
     ): String = benchmarkNative(
         assetManager,
-        partNames,
+        BundledModelAssets.partNames,
         prompt,
         contextTokens,
         maximumOutputTokens,

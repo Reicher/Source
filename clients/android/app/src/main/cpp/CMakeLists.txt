@@ -12,6 +12,6 @@ endif()
 
 add_subdirectory("${LLAMA_CPP_ROOT}" llama.cpp-build EXCLUDE_FROM_ALL)
 
-add_library(source-ai-pad SHARED pad_model_probe.cpp source_ai_engine.cpp)
+add_library(source-ai-pad SHARED model_asset_diagnostics.cpp source_ai_engine.cpp)
 target_include_directories(source-ai-pad PRIVATE "${LLAMA_CPP_ROOT}/include" "${LLAMA_CPP_ROOT}/common")
 target_link_libraries(source-ai-pad PRIVATE llama llama-common android log)

@@ -80,7 +80,7 @@ internal class LlamaCppNative(context: Context) {
     private fun ensureHandle(): Long {
         handle.takeIf { it != 0L }?.let { return it }
         return synchronized(handleLock) {
-            handle.takeIf { it != 0L } ?: createNative(assetManager, PadModelProbe.partNames).also { created ->
+            handle.takeIf { it != 0L } ?: createNative(assetManager, BundledModelAssets.partNames).also { created ->
                 check(created != 0L) { "Could not create the local llama.cpp engine" }
                 handle = created
             }

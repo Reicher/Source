@@ -8,13 +8,13 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
-class PadModelAssetDeviceTest {
+class ModelAssetDeviceTest {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val target = instrumentation.targetContext
 
     @Test
     fun installTimePartsFormOneDirectlyReadableGguf() {
-        val result = PadModelProbe.probe(target.assets)
+        val result = ModelAssetDiagnostics.probe(target.assets)
         assertTrue(result, result.contains("logicalBytes=3013027808"))
         assertTrue(result, result.contains("parts=3"))
         assertTrue(result, result.contains("officialChatTemplate=true"))
@@ -23,14 +23,14 @@ class PadModelAssetDeviceTest {
     @Test
     fun fullTensorLoadUsesTheVirtualPadStreamWhenExplicitlyRequested() {
         assumeTrue(InstrumentationRegistry.getArguments().getString("sourceFullModelProbe") == "true")
-        val result = PadModelProbe.probe(target.assets, loadTensors = true)
+        val result = ModelAssetDiagnostics.probe(target.assets, loadTensors = true)
         assertTrue(result, result.contains("tensorsLoaded=true"))
     }
 
     @Test
     fun benchmarkRealQwenGenerationWhenExplicitlyRequested() {
         assumeTrue(InstrumentationRegistry.getArguments().getString("sourceQwenBenchmark") == "true")
-        val result = PadModelProbe.benchmark(
+        val result = ModelAssetDiagnostics.benchmark(
             target.assets,
             prompt = "hello",
         )

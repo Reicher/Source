@@ -60,8 +60,6 @@ LAN address. Never forward the Source port from a router to the public internet.
 
 See [`docs/operations.md`](docs/operations.md) for setup, user administration,
 security boundaries, verification, backup, and restore guidance.
-The active Qwen/llama.cpp cutover is tracked in
-[`docs/source-ai-migration.md`](docs/source-ai-migration.md).
 
 ## Development
 

@@ -25,13 +25,17 @@ Source Client uses the pinned Qwen3.5-4B Q4_K_M GGUF and llama.cpp.
 The model is delivered in three install-time Play Asset Delivery packs and is
 read directly as one virtual seekable file, without joining it or copying it to
 private app storage. There is deliberately no model download or model-management
-UI inside Source Client. See `../../docs/source-ai-migration.md` for the pinned
-revision, checksum, verified device spike and remaining cutover work.
+UI inside Source Client. Exact model revisions, sizes, and checksums are recorded
+in `../../models/source-ai-models.json`. Android and Source Node use llama.cpp
+v0.4.0 at commit `5266f24da75dc449bd56cbed7addb9c8e4a6a73e`.
 
 The local engine remains loaded across foreground requests, streams only the
 visible answer, supports cancellation during decode, and truncates complete
 conversation history against the official chat template's real token count.
 Android memory-pressure callbacks release the model after the UI is hidden.
+Both the local engine and the authenticated Node adapter implement the same
+Source AI runtime contract. Source adds no system prompt and disables model
+reasoning through each runtime's supported controls.
 
 `Auto` uses an authenticated Node when one is connected and otherwise uses
 `This device`. A selected Node that becomes unavailable also falls back to the
@@ -78,9 +82,8 @@ Instrumentation uses the separate `com.source.client.instrumented` application
 ID, so running it on a physical device cannot uninstall or clear the normal
 `com.source.client` app.
 
-The provisioning step downloads and SHA-256 verifies the pinned client models
-needed during the migration. The running app never downloads a model or
-contacts an AI service.
+The provisioning step downloads and SHA-256 verifies the pinned client model.
+The running app never downloads a model or contacts an AI service.
 
 The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 

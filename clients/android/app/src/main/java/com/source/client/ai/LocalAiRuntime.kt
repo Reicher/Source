@@ -5,8 +5,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
@@ -28,7 +28,7 @@ class LocalAiRuntime(context: Context) : SourceAiRuntime {
 
     override fun stream(request: SourceAiRequest): Flow<SourceAiEvent> = callbackFlow {
         validate(request)
-        trySend(SourceAiEvent.Started(request.runId))
+        trySendBlocking(SourceAiEvent.Started(request.runId))
         var sequence = 0L
         val generation = launch(Dispatchers.IO) {
             inferenceMutex.withLock {
@@ -40,12 +40,13 @@ class LocalAiRuntime(context: Context) : SourceAiRuntime {
                         threads = INFERENCE_THREADS,
                         onToken = { text ->
                             if (text.isNotEmpty()) {
-                                trySend(SourceAiEvent.Delta(request.runId, sequence++, text))
+                                val sent = trySendBlocking(SourceAiEvent.Delta(request.runId, sequence, text))
+                                if (sent.isSuccess) sequence += 1 else native.cancel(request.runId)
                             }
                         },
                     )
                     if (result.finishReason != "cancelled") {
-                        trySend(
+                        trySendBlocking(
                             SourceAiEvent.Completed(
                                 runId = request.runId,
                                 finishReason = result.finishReason,
@@ -58,7 +59,7 @@ class LocalAiRuntime(context: Context) : SourceAiRuntime {
                 } catch (_: CancellationException) {
                     close()
                 } catch (error: Exception) {
-                    trySend(
+                    trySendBlocking(
                         SourceAiEvent.Failed(
                             runId = request.runId,
                             code = errorCode(error),
@@ -73,9 +74,7 @@ class LocalAiRuntime(context: Context) : SourceAiRuntime {
             native.cancel(request.runId)
             generation.cancel()
         }
-    }.buffer(Channel.UNLIMITED)
-
-    fun cancel(runId: String) = native.cancel(runId)
+    }.buffer(LOCAL_AI_EVENT_BUFFER_CAPACITY)
 
     fun releaseMemory() {
         runtimeScope.launch {
@@ -106,3 +105,5 @@ class LocalAiRuntime(context: Context) : SourceAiRuntime {
         const val MAXIMUM_MESSAGES = 64
     }
 }
+
+internal const val LOCAL_AI_EVENT_BUFFER_CAPACITY = 64
