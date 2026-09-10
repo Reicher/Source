@@ -42,22 +42,6 @@ jobs:
       - name: Test Android Source Client
         working-directory: clients/android
         run: ./gradlew app:testInstrumentedUnitTest app:lintDebug app:assembleDebug app:assembleInstrumentedAndroidTest
-      - name: Enable KVM
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-      - name: Test Android vault on emulator
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 35
-          target: google_apis
-          arch: x86_64
-          profile: pixel_5
-          working-directory: clients/android
-          disable-animations: true
-          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
-          script: ./gradlew app:connectedInstrumentedAndroidTest -PsourceAbis=x86_64 -Pandroid.testInstrumentationRunnerArguments.class=com.source.client.security.SecureVaultDeviceTest
       - name: Validate shell scripts
         run: for script in scripts/*.sh; do sh -n "$script"; done
       - name: Validate Compose configuration

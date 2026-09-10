@@ -84,12 +84,12 @@ Instrumentation uses the separate `com.source.client.instrumented` application
 ID, so running it on a physical device cannot uninstall or clear the normal
 `com.source.client` app.
 
-CI runs `SecureVaultDeviceTest` on an API 35 x86_64 emulator, covering Android
-Keystore identity, encrypted conversation persistence, snapshot restore, and
-multi-user isolation. The model tests require the provisioned 3 GB model and a
-real ARM64 device. The full command above is therefore a required smoke test
-before every release and before merging changes to vault, model packaging, JNI,
-or local inference. `sourceQwenBenchmark=true` remains an optional benchmark.
+CI compiles the instrumentation APK so device-test regressions fail at build
+time. The vault and model tests require the platform crypto implementation,
+the provisioned 3 GB model, and a real ARM64 device. The full command above is
+therefore a required device smoke test before every release and before merging
+changes to vault, model packaging, JNI, or local inference.
+`sourceQwenBenchmark=true` remains an optional benchmark.
 
 The provisioning step downloads and SHA-256 verifies the pinned client model.
 The running app never downloads a model or contacts an AI service.

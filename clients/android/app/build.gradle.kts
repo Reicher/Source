@@ -3,13 +3,6 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val sourceAbis = providers.gradleProperty("sourceAbis")
-    .orElse("arm64-v8a")
-    .get()
-    .split(",")
-    .map(String::trim)
-    .filter(String::isNotEmpty)
-
 android {
     namespace = "com.source.client"
     compileSdk = 36
@@ -23,7 +16,7 @@ android {
         versionName = "0.4.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
-            abiFilters += sourceAbis
+            abiFilters += "arm64-v8a"
         }
         externalNativeBuild {
             cmake {
