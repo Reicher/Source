@@ -1,14 +1,16 @@
-ARG NODE_IMAGE=node:24-bookworm-slim
-FROM ${NODE_IMAGE}
+ARG GO_IMAGE=golang:1.25-bookworm
+ARG RUNTIME_IMAGE=debian:bookworm-slim
+FROM ${GO_IMAGE} AS build
 
-WORKDIR /app
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd ./cmd
+COPY internal ./internal
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/source-node ./cmd/source-node
 
-COPY package.json ./
-COPY package-lock.json ./
-RUN npm ci --omit=dev
-COPY src ./src
-
-ENV NODE_ENV=production
+FROM ${RUNTIME_IMAGE}
+COPY --from=build /out/source-node /usr/local/bin/source-node
 EXPOSE 8080 9090
 
-CMD ["node", "src/server.mjs"]
+CMD ["/usr/local/bin/source-node"]

@@ -1,6 +1,8 @@
 **
 !Dockerfile
-!package.json
-!package-lock.json
-!src/
-!src/**
+!go.mod
+!go.sum
+!cmd/
+!cmd/**
+!internal/
+!internal/**

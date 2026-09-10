@@ -10,4 +10,4 @@ if [ "$#" -eq 0 ]; then
     exit 2
 fi
 
-docker compose --env-file .env exec -T node node src/admin.mjs "$@"
+docker compose --env-file .env exec -T node /usr/local/bin/source-node "$@"

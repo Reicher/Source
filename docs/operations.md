@@ -58,7 +58,7 @@ either Source port.
 
 ## Security boundaries
 
-- The admin password uses Node 24 Argon2id with 64 MiB, three passes, and a unique salt.
+- The admin password uses Argon2id with 64 MiB, three passes, and a unique salt.
 - Users have no Node-side passwords. A client proves its Ed25519 private key
   during an admin-authorized, short-lived pairing window.
 - Pairing invitations live only in memory and are single-use. Cancellation,

@@ -65,22 +65,22 @@ The active Qwen/llama.cpp cutover is tracked in
 
 ## Development
 
-Source Node requires Node.js 24.7 or newer:
+Source Node requires Go 1.25 or newer:
 
 ```sh
 cd node
-npm ci
-npm test
+go test ./...
+go run ./cmd/source-node
 ```
 
-Direct `npm start` binds both plain-HTTP listeners to loopback and leaves
+Direct `go run ./cmd/source-node` binds both plain-HTTP listeners to loopback and leaves
 DNS-SD discovery disabled by default. A non-container LAN deployment must add
 an HTTPS gateway backed by the Node's local CA, keep administration on host
 loopback, and explicitly enable discovery only after the advertised HTTPS
 endpoint works. The Compose deployment above supplies those boundaries.
 
-The QR renderer is installed locally with the Node package and never contacts
-an external service at runtime.
+The QR renderer is compiled into the Source Node binary and never contacts an
+external service at runtime.
 
 ## License
 

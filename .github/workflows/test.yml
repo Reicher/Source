@@ -12,17 +12,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-go@v6
         with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: node/package-lock.json
-      - name: Install Source Node dependencies
-        working-directory: node
-        run: npm ci
+          go-version-file: node/go.mod
+          cache-dependency-path: node/go.sum
       - name: Test Source Node
         working-directory: node
-        run: npm test
+        run: go test ./...
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -32,7 +28,7 @@ jobs:
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
       - name: Test Android Source Client
         working-directory: clients/android
-        run: ./gradlew testDebugUnitTest lintDebug assembleDebug
+        run: ./gradlew app:testInstrumentedUnitTest app:lintDebug app:assembleDebug
       - name: Validate shell scripts
         run: for script in scripts/*.sh; do sh -n "$script"; done
       - name: Validate Compose configuration
