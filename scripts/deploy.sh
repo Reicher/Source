@@ -70,7 +70,7 @@ admin_port=$(sed -n 's/^SOURCE_ADMIN_PORT=//p' .env | tail -n 1)
 admin_port=${admin_port:-9090}
 curl --fail --silent --show-error --noproxy '*' \
     --connect-timeout 5 --max-time 15 \
-    "http://127.0.0.1:${admin_port}/healthz" >/dev/null
+    "http://127.0.0.1:${admin_port}/admin/api/state" >/dev/null
 
 docker compose --env-file .env ps
 printf '%s\n' "Source deployment completed and passed its health checks."

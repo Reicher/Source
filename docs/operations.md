@@ -113,10 +113,12 @@ Source Node:
 
 `scripts/deploy.sh` runs preflight, builds and updates the Compose services,
 waits for every service to be running and healthy, and verifies the loopback
-health endpoint. It refuses to run as root and is safe to run repeatedly. It
-does not create or modify `.env`, provision a model, or delete or reset
-persistent state. Run it directly after an SSH login for a manual deployment;
-GitHub is not required.
+admin state endpoint through the gateway. Together, those checks confirm that
+the services are healthy and that the localhost-only administration route,
+gateway proxy, and Node admin handler are reachable. It refuses to run as root
+and is safe to run repeatedly. It does not create or modify `.env`, provision
+a model, or delete or reset persistent state. Run it directly after an SSH
+login for a manual deployment; GitHub is not required.
 
 The `discovery` sidecar uses host networking to publish `_source._tcp` mDNS on
 the physical LAN. Native Linux supports this directly; Docker Desktop must have
