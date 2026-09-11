@@ -49,10 +49,16 @@ class LibraryScreenTest {
                 LibraryUiItem(
                     id = file.id,
                     filename = file.name,
+                    sourceType = file.sourceType,
+                    mimeType = file.mimeType,
                     byteCount = file.byteCount,
                     createdAtMillis = file.createdAtMillis,
-                    syncState = LibrarySyncState.SYNCED,
-                    deletable = true,
+                    syncState = LibrarySyncState.LOCAL_AND_SYNCED,
+                    localAvailable = true,
+                    nodeAvailable = true,
+                    canRemoveFromDevice = true,
+                    canDeleteFromSource = true,
+                    previewKind = null,
                 ),
             ),
         )
@@ -67,7 +73,15 @@ class LibraryScreenTest {
         assertEquals("conversation-1970-01-01-0000.json", presented.items[0].filename)
         assertEquals("archive.pdf", presented.items[1].filename)
         assertEquals(123L, presented.items[2].byteCount)
-        assertEquals(LibrarySyncState.LOCAL, presented.items[2].syncState)
-        assertEquals(false, presented.items[2].deletable)
+        assertEquals(LibrarySyncState.LOCAL_ONLY, presented.items[2].syncState)
+        assertEquals(false, presented.items[2].canDeleteFromSource)
+    }
+
+    @Test
+    fun `preview support is limited to simple local formats`() {
+        assertEquals(LibraryPreviewKind.TEXT, previewKind("text/plain", "notes.txt"))
+        assertEquals(LibraryPreviewKind.TEXT, previewKind("application/octet-stream", "data.json"))
+        assertEquals(LibraryPreviewKind.IMAGE, previewKind("image/jpeg", "photo.jpg"))
+        assertEquals(null, previewKind("application/pdf", "document.pdf"))
     }
 }

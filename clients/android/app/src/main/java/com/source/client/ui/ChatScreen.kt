@@ -78,9 +78,16 @@ internal fun MainScreen(
     logout: () -> Unit,
     selectDestination: (MainDestination) -> Unit,
     importFile: (android.net.Uri) -> Unit,
-    deleteLibraryItem: (String) -> Unit,
+    removeLibraryItemFromDevice: (String) -> Unit,
+    deleteLibraryItemFromSource: (String) -> Unit,
+    openLibraryItem: (String) -> Unit,
+    closeLibraryPreview: () -> Unit,
     clearLibraryFeedback: () -> Unit,
 ) {
+    state.libraryPreview?.let { preview ->
+        LibraryPreviewScreen(preview, closeLibraryPreview)
+        return
+    }
     var draft by rememberSaveable(state.chat.conversationId) { mutableStateOf("") }
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
     var recoveryKeyToShow by rememberSaveable { mutableStateOf<String?>(null) }
@@ -175,7 +182,9 @@ internal fun MainScreen(
                 MainDestination.LIBRARY -> LibraryScreen(
                     state = state.library,
                     onImport = importFile,
-                    onDelete = deleteLibraryItem,
+                    onRemoveFromDevice = removeLibraryItemFromDevice,
+                    onDeleteFromSource = deleteLibraryItemFromSource,
+                    onOpen = openLibraryItem,
                     onFeedbackShown = clearLibraryFeedback,
                     modifier = Modifier.fillMaxWidth().weight(1f),
                 )

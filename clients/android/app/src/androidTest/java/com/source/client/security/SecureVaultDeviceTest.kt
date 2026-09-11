@@ -13,6 +13,7 @@ import com.source.client.model.ChatConversation
 import com.source.client.model.ChatConversations
 import com.source.client.model.ChatMessage
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -20,6 +21,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.json.JSONObject
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.io.ByteArrayInputStream
@@ -153,10 +155,17 @@ class SecureVaultDeviceTest {
             byteCount = imported.byteCount,
             createdAtMillis = System.currentTimeMillis(),
             contentSha256 = imported.contentSha256,
+            nodeStored = true,
         )
         val manifest = LibraryManifest(listOf(item), modifiedAtMillis = item.createdAtMillis)
         dataStore.save(created, LibraryData, manifest)
         assertEquals(manifest, dataStore.load(created, LibraryData))
+        assertTrue(dataStore.load(created, LibraryData).items.single().nodeStored)
+        assertArrayEquals(secret, blobStore.readPreview(created, item, 1024))
+        val legacyManifest = JSONObject(LibraryData.encode(manifest).toString(Charsets.UTF_8)).apply {
+            getJSONArray("items").getJSONObject(0).remove("nodeStored")
+        }.toString().toByteArray(Charsets.UTF_8)
+        assertFalse(LibraryData.decode(legacyManifest).items.single().nodeStored)
 
         val nodeKey = ByteArray(32) { 7 }
         blobStore.createUploadPayload(created, item, nodeKey).use { payload ->

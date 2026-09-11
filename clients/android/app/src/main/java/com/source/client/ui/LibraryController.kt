@@ -29,15 +29,33 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-enum class LibrarySyncState { LOCAL, SYNCING, SYNCED, FAILED }
+enum class LibrarySyncState { LOCAL_ONLY, LOCAL_AND_SYNCED, NODE_ONLY, SYNCING, FAILED }
+
+enum class LibraryPreviewKind { TEXT, IMAGE }
+
+sealed interface LibraryPreviewContent {
+    data class Text(val value: String) : LibraryPreviewContent
+    data class Image(val bytes: ByteArray) : LibraryPreviewContent
+}
+
+data class LibraryPreviewData(
+    val filename: String,
+    val content: LibraryPreviewContent,
+)
 
 data class LibraryUiItem(
     val id: String,
     val filename: String,
+    val sourceType: String,
+    val mimeType: String,
     val byteCount: Long,
     val createdAtMillis: Long,
     val syncState: LibrarySyncState,
-    val deletable: Boolean,
+    val localAvailable: Boolean,
+    val nodeAvailable: Boolean,
+    val canRemoveFromDevice: Boolean,
+    val canDeleteFromSource: Boolean,
+    val previewKind: LibraryPreviewKind?,
 )
 
 data class LibraryUiState(
@@ -79,7 +97,7 @@ internal class LibraryController(
                 blobStore.cleanup(activeSession, manifest.items.mapTo(mutableSetOf(), LibraryItem::id))
             }
         }
-        syncStates = manifest.items.associate { it.id to LibrarySyncState.LOCAL }
+        syncStates = emptyMap()
         publish()
     }
 
@@ -118,7 +136,7 @@ internal class LibraryController(
                 items = manifest.items + item,
                 modifiedAtMillis = nextModifiedAt(now),
             )
-            syncStates = syncStates + (item.id to LibrarySyncState.LOCAL)
+            syncStates = syncStates - item.id
             manifestSync.changed()
             manifestSync.persist(activeSession, manifest)
             committed = true
@@ -136,7 +154,16 @@ internal class LibraryController(
         }
     }
 
-    suspend fun delete(itemId: String) = mutex.withLock {
+    suspend fun removeFromDevice(itemId: String) = mutex.withLock {
+        val activeSession = session() ?: return@withLock
+        val item = manifest.items.firstOrNull { it.id == itemId } ?: return@withLock
+        if (!item.nodeStored || !blobStore.exists(activeSession, item.id)) return@withLock
+        withContext(Dispatchers.IO) { blobStore.delete(activeSession, item.id) }
+        syncStates = syncStates - item.id
+        publish(feedback = message(R.string.library_item_removed_from_device))
+    }
+
+    suspend fun deleteFromSource(itemId: String) = mutex.withLock {
         val activeSession = session() ?: return@withLock
         val item = manifest.items.firstOrNull { it.id == itemId } ?: return@withLock
         val now = clock().coerceAtLeast(1)
@@ -150,7 +177,26 @@ internal class LibraryController(
         manifestSync.changed()
         manifestSync.persist(activeSession, manifest)
         withContext(Dispatchers.IO) { runCatching { blobStore.delete(activeSession, item.id) } }
-        publish(feedback = message(R.string.library_item_deleted))
+        publish(feedback = message(R.string.library_item_deleted_from_source))
+    }
+
+    suspend fun readPreview(itemId: String): LibraryPreviewData? = mutex.withLock {
+        val activeSession = session() ?: return@withLock null
+        val item = manifest.items.firstOrNull { it.id == itemId } ?: return@withLock null
+        if (!blobStore.exists(activeSession, item.id)) return@withLock null
+        val kind = previewKind(item.mimeType, item.name) ?: return@withLock null
+        val maximumBytes = when (kind) {
+            LibraryPreviewKind.TEXT -> MAXIMUM_TEXT_PREVIEW_BYTES
+            LibraryPreviewKind.IMAGE -> MAXIMUM_IMAGE_PREVIEW_BYTES
+        }
+        val bytes = withContext(Dispatchers.IO) { blobStore.readPreview(activeSession, item, maximumBytes) }
+        LibraryPreviewData(
+            filename = item.name,
+            content = when (kind) {
+                LibraryPreviewKind.TEXT -> LibraryPreviewContent.Text(bytes.toString(Charsets.UTF_8))
+                LibraryPreviewKind.IMAGE -> LibraryPreviewContent.Image(bytes)
+            },
+        )
     }
 
     suspend fun syncAll(resetAcknowledgements: Boolean = false) = mutex.withLock {
@@ -159,7 +205,7 @@ internal class LibraryController(
         val encodedDataKey = connected.trusted.dataKey ?: return@withLock
         if (resetAcknowledgements) {
             acknowledgedTombstones.clear()
-            syncStates = manifest.items.associate { it.id to LibrarySyncState.LOCAL }
+            syncStates = emptyMap()
             publish()
         }
 
@@ -179,11 +225,19 @@ internal class LibraryController(
             }
         }
 
-        manifest.items.forEach { item ->
-            if (syncStates[item.id] == LibrarySyncState.SYNCED) return@forEach
+        var nodeStatusChanged = false
+        manifest.items.toList().forEach { item ->
             if (!blobStore.exists(activeSession, item.id)) {
-                syncStates = syncStates + (item.id to LibrarySyncState.FAILED)
+                syncStates = if (item.nodeStored) {
+                    syncStates - item.id
+                } else {
+                    syncStates + (item.id to LibrarySyncState.FAILED)
+                }
                 publish()
+                return@forEach
+            }
+            if (item.nodeStored) {
+                syncStates = syncStates - item.id
                 return@forEach
             }
             syncStates = syncStates + (item.id to LibrarySyncState.SYNCING)
@@ -200,9 +254,18 @@ internal class LibraryController(
                         )
                     }
                 }
-                syncStates = syncStates + (item.id to LibrarySyncState.SYNCED)
+                val now = clock().coerceAtLeast(1)
+                manifest = manifest.copy(
+                    items = manifest.items.map { current ->
+                        if (current.id == item.id) current.copy(nodeStored = true) else current
+                    },
+                    modifiedAtMillis = nextModifiedAt(now),
+                )
+                manifestSync.changed()
+                nodeStatusChanged = true
+                syncStates = syncStates - item.id
             } catch (error: CancellationException) {
-                syncStates = syncStates + (item.id to LibrarySyncState.LOCAL)
+                syncStates = syncStates - item.id
                 publish()
                 throw error
             } catch (_: Exception) {
@@ -212,6 +275,7 @@ internal class LibraryController(
             }
             publish()
         }
+        if (nodeStatusChanged) manifestSync.persist(activeSession, manifest)
         manifestSync.backupIfNeeded(activeSession, connected, manifest)
     }
 
@@ -243,13 +307,27 @@ internal class LibraryController(
             items = manifest.items
                 .sortedByDescending(LibraryItem::createdAtMillis)
                 .map { item ->
+                    val activeSession = session()
+                    val localAvailable = activeSession != null && blobStore.exists(activeSession, item.id)
+                    val syncState = syncStates[item.id] ?: when {
+                        localAvailable && item.nodeStored -> LibrarySyncState.LOCAL_AND_SYNCED
+                        localAvailable -> LibrarySyncState.LOCAL_ONLY
+                        item.nodeStored -> LibrarySyncState.NODE_ONLY
+                        else -> LibrarySyncState.FAILED
+                    }
                     LibraryUiItem(
                         id = item.id,
                         filename = item.name,
+                        sourceType = item.sourceType,
+                        mimeType = item.mimeType,
                         byteCount = item.byteCount,
                         createdAtMillis = item.createdAtMillis,
-                        syncState = syncStates[item.id] ?: LibrarySyncState.LOCAL,
-                        deletable = true,
+                        syncState = syncState,
+                        localAvailable = localAvailable,
+                        nodeAvailable = item.nodeStored,
+                        canRemoveFromDevice = localAvailable && item.nodeStored,
+                        canDeleteFromSource = true,
+                        previewKind = if (localAvailable) previewKind(item.mimeType, item.name) else null,
                     )
                 },
             importing = importing,
@@ -261,10 +339,23 @@ internal class LibraryController(
     private data class SelectedFileMetadata(val name: String, val mimeType: String)
 }
 
+internal fun previewKind(mimeType: String, filename: String): LibraryPreviewKind? {
+    val normalizedMime = mimeType.lowercase()
+    val extension = filename.substringAfterLast('.', missingDelimiterValue = "").lowercase()
+    return when {
+        normalizedMime.startsWith("image/") -> LibraryPreviewKind.IMAGE
+        normalizedMime.startsWith("text/") || normalizedMime == "application/json" ||
+            extension in setOf("txt", "json", "md", "csv", "log", "xml", "yaml", "yml") ->
+            LibraryPreviewKind.TEXT
+        else -> null
+    }
+}
+
 internal fun withConversationLibraryItems(
     rawLibrary: LibraryUiState,
     conversations: ChatConversations,
     conversationByteCount: (ChatConversation) -> Long = ChatData::encodedConversationByteCount,
+    conversationsBackedUp: Boolean = false,
 ): LibraryUiState = rawLibrary.copy(
     items = (
         rawLibrary.items +
@@ -272,10 +363,20 @@ internal fun withConversationLibraryItems(
                 LibraryUiItem(
                     id = "conversation:${conversation.id}",
                     filename = conversationFilename(conversation.createdAtMillis),
+                    sourceType = "conversation",
+                    mimeType = "application/json",
                     byteCount = conversationByteCount(conversation),
                     createdAtMillis = conversation.createdAtMillis,
-                    syncState = LibrarySyncState.LOCAL,
-                    deletable = false,
+                    syncState = if (conversationsBackedUp) {
+                        LibrarySyncState.LOCAL_AND_SYNCED
+                    } else {
+                        LibrarySyncState.LOCAL_ONLY
+                    },
+                    localAvailable = true,
+                    nodeAvailable = conversationsBackedUp,
+                    canRemoveFromDevice = false,
+                    canDeleteFromSource = false,
+                    previewKind = LibraryPreviewKind.TEXT,
                 )
             }
         ).sortedByDescending(LibraryUiItem::createdAtMillis),
@@ -286,3 +387,6 @@ private val conversationFilenameFormat: DateTimeFormatter =
 
 internal fun conversationFilename(createdAtMillis: Long): String =
     "conversation-${conversationFilenameFormat.format(Instant.ofEpochMilli(createdAtMillis))}.json"
+
+private const val MAXIMUM_TEXT_PREVIEW_BYTES = 2L * 1024 * 1024
+private const val MAXIMUM_IMAGE_PREVIEW_BYTES = 32L * 1024 * 1024

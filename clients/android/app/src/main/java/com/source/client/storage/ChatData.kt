@@ -32,6 +32,9 @@ object ChatData : SourceData<ChatConversations> {
     fun encodedConversationByteCount(conversation: ChatConversation): Long =
         encodeConversation(conversation).toString().toByteArray(Charsets.UTF_8).size.toLong()
 
+    fun encodedConversation(conversation: ChatConversation): String =
+        encodeConversation(conversation).toString(2)
+
     override fun decode(value: ByteArray): ChatConversations {
         val root = JSONObject(value.toString(Charsets.UTF_8))
         return when (val version = root.getInt("version")) {

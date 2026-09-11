@@ -44,6 +44,28 @@ data class ChatUiState(
     val error: String? = null,
 )
 
+sealed interface LibraryPreviewUiState {
+    val itemId: String
+    val filename: String
+
+    data class Loading(
+        override val itemId: String,
+        override val filename: String,
+    ) : LibraryPreviewUiState
+
+    data class Ready(
+        override val itemId: String,
+        override val filename: String,
+        val content: LibraryPreviewContent,
+    ) : LibraryPreviewUiState
+
+    data class Failed(
+        override val itemId: String,
+        override val filename: String,
+        val message: String,
+    ) : LibraryPreviewUiState
+}
+
 enum class MainDestination { CHAT, LIBRARY }
 
 sealed interface AppScreen {
@@ -56,6 +78,7 @@ sealed interface AppScreen {
         val chat: ChatUiState = ChatUiState(),
         val library: LibraryUiState = LibraryUiState(),
         val destination: MainDestination = MainDestination.CHAT,
+        val libraryPreview: LibraryPreviewUiState? = null,
     ) : AppScreen
     data class Scanner(val node: DiscoveredNode, val error: String? = null) : AppScreen
     data class Recovery(
@@ -256,11 +279,58 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun deleteLibraryItem(itemId: String) {
+    fun removeLibraryItemFromDevice(itemId: String) {
         viewModelScope.launch {
-            libraryController.delete(itemId)
+            libraryController.removeFromDevice(itemId)
+        }
+    }
+
+    fun deleteLibraryItemFromSource(itemId: String) {
+        viewModelScope.launch {
+            libraryController.deleteFromSource(itemId)
             libraryController.syncAll()
         }
+    }
+
+    fun openLibraryItem(itemId: String) {
+        val main = _screen.value as? AppScreen.Main ?: return
+        val item = presentedLibrary().items.firstOrNull { it.id == itemId } ?: return
+        if (item.previewKind == null) return
+        _screen.value = main.copy(libraryPreview = LibraryPreviewUiState.Loading(item.id, item.filename))
+        if (item.sourceType == "conversation") {
+            val conversationId = item.id.removePrefix("conversation:")
+            val conversation = chatController.conversations.conversations.firstOrNull { it.id == conversationId }
+            val content = conversation?.let(ChatData::encodedConversation)
+            _screen.value = (_screen.value as? AppScreen.Main)?.copy(
+                libraryPreview = if (content == null) {
+                    LibraryPreviewUiState.Failed(item.id, item.filename, message(R.string.error_library_preview_failed))
+                } else {
+                    LibraryPreviewUiState.Ready(
+                        item.id,
+                        item.filename,
+                        LibraryPreviewContent.Text(content),
+                    )
+                },
+            ) ?: return
+            return
+        }
+        viewModelScope.launch {
+            val preview = runCatching { libraryController.readPreview(item.id) }.getOrNull()
+            val current = _screen.value as? AppScreen.Main ?: return@launch
+            if (current.libraryPreview?.itemId != item.id) return@launch
+            _screen.value = current.copy(
+                libraryPreview = if (preview == null) {
+                    LibraryPreviewUiState.Failed(item.id, item.filename, message(R.string.error_library_preview_failed))
+                } else {
+                    LibraryPreviewUiState.Ready(item.id, preview.filename, preview.content)
+                },
+            )
+        }
+    }
+
+    fun closeLibraryPreview() {
+        val main = _screen.value as? AppScreen.Main ?: return
+        _screen.value = main.copy(libraryPreview = null)
     }
 
     fun clearLibraryFeedback() = libraryController.clearFeedback()
@@ -464,7 +534,11 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     )
 
     private fun presentedLibrary(raw: LibraryUiState = libraryController.state): LibraryUiState =
-        withConversationLibraryItems(raw, chatController.conversations)
+        withConversationLibraryItems(
+            raw,
+            chatController.conversations,
+            conversationsBackedUp = conversationSync.isBackedUp,
+        )
 
     private fun readableChatError(error: Exception): String = when {
         error is SourceAiFailureException -> apiErrorMessage(error.code, R.string.error_ai_failed)

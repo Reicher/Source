@@ -91,6 +91,26 @@ class EncryptedBlobStore(private val context: Context) {
 
     fun exists(session: VaultSession, id: String): Boolean = blobFile(session, id).isFile
 
+    /** Decrypts and verifies a small local item for an in-app preview. */
+    fun readPreview(session: VaultSession, item: LibraryItem, maximumBytes: Long): ByteArray {
+        check(!session.closed)
+        require(item.byteCount <= maximumBytes) { "The Library item is too large to preview" }
+        val plaintextHash = MessageDigest.getInstance("SHA-256")
+        val bytes = BufferedInputStream(FileInputStream(blobFile(session, item.id))).use { fileInput ->
+            require(fileInput.readExact(MAGIC.size).contentEquals(MAGIC)) { "Invalid encrypted Library item" }
+            val nonce = fileInput.readExact(NONCE_BYTES)
+            try {
+                DigestInputStream(CipherInputStream(fileInput, decryptionCipher(session.key, nonce)), plaintextHash)
+                    .use { plaintext -> plaintext.readBytes() }
+            } finally {
+                nonce.fill(0)
+            }
+        }
+        check(bytes.size.toLong() == item.byteCount) { "Library item size changed" }
+        check(plaintextHash.digest().toHex() == item.contentSha256) { "Library item identity changed" }
+        return bytes
+    }
+
     fun cleanup(session: VaultSession, referencedIds: Set<String>) {
         profileDirectory(session).listFiles()?.forEach { file ->
             val id = file.name.removeSuffix(".blob")

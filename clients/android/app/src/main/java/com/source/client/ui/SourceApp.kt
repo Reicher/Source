@@ -38,7 +38,10 @@ fun SourceApp(screen: AppScreen, viewModel: SourceViewModel) {
                     viewModel::logout,
                     viewModel::selectDestination,
                     viewModel::importFile,
-                    viewModel::deleteLibraryItem,
+                    viewModel::removeLibraryItemFromDevice,
+                    viewModel::deleteLibraryItemFromSource,
+                    viewModel::openLibraryItem,
+                    viewModel::closeLibraryPreview,
                     viewModel::clearLibraryFeedback,
                 )
                 is AppScreen.Scanner -> ScannerPermissionScreen(

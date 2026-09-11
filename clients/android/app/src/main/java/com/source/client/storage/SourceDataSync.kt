@@ -18,11 +18,14 @@ class SourceDataSync<T>(
     private val nodeApi: SourceNodeApi,
 ) {
     private val mutex = Mutex()
-    private var backupDirty = true
+    @Volatile private var backupDirty = true
     private var localRevision = 0L
 
     var recoveryRestorePending = false
         private set
+
+    val isBackedUp: Boolean
+        get() = !backupDirty
 
     fun reset() {
         backupDirty = true

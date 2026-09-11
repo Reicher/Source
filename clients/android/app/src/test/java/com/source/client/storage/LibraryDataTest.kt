@@ -1,6 +1,7 @@
 package com.source.client.storage
 
 import java.util.UUID
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -32,5 +33,18 @@ class LibraryDataTest {
         assertTrue(runCatching {
             LibraryData.version(LibraryManifest(listOf(first, second), modifiedAtMillis = 1))
         }.isFailure)
+    }
+
+    @Test
+    fun `acknowledged node copy changes manifest identity`() {
+        val item = LibraryItem(
+            UUID.randomUUID().toString(), "notes.txt", mimeType = "text/plain",
+            byteCount = 1, createdAtMillis = 1, contentSha256 = "d".repeat(64),
+        )
+        assertNotEquals(
+            LibraryData.version(LibraryManifest(listOf(item), modifiedAtMillis = 1)).contentIdentity,
+            LibraryData.version(LibraryManifest(listOf(item.copy(nodeStored = true)), modifiedAtMillis = 2))
+                .contentIdentity,
+        )
     }
 }

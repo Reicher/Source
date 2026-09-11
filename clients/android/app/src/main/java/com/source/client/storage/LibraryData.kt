@@ -11,6 +11,8 @@ data class LibraryItem(
     val byteCount: Long,
     val createdAtMillis: Long,
     val contentSha256: String,
+    /** True only after the Node has acknowledged a complete encrypted copy. */
+    val nodeStored: Boolean = false,
 ) {
     init {
         require(ID_PATTERN.matches(id)) { "Invalid Library item identifier" }
@@ -65,6 +67,7 @@ object LibraryData : SourceData<LibraryManifest> {
                     put("byteCount", item.byteCount)
                     put("createdAtMillis", item.createdAtMillis)
                     put("contentSha256", item.contentSha256)
+                    put("nodeStored", item.nodeStored)
                 })
             }
         })
@@ -96,6 +99,7 @@ object LibraryData : SourceData<LibraryManifest> {
                         byteCount = it.getLong("byteCount"),
                         createdAtMillis = it.getLong("createdAtMillis"),
                         contentSha256 = it.getString("contentSha256"),
+                        nodeStored = it.optBoolean("nodeStored", false),
                     )
                 }
             },
@@ -119,6 +123,7 @@ object LibraryData : SourceData<LibraryManifest> {
             contentIdentity = buildString {
             value.items.sortedBy(LibraryItem::id).forEach {
                 append(it.id).append('\u0000').append(it.contentSha256).append('\u0000')
+                    .append(it.nodeStored).append('\u0000')
             }
             value.tombstones.sortedBy(LibraryTombstone::itemId).forEach {
                 append(it.itemId).append('\u0000').append(it.contentSha256)

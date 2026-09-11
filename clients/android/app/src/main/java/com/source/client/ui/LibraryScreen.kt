@@ -1,7 +1,11 @@
 package com.source.client.ui
 
+import android.graphics.BitmapFactory
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,33 +19,52 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Audiotrack
+import androidx.compose.material.icons.outlined.Cloud
+import androidx.compose.material.icons.outlined.CloudDone
+import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.Image
+import androidx.compose.material.icons.outlined.PhoneAndroid
+import androidx.compose.material.icons.outlined.PictureAsPdf
+import androidx.compose.material.icons.outlined.Sync
+import androidx.compose.material.icons.outlined.SyncProblem
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -54,7 +77,9 @@ import java.util.Locale
 internal fun LibraryScreen(
     state: LibraryUiState,
     onImport: (android.net.Uri) -> Unit,
-    onDelete: (String) -> Unit,
+    onRemoveFromDevice: (String) -> Unit,
+    onDeleteFromSource: (String) -> Unit,
+    onOpen: (String) -> Unit,
     onFeedbackShown: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -62,11 +87,10 @@ internal fun LibraryScreen(
         uri?.let(onImport)
     }
     val snackbar = remember { SnackbarHostState() }
+    var expandedId by rememberSaveable { mutableStateOf<String?>(null) }
     var deleting by remember { mutableStateOf<LibraryUiItem?>(null) }
     LaunchedEffect(state.feedback) {
         state.feedback?.let { feedback ->
-            // Consume the one-shot event before this suspends. Navigating away
-            // cancels showSnackbar, but must not leave the event to replay.
             onFeedbackShown()
             snackbar.showSnackbar(feedback)
         }
@@ -92,10 +116,7 @@ internal fun LibraryScreen(
                 )
             }
         } else {
-            LazyColumn(
-                Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
+            LazyColumn(Modifier.fillMaxSize()) {
                 if (state.importing) {
                     item(key = "importing") {
                         Row(
@@ -108,8 +129,16 @@ internal fun LibraryScreen(
                         }
                     }
                 }
-                items(state.items, key = LibraryUiItem::id) { uiItem ->
-                    LibraryItemRow(uiItem, onDelete = { deleting = it })
+                items(state.items, key = LibraryUiItem::id) { item ->
+                    LibraryItemRow(
+                        item = item,
+                        expanded = expandedId == item.id,
+                        onToggle = { expandedId = if (expandedId == item.id) null else item.id },
+                        onOpen = { onOpen(item.id) },
+                        onRemoveFromDevice = { onRemoveFromDevice(item.id) },
+                        onDeleteFromSource = { deleting = item },
+                    )
+                    HorizontalDivider(color = Ink.copy(alpha = .08f))
                 }
                 item(key = "bottom-space") { Spacer(Modifier.height(88.dp)) }
             }
@@ -132,13 +161,13 @@ internal fun LibraryScreen(
     deleting?.let { item ->
         AlertDialog(
             onDismissRequest = { deleting = null },
-            title = { Text(stringResource(R.string.library_delete_title)) },
-            text = { Text(stringResource(R.string.library_delete_message, item.filename)) },
+            title = { Text(stringResource(R.string.library_delete_from_source_title)) },
+            text = { Text(stringResource(R.string.library_delete_from_source_message, item.filename)) },
             confirmButton = {
                 TextButton(onClick = {
                     deleting = null
-                    onDelete(item.id)
-                }) { Text(stringResource(R.string.delete)) }
+                    onDeleteFromSource(item.id)
+                }) { Text(stringResource(R.string.library_delete_from_source)) }
             },
             dismissButton = {
                 TextButton(onClick = { deleting = null }) { Text(stringResource(R.string.cancel)) }
@@ -148,61 +177,66 @@ internal fun LibraryScreen(
 }
 
 @Composable
-private fun LibraryItemRow(item: LibraryUiItem, onDelete: (LibraryUiItem) -> Unit) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
-        color = Ink.copy(alpha = .045f),
-    ) {
+private fun LibraryItemRow(
+    item: LibraryUiItem,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    onOpen: () -> Unit,
+    onRemoveFromDevice: () -> Unit,
+    onDeleteFromSource: () -> Unit,
+) {
+    Column(Modifier.fillMaxWidth()) {
         Row(
-            Modifier.fillMaxWidth().padding(start = 15.dp, top = 13.dp, bottom = 13.dp, end = 5.dp),
+            Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(horizontal = 12.dp, vertical = 11.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
-                imageVector = Icons.AutoMirrored.Outlined.InsertDriveFile,
+                imageVector = typeIcon(item),
                 contentDescription = null,
+                modifier = Modifier.size(21.dp),
                 tint = Moss.copy(alpha = .78f),
             )
             Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    item.filename,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Spacer(Modifier.height(3.dp))
-                Text(
-                    formatBytes(item.byteCount),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Ink.copy(alpha = .58f),
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        formatDate(item.createdAtMillis),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Ink.copy(alpha = .5f),
-                    )
-                    Spacer(Modifier.width(7.dp))
-                    Surface(Modifier.size(7.dp), shape = CircleShape, color = syncColor(item.syncState)) {}
-                    Spacer(Modifier.width(5.dp))
-                    Text(
-                        syncLabel(item.syncState),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Ink.copy(alpha = .5f),
-                    )
+            Text(
+                item.filename,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+            )
+            Spacer(Modifier.width(10.dp))
+            StatusIcon(item.syncState)
+        }
+        if (expanded) {
+            Column(Modifier.fillMaxWidth().padding(start = 45.dp, end = 8.dp, bottom = 9.dp)) {
+                DetailLine(stringResource(R.string.library_size), formatBytes(item.byteCount))
+                DetailLine(stringResource(R.string.library_added), formatDate(item.createdAtMillis))
+                DetailLine(stringResource(R.string.library_stored), storageLabel(item))
+                if (item.syncState == LibrarySyncState.SYNCING || item.syncState == LibrarySyncState.FAILED) {
+                    DetailLine(stringResource(R.string.library_sync_status), syncLabel(item.syncState))
                 }
-            }
-            if (item.deletable) {
-                IconButton(onClick = { onDelete(item) }) {
-                    Icon(
-                        Icons.Outlined.Delete,
-                        contentDescription = stringResource(R.string.library_delete_item, item.filename),
-                        tint = Ink.copy(alpha = .55f),
-                    )
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (item.previewKind != null && item.localAvailable) {
+                        TextButton(onClick = onOpen) { Text(stringResource(R.string.library_read_open)) }
+                    }
+                    if (item.canRemoveFromDevice) {
+                        TextButton(onClick = onRemoveFromDevice) {
+                            Text(stringResource(R.string.library_remove_from_device))
+                        }
+                    }
+                    if (item.canDeleteFromSource) {
+                        TextButton(onClick = onDeleteFromSource) {
+                            Text(
+                                stringResource(R.string.library_delete_from_source),
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -210,21 +244,141 @@ private fun LibraryItemRow(item: LibraryUiItem, onDelete: (LibraryUiItem) -> Uni
 }
 
 @Composable
-private fun syncLabel(state: LibrarySyncState): String = stringResource(
-    when (state) {
-        LibrarySyncState.LOCAL -> R.string.library_sync_local
-        LibrarySyncState.SYNCING -> R.string.library_sync_syncing
-        LibrarySyncState.SYNCED -> R.string.library_sync_synced
-        LibrarySyncState.FAILED -> R.string.library_sync_failed
+private fun DetailLine(label: String, value: String) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
+        Text(label, modifier = Modifier.width(92.dp), style = MaterialTheme.typography.bodySmall, color = Ink.copy(.5f))
+        Text(value, style = MaterialTheme.typography.bodySmall, color = Ink.copy(.72f))
+    }
+}
+
+@Composable
+private fun StatusIcon(state: LibrarySyncState) {
+    val icon = when (state) {
+        LibrarySyncState.LOCAL_ONLY -> Icons.Outlined.PhoneAndroid
+        LibrarySyncState.LOCAL_AND_SYNCED -> Icons.Outlined.CloudDone
+        LibrarySyncState.NODE_ONLY -> Icons.Outlined.Cloud
+        LibrarySyncState.SYNCING -> Icons.Outlined.Sync
+        LibrarySyncState.FAILED -> Icons.Outlined.SyncProblem
+    }
+    val tint = when (state) {
+        LibrarySyncState.LOCAL_AND_SYNCED -> Moss
+        LibrarySyncState.FAILED -> MaterialTheme.colorScheme.error
+        LibrarySyncState.SYNCING -> Color(0xFF9A6A24)
+        else -> Ink.copy(alpha = .48f)
+    }
+    Icon(
+        icon,
+        contentDescription = syncLabel(state),
+        modifier = Modifier.size(19.dp),
+        tint = tint,
+    )
+}
+
+@Composable
+private fun storageLabel(item: LibraryUiItem): String = stringResource(
+    when {
+        item.localAvailable && item.nodeAvailable -> R.string.library_storage_device_and_node
+        item.nodeAvailable -> R.string.library_storage_node_only
+        else -> R.string.library_storage_device_only
     },
 )
 
 @Composable
-private fun syncColor(state: LibrarySyncState): Color = when (state) {
-    LibrarySyncState.SYNCED -> Moss
-    LibrarySyncState.FAILED -> MaterialTheme.colorScheme.error
-    LibrarySyncState.SYNCING -> Color(0xFF9A6A24)
-    LibrarySyncState.LOCAL -> Ink.copy(alpha = .28f)
+private fun syncLabel(state: LibrarySyncState): String = stringResource(
+    when (state) {
+        LibrarySyncState.LOCAL_ONLY -> R.string.library_sync_local_only
+        LibrarySyncState.LOCAL_AND_SYNCED -> R.string.library_sync_local_and_synced
+        LibrarySyncState.NODE_ONLY -> R.string.library_sync_node_only
+        LibrarySyncState.SYNCING -> R.string.library_sync_syncing
+        LibrarySyncState.FAILED -> R.string.library_sync_failed
+    },
+)
+
+private fun typeIcon(item: LibraryUiItem): ImageVector {
+    val mime = item.mimeType.lowercase()
+    val extension = item.filename.substringAfterLast('.', "").lowercase()
+    return when {
+        mime.startsWith("image/") -> Icons.Outlined.Image
+        mime.startsWith("audio/") -> Icons.Outlined.Audiotrack
+        mime == "application/pdf" || extension == "pdf" -> Icons.Outlined.PictureAsPdf
+        item.previewKind == LibraryPreviewKind.TEXT || item.sourceType == "conversation" -> Icons.Outlined.Description
+        else -> Icons.AutoMirrored.Outlined.InsertDriveFile
+    }
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+internal fun LibraryPreviewScreen(state: LibraryPreviewUiState, onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(state.filename, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, stringResource(R.string.back))
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        when (state) {
+            is LibraryPreviewUiState.Loading -> Box(
+                Modifier.fillMaxSize().padding(padding),
+                contentAlignment = Alignment.Center,
+            ) { CircularProgressIndicator(color = Moss) }
+            is LibraryPreviewUiState.Failed -> Box(
+                Modifier.fillMaxSize().padding(padding).padding(24.dp),
+                contentAlignment = Alignment.Center,
+            ) { Text(state.message, color = MaterialTheme.colorScheme.error) }
+            is LibraryPreviewUiState.Ready -> when (val content = state.content) {
+                is LibraryPreviewContent.Text -> SelectionContainer {
+                    Text(
+                        content.value,
+                        modifier = Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(18.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+                is LibraryPreviewContent.Image -> PreviewImage(content.bytes, Modifier.fillMaxSize().padding(padding))
+            }
+        }
+    }
+}
+
+@Composable
+private fun PreviewImage(bytes: ByteArray, modifier: Modifier = Modifier) {
+    val bitmap: ImageBitmap? = remember(bytes) {
+        runCatching { decodePreviewBitmap(bytes)?.asImageBitmap() }.getOrNull()
+    }
+    if (bitmap == null) {
+        Box(modifier.padding(24.dp), contentAlignment = Alignment.Center) {
+            Text(stringResource(R.string.error_library_preview_failed), color = MaterialTheme.colorScheme.error)
+        }
+    } else {
+        Image(
+            bitmap = bitmap,
+            contentDescription = null,
+            modifier = modifier.padding(12.dp),
+            contentScale = ContentScale.Fit,
+        )
+    }
+}
+
+private fun decodePreviewBitmap(bytes: ByteArray): android.graphics.Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    var sampleSize = 1
+    while ((bounds.outWidth / sampleSize).toLong() * (bounds.outHeight / sampleSize) > MAXIMUM_PREVIEW_PIXELS) {
+        sampleSize *= 2
+    }
+    return BitmapFactory.decodeByteArray(
+        bytes,
+        0,
+        bytes.size,
+        BitmapFactory.Options().apply { inSampleSize = sampleSize },
+    )
 }
 
 internal fun formatBytes(bytes: Long): String {
@@ -242,3 +396,5 @@ internal fun formatBytes(bytes: Long): String {
 
 private fun formatDate(millis: Long): String =
     DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(millis))
+
+private const val MAXIMUM_PREVIEW_PIXELS = 12_000_000L
