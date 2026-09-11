@@ -1,17 +1,17 @@
 package com.source.client.ui
 
 import com.source.client.R
-import com.source.client.ai.NodeAiRuntime
+import com.source.client.ai.AiRuntimeRouter
 import com.source.client.ai.SourceAiContent
 import com.source.client.ai.SourceAiMessage
 import com.source.client.ai.SourceAiRequest
 import com.source.client.ai.SourceAiRole
 import com.source.client.ai.SourceAiRuntime
+import com.source.client.storage.SourceDataSync
+import com.source.client.model.ConnectedNode
 import com.source.client.model.AiSelection
 import com.source.client.model.ChatMessage
 import com.source.client.model.ChatRole
-import com.source.client.protocol.SourceApiException
-import com.source.client.protocol.SourceNodeApi
 import com.source.client.security.VaultSession
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
@@ -20,13 +20,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 internal class ChatController(
-    private val localAiRuntime: SourceAiRuntime,
-    private val nodeApi: SourceNodeApi,
+    private val aiRuntime: AiRuntimeRouter,
     private val scope: CoroutineScope,
     private val session: () -> VaultSession?,
     private val connectedNode: () -> ConnectedNode?,
-    private val conversationSync: ConversationSync,
-    private val onNodeUnavailable: (ConnectedNode) -> Unit,
+    private val conversationSync: SourceDataSync<List<ChatMessage>>,
     private val readableError: (Exception) -> String,
     private val message: (Int) -> String,
     private val onStateChanged: (ChatUiState) -> Unit,
@@ -41,10 +39,12 @@ internal class ChatController(
         activeRunId = null
         inferenceJob?.cancel()
         inferenceJob = null
+        aiRuntime.select(AiSelection.AUTO)
         update(ChatUiState(messages = messages))
     }
 
     fun selectAi(selection: AiSelection) {
+        aiRuntime.select(selection)
         update(state.copy(selection = selection, error = null))
     }
 
@@ -70,32 +70,18 @@ internal class ChatController(
                 error = null,
             ),
         )
-        conversationSync.conversationChanged()
+        conversationSync.changed()
 
         inferenceJob = scope.launch {
             try {
                 conversationSync.persist(activeSession, state.messages)
                 val context = boundedChatContext(state.messages)
-                val connected = connectedNode()
-                val target = resolveAiRuntime(state.selection, connected != null)
-                val assistant = if (target == AiRuntimeTarget.NODE && connected != null) {
-                    try {
-                        streamAnswer(
-                            NodeAiRuntime(nodeApi, connected.discovered.apiBaseUrl, connected.trusted),
-                            context,
-                            runId,
-                            activeSession.vault.identity.userId,
-                        )
-                    } catch (error: CancellationException) {
-                        throw error
-                    } catch (error: Exception) {
-                        if (!canFallbackFromNode(error)) throw error
-                        if (error !is SourceApiException) onNodeUnavailable(connected)
-                        streamAnswer(localAiRuntime, context, runId, activeSession.vault.identity.userId)
-                    }
-                } else {
-                    streamAnswer(localAiRuntime, context, runId, activeSession.vault.identity.userId)
-                }
+                val assistant = streamAnswer(
+                    aiRuntime,
+                    context,
+                    runId,
+                    activeSession.vault.identity.userId,
+                )
                 if (activeRunId != runId) return@launch
                 update(
                     state.copy(
@@ -107,7 +93,7 @@ internal class ChatController(
                         error = null,
                     ),
                 )
-                conversationSync.conversationChanged()
+                conversationSync.changed()
                 conversationSync.persist(activeSession, state.messages)
             } catch (error: CancellationException) {
                 if (activeRunId == runId) update(state.copy(streamingMessage = null, busy = false))

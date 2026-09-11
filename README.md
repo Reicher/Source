@@ -31,9 +31,11 @@ provides:
 
 The first Android Source Client now lives in [`clients/android`](clients/android/README.md).
 It implements local identity, LAN discovery, QR pairing, automatic trusted
-reconnect, and one encrypted local-first AI conversation with Node backup.
-General sync and the broader personal-data model are not implemented yet.
-Thoughts is the first intended Source-compatible application.
+reconnect, and one encrypted local-first AI conversation. Chat is the first
+consumer of the client's generic versioned data store and encrypted Node
+snapshot synchronization path; notes, contacts, and the broader personal-data
+model are not implemented yet. Thoughts is the first intended
+Source-compatible application.
 
 ## Install Source Node
 

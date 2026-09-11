@@ -1,5 +1,8 @@
 package com.source.client.ui
 
+import com.source.client.ai.AiRuntimeTarget
+import com.source.client.ai.canFallbackFromNode
+import com.source.client.ai.resolveAiRuntime
 import com.source.client.model.AiSelection
 import com.source.client.model.ChatMessage
 import com.source.client.protocol.SourceApiException

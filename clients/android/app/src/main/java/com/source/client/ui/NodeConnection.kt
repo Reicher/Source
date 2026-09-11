@@ -1,8 +1,11 @@
 package com.source.client.ui
 
 import com.source.client.SourceClientApplication
+import com.source.client.model.ConnectedNode
 import com.source.client.model.DiscoveredNode
-import com.source.client.model.NodeStatus
+import com.source.client.model.NodeConnectionState
+import com.source.client.model.NodeDisconnectReason
+import com.source.client.model.NodeRecoveryPhase
 import com.source.client.model.TrustedNode
 import com.source.client.security.SourceCrypto
 import com.source.client.security.VaultSession
@@ -14,17 +17,18 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
-internal data class ConnectedNode(val discovered: DiscoveredNode, val trusted: TrustedNode)
+internal fun NodeConnectionState.connectedNodeOrNull(): ConnectedNode? =
+    (this as? NodeConnectionState.Connected)?.connection
 
-internal fun keepActiveConnectionStatus(status: NodeStatus, connectionAttemptActive: Boolean): Boolean =
-    status is NodeStatus.Connecting && connectionAttemptActive
+internal fun NodeConnectionState.isAuthenticating(node: DiscoveredNode): Boolean =
+    this is NodeConnectionState.Authenticating &&
+        this.node.serviceName == node.serviceName && this.node.apiBaseUrl == node.apiBaseUrl
 
 internal class NodeConnection(
     private val app: SourceClientApplication,
     private val scope: CoroutineScope,
     private val session: () -> VaultSession?,
-    private val connectionAllowed: () -> Boolean,
-    private val onStatus: (NodeStatus) -> Unit,
+    private val onState: (NodeConnectionState) -> Unit,
     private val onConnected: suspend () -> Unit,
     private val onHeartbeat: suspend () -> Unit,
     private val onRecoveryConfigured: suspend () -> Unit,
@@ -33,12 +37,12 @@ internal class NodeConnection(
     private var observationJob: Job? = null
     private var connectJob: Job? = null
     private var heartbeatJob: Job? = null
-    private var lastConnectedService: String? = null
-    private var lastConnectedApiBaseUrl: String? = null
-    private var status: NodeStatus = NodeStatus.Searching
 
-    var current: ConnectedNode? = null
+    var state: NodeConnectionState = NodeConnectionState.Discovering
         private set
+
+    val current: ConnectedNode?
+        get() = state.connectedNodeOrNull()
 
     fun start() {
         if (observationJob != null) return
@@ -50,22 +54,23 @@ internal class NodeConnection(
 
     fun onForeground() {
         foreground = true
-        if (session() != null) startRuntime()
+        if (session() == null) return
+        transition(NodeConnectionState.Discovering)
+        startRuntime()
     }
 
     fun onBackground() {
         foreground = false
-        current = null
+        val trusted = current?.trusted ?: session()?.vault?.trustedNodes?.firstOrNull()
         app.nodeDiscovery.stop()
         app.networkMonitor.stop()
-        connectJob?.cancel()
-        heartbeatJob?.cancel()
+        cancelConnectionWork()
+        transition(NodeConnectionState.Disconnected(trusted, NodeDisconnectReason.BACKGROUND))
     }
 
     fun clear() {
         onBackground()
-        lastConnectedService = null
-        lastConnectedApiBaseUrl = null
+        transition(NodeConnectionState.Discovering)
     }
 
     fun close() {
@@ -75,20 +80,35 @@ internal class NodeConnection(
     }
 
     fun retry() {
-        publishStatus(statusForCurrentNodes())
+        transition(NodeConnectionState.Discovering)
         reconcile(app.nodeDiscovery.nodes.value, app.networkMonitor.available.value)
     }
 
-    fun cancelActiveAttempt() {
-        connectJob?.cancel()
-        connectJob = null
+    fun beginPairing(node: DiscoveredNode, name: String) {
+        cancelConnectionWork()
+        transition(NodeConnectionState.Pairing(node, name))
+    }
+
+    fun beginRecovery(node: DiscoveredNode, name: String) {
+        cancelConnectionWork()
+        transition(NodeConnectionState.Recovering(node, name, NodeRecoveryPhase.REPLACING_CLIENT))
+    }
+
+    fun cancelConnectionFlow() {
+        cancelConnectionWork()
+        transition(stateForCurrentNodes())
+        reconcile(app.nodeDiscovery.nodes.value, app.networkMonitor.available.value)
+    }
+
+    fun fail(message: String) {
+        cancelConnectionWork()
+        transition(NodeConnectionState.Failed(message))
     }
 
     fun disconnect(trusted: TrustedNode) {
-        current = null
-        lastConnectedService = null
-        lastConnectedApiBaseUrl = null
-        publishStatus(NodeStatus.PairedOffline(trusted))
+        cancelConnectionWork()
+        transition(NodeConnectionState.Disconnected(trusted, NodeDisconnectReason.LOST))
+        reconcile(app.nodeDiscovery.nodes.value, app.networkMonitor.available.value)
     }
 
     fun saveTrustedNode(activeSession: VaultSession, trusted: TrustedNode) {
@@ -99,21 +119,18 @@ internal class NodeConnection(
     }
 
     suspend fun acceptConnection(discovered: DiscoveredNode, trusted: TrustedNode) {
-        lastConnectedService = discovered.serviceName
-        lastConnectedApiBaseUrl = discovered.apiBaseUrl
-        current = ConnectedNode(discovered, trusted)
-        publishStatus(NodeStatus.Connected(trusted))
+        transition(NodeConnectionState.Connected(ConnectedNode(discovered, trusted)))
         onConnected()
         startHeartbeat(discovered, trusted)
     }
 
-    fun statusForCurrentNodes(): NodeStatus {
+    fun stateForCurrentNodes(): NodeConnectionState {
         val trusted = session()?.vault?.trustedNodes.orEmpty()
         val nodes = app.nodeDiscovery.nodes.value
         return when {
-            trusted.isNotEmpty() -> NodeStatus.PairedOffline(trusted.first())
-            nodes.isNotEmpty() -> NodeStatus.Found(nodes)
-            else -> NodeStatus.NoneFound
+            trusted.isNotEmpty() -> NodeConnectionState.Disconnected(trusted.first(), NodeDisconnectReason.NOT_FOUND)
+            nodes.isNotEmpty() -> NodeConnectionState.Found(nodes)
+            else -> NodeConnectionState.Discovering
         }
     }
 
@@ -125,13 +142,22 @@ internal class NodeConnection(
 
     private fun reconcile(nodes: List<DiscoveredNode>, network: Boolean) {
         val activeSession = session() ?: return
-        if (!foreground || !connectionAllowed()) return
+        if (!foreground || state is NodeConnectionState.Pairing) return
+        val recovery = state as? NodeConnectionState.Recovering
+        if (recovery?.phase == NodeRecoveryPhase.REPLACING_CLIENT) return
+        if (recovery?.phase == NodeRecoveryPhase.CONFIGURING_DATA_KEY && network && nodes.any {
+                it.serviceName == recovery.node.serviceName && it.apiBaseUrl == recovery.node.apiBaseUrl
+            }
+        ) return
         if (!network) {
-            current = null
             app.nodeDiscovery.stop()
-            heartbeatJob?.cancel()
-            connectJob?.cancel()
-            publishStatus(activeSession.vault.trustedNodes.firstOrNull()?.let(NodeStatus::PairedOffline) ?: NodeStatus.NoneFound)
+            cancelConnectionWork()
+            transition(
+                NodeConnectionState.Disconnected(
+                    activeSession.vault.trustedNodes.firstOrNull(),
+                    NodeDisconnectReason.NETWORK_UNAVAILABLE,
+                ),
+            )
             return
         }
         app.nodeDiscovery.start()
@@ -142,62 +168,74 @@ internal class NodeConnection(
         if (candidate != null) {
             val connected = current
             if (connected?.trusted?.nodeId == candidate.second.nodeId &&
-                lastConnectedService == candidate.first.serviceName &&
-                lastConnectedApiBaseUrl == candidate.first.apiBaseUrl
+                connected.discovered.serviceName == candidate.first.serviceName &&
+                connected.discovered.apiBaseUrl == candidate.first.apiBaseUrl
             ) return
+            if (state.isAuthenticating(candidate.first)) return
             authenticate(candidate.first, candidate.second)
             return
         }
-        current = null
-        if (keepActiveConnectionStatus(status, connectJob?.isActive == true)) return
-        heartbeatJob?.cancel()
-        publishStatus(
+        cancelConnectionWork()
+        transition(
             when {
-                trustedNodes.isNotEmpty() -> NodeStatus.PairedOffline(trustedNodes.first())
-                nodes.isNotEmpty() -> NodeStatus.Found(nodes)
-                else -> NodeStatus.NoneFound
+                trustedNodes.isNotEmpty() ->
+                    NodeConnectionState.Disconnected(trustedNodes.first(), NodeDisconnectReason.NOT_FOUND)
+                nodes.isNotEmpty() -> NodeConnectionState.Found(nodes)
+                else -> NodeConnectionState.Discovering
             },
         )
     }
 
-    private fun authenticate(discovered: DiscoveredNode, trusted: TrustedNode, attempt: Int = 0) {
-        if (connectJob?.isActive == true) return
-        publishStatus(NodeStatus.Connecting(trusted.displayName))
+    private fun authenticate(discovered: DiscoveredNode, trusted: TrustedNode) {
+        connectJob?.cancel()
+        heartbeatJob?.cancel()
         connectJob = scope.launch {
-            try {
-                var refreshed = app.nodeApi.authenticate(discovered.apiBaseUrl, trusted)
-                val activeSession = session() ?: return@launch
-                if (refreshed.displayName != trusted.displayName) {
-                    activeSession.vault = activeSession.vault.copy(
-                        trustedNodes = activeSession.vault.trustedNodes.map {
-                            if (it.nodeId == refreshed.nodeId) refreshed else it
-                        },
-                    )
-                    app.secureVault.save(activeSession)
+            for (attempt in 0..MAX_RECONNECT_ATTEMPTS) {
+                if (!canAuthenticate(discovered)) {
+                    if (state !is NodeConnectionState.Pairing &&
+                        (state !is NodeConnectionState.Recovering ||
+                            (state as NodeConnectionState.Recovering).phase == NodeRecoveryPhase.CONFIGURING_DATA_KEY)
+                    ) {
+                        transition(NodeConnectionState.Disconnected(trusted, NodeDisconnectReason.NOT_FOUND))
+                    }
+                    return@launch
                 }
-                lastConnectedService = discovered.serviceName
-                lastConnectedApiBaseUrl = discovered.apiBaseUrl
-                current = ConnectedNode(discovered, refreshed)
-                publishStatus(NodeStatus.Connected(refreshed))
-                onConnected()
-                refreshed = configureRecoveryIfNeeded(activeSession, discovered, refreshed)
-                startHeartbeat(discovered, refreshed)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Exception) {
-                current = null
-                if (foreground && attempt < MAX_RECONNECT_ATTEMPTS) {
-                    delay((1L shl attempt).coerceAtMost(16) * 1_000)
-                    connectJob = null
-                    if (app.nodeDiscovery.nodes.value.any { it.serviceName == discovered.serviceName }) {
-                        authenticate(discovered, trusted, attempt + 1)
+                transition(NodeConnectionState.Authenticating(discovered, trusted, attempt))
+                try {
+                    var refreshed = app.nodeApi.authenticate(discovered.apiBaseUrl, trusted)
+                    val activeSession = session() ?: return@launch
+                    if (refreshed.displayName != trusted.displayName) {
+                        activeSession.vault = activeSession.vault.copy(
+                            trustedNodes = activeSession.vault.trustedNodes.map {
+                                if (it.nodeId == refreshed.nodeId) refreshed else it
+                            },
+                        )
+                        app.secureVault.save(activeSession)
+                    }
+                    transition(NodeConnectionState.Connected(ConnectedNode(discovered, refreshed)))
+                    onConnected()
+                    refreshed = configureRecoveryIfNeeded(activeSession, discovered, refreshed)
+                    startHeartbeat(discovered, refreshed)
+                    return@launch
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    if (attempt == MAX_RECONNECT_ATTEMPTS || !canAuthenticate(discovered)) {
+                        transition(NodeConnectionState.Disconnected(trusted, NodeDisconnectReason.AUTHENTICATION_FAILED))
                         return@launch
                     }
+                    delay((1L shl attempt).coerceAtMost(16) * 1_000)
                 }
-                publishStatus(NodeStatus.PairedOffline(trusted))
             }
         }
     }
+
+    private fun canAuthenticate(discovered: DiscoveredNode): Boolean = foreground &&
+        app.nodeDiscovery.nodes.value.any {
+            it.serviceName == discovered.serviceName && it.apiBaseUrl == discovered.apiBaseUrl
+        } && state !is NodeConnectionState.Pairing &&
+        (state !is NodeConnectionState.Recovering ||
+            (state as NodeConnectionState.Recovering).phase == NodeRecoveryPhase.CONFIGURING_DATA_KEY)
 
     private suspend fun configureRecoveryIfNeeded(
         activeSession: VaultSession,
@@ -216,8 +254,13 @@ internal class NodeConnection(
             trusted.copy(recoverySetupPending = true)
         }
         saveTrustedNode(activeSession, pending)
-        current = ConnectedNode(discovered, pending)
-        publishStatus(NodeStatus.Connected(pending))
+        transition(
+            NodeConnectionState.Recovering(
+                discovered,
+                pending.displayName,
+                NodeRecoveryPhase.CONFIGURING_DATA_KEY,
+            ),
+        )
         val recoveryKey = checkNotNull(pending.recoveryKey)
         val dataKey = SourceCrypto.base64UrlDecode(checkNotNull(pending.dataKey))
         val envelope = try {
@@ -228,8 +271,7 @@ internal class NodeConnection(
         app.nodeApi.setupRecovery(discovered.apiBaseUrl, pending, recoveryKey, envelope)
         val updated = pending.copy(recoverySetupPending = false)
         saveTrustedNode(activeSession, updated)
-        current = ConnectedNode(discovered, updated)
-        publishStatus(NodeStatus.Connected(updated))
+        transition(NodeConnectionState.Connected(ConnectedNode(discovered, updated)))
         onRecoveryConfigured()
         return updated
     }
@@ -237,21 +279,16 @@ internal class NodeConnection(
     private fun startHeartbeat(discovered: DiscoveredNode, trusted: TrustedNode) {
         heartbeatJob?.cancel()
         heartbeatJob = scope.launch {
-            while (foreground) {
+            while (foreground && current?.trusted?.nodeId == trusted.nodeId) {
                 delay(HEARTBEAT_INTERVAL_MILLIS)
                 try {
                     val refreshed = app.nodeApi.authenticate(discovered.apiBaseUrl, trusted)
-                    current = ConnectedNode(discovered, refreshed)
-                    publishStatus(NodeStatus.Connected(refreshed))
+                    transition(NodeConnectionState.Connected(ConnectedNode(discovered, refreshed)))
                     onHeartbeat()
                 } catch (error: CancellationException) {
                     throw error
                 } catch (_: Exception) {
-                    current = null
-                    lastConnectedService = null
-                    lastConnectedApiBaseUrl = null
-                    publishStatus(NodeStatus.PairedOffline(trusted))
-                    connectJob = null
+                    transition(NodeConnectionState.Disconnected(trusted, NodeDisconnectReason.LOST))
                     authenticate(discovered, trusted)
                     return@launch
                 }
@@ -259,9 +296,16 @@ internal class NodeConnection(
         }
     }
 
-    private fun publishStatus(next: NodeStatus) {
-        status = next
-        onStatus(next)
+    private fun cancelConnectionWork() {
+        connectJob?.cancel()
+        connectJob = null
+        heartbeatJob?.cancel()
+        heartbeatJob = null
+    }
+
+    private fun transition(next: NodeConnectionState) {
+        state = next
+        onState(next)
     }
 
     private companion object {

@@ -9,11 +9,12 @@ Source monorepo. It intentionally implements only the first vertical slices:
 3. scan and validate the Node's protocol-v1 invitation QR;
 4. complete the existing mutual Ed25519 pairing handshake;
 5. persist Node trust and the one-time client credential in an encrypted vault;
-6. detect loss of the local network and reconnect automatically after DNS-SD
-   rediscovery and a fresh signed Node identity proof.
+6. model discovery, pairing, recovery, authentication, connection loss, and
+   reconnect as explicit connection states;
 7. keep one encrypted conversation and run it either through a local on-device
    model or the authenticated Source Node chat API;
-8. back up the encrypted conversation as an opaque Source snapshot.
+8. store, version, reconcile, back up, and restore chat through a generic
+   encrypted Source-data path that additional datasets can reuse.
 
 The app has no cloud SDK, account service, telemetry, analytics, or background
 service. Its QR decoder and AI runtimes run on-device and have no runtime
@@ -34,8 +35,10 @@ visible answer, supports cancellation during decode, and truncates complete
 conversation history against the official chat template's real token count.
 Android memory-pressure callbacks release the model after the UI is hidden.
 Both the local engine and the authenticated Node adapter implement the same
-Source AI runtime contract. Source adds no system prompt and disables model
-reasoning through each runtime's supported controls.
+Source AI runtime contract. A runtime router owns placement and safe fallback,
+so chat consumes the same started/delta/completed/failed stream regardless of
+where inference runs. Source adds no system prompt and disables model reasoning
+through each runtime's supported controls.
 
 `Auto` uses an authenticated Node when one is connected and otherwise uses
 `This device`. A selected Node that becomes unavailable also falls back to the

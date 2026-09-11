@@ -3,6 +3,8 @@ package com.source.client.security
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.source.client.storage.ChatData
+import com.source.client.storage.SourceDataStore
 import com.source.client.model.ChatMessage
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -26,6 +28,7 @@ class SecureVaultDeviceTest {
     @Test
     fun identityCanBeCreatedPersistedAndUnlockedWithAndroidKeystore() {
         val vault = SecureVault(context, preferencesName, alias)
+        val dataStore = SourceDataStore(vault)
         val password = "local test password".toCharArray()
         val created = vault.create("Robin", password)
         val clientId = created.vault.identity.clientId
@@ -39,7 +42,7 @@ class SecureVaultDeviceTest {
         val unlocked = SecureVault(context, preferencesName, alias).unlock(profileId, password)
         assertEquals(clientId, unlocked?.vault?.identity?.clientId)
         assertFalse(unlocked?.vault?.identity?.clientPrivateKey.isNullOrBlank())
-        assertTrue(unlocked != null && vault.loadConversation(unlocked).isEmpty())
+        assertTrue(unlocked != null && dataStore.load(unlocked, ChatData).isEmpty())
         unlocked?.close()
         password.fill('\u0000')
     }
@@ -47,6 +50,7 @@ class SecureVaultDeviceTest {
     @Test
     fun conversationIsEncryptedPersistedAndRestorableFromSnapshot() {
         val vault = SecureVault(context, preferencesName, alias)
+        val dataStore = SourceDataStore(vault)
         val password = "local test password".toCharArray()
         val created = vault.create("Robin", password)
         val messages = listOf(
@@ -54,17 +58,19 @@ class SecureVaultDeviceTest {
             ChatMessage.assistant("A local answer"),
         )
 
-        vault.saveConversation(created, messages)
-        val snapshot = vault.createConversationSnapshot(created, messages)
+        dataStore.save(created, ChatData, messages)
+        val snapshot = dataStore.createSnapshot(created, ChatData, messages)
         assertFalse(snapshot.toString(Charsets.UTF_8).contains("A secret question"))
         created.close()
 
         val reopened = SecureVault(context, preferencesName, alias).unlock(vault.profiles.single().id, password)!!
-        assertEquals(messages, vault.loadConversation(reopened))
+        assertEquals(messages, dataStore.load(reopened, ChatData))
 
-        vault.saveConversation(reopened, emptyList())
-        assertEquals(messages, vault.restoreConversationSnapshot(reopened, snapshot))
-        assertEquals(messages, vault.loadConversation(reopened))
+        dataStore.save(reopened, ChatData, emptyList())
+        val restored = dataStore.readSnapshot(reopened, ChatData, snapshot)
+        dataStore.save(reopened, ChatData, restored)
+        assertEquals(messages, restored)
+        assertEquals(messages, dataStore.load(reopened, ChatData))
         reopened.close()
         password.fill('\u0000')
     }
@@ -72,17 +78,20 @@ class SecureVaultDeviceTest {
     @Test
     fun nodeDataKeyRestoresSnapshotIntoANewLocalVault() {
         val vault = SecureVault(context, preferencesName, alias)
+        val dataStore = SourceDataStore(vault)
         val first = vault.create("First phone", "one".toCharArray())
         val messages = listOf(ChatMessage.user("Data from the old phone"))
         val dataKey = SourceCrypto.base64UrlDecode(
             SourceCrypto.generateRecoveryMaterial("srcnode_${"n".repeat(43)}").dataKey,
         )
-        val snapshot = vault.createConversationSnapshot(first, messages, dataKey)
+        val snapshot = dataStore.createSnapshot(first, ChatData, messages, dataKey)
         first.close()
 
         val replacement = vault.create("New phone", "two".toCharArray())
-        assertEquals(messages, vault.restoreConversationSnapshot(replacement, snapshot, dataKey))
-        assertEquals(messages, vault.loadConversation(replacement))
+        val restored = dataStore.readSnapshot(replacement, ChatData, snapshot, dataKey)
+        dataStore.save(replacement, ChatData, restored)
+        assertEquals(messages, restored)
+        assertEquals(messages, dataStore.load(replacement, ChatData))
         replacement.close()
         dataKey.fill(0)
     }
@@ -90,13 +99,14 @@ class SecureVaultDeviceTest {
     @Test
     fun multipleUsersKeepPasswordsIdentitiesAndConversationsSeparate() {
         val vault = SecureVault(context, preferencesName, alias)
+        val dataStore = SourceDataStore(vault)
         val robinPassword = "Robin password".toCharArray()
         val testPassword = "test".toCharArray()
         val robin = vault.create("Robin", robinPassword)
-        vault.saveConversation(robin, listOf(ChatMessage.user("Robins privata chatt")))
+        dataStore.save(robin, ChatData, listOf(ChatMessage.user("Robins privata chatt")))
         robin.close()
         val testUser = vault.create("Test", testPassword)
-        vault.saveConversation(testUser, listOf(ChatMessage.user("Testets privata chatt")))
+        dataStore.save(testUser, ChatData, listOf(ChatMessage.user("Testets privata chatt")))
         testUser.close()
 
         val profiles = vault.profiles
@@ -106,9 +116,9 @@ class SecureVaultDeviceTest {
         val reopenedRobin = vault.unlock(profiles[0].id, robinPassword)!!
         val reopenedTest = vault.unlock(profiles[1].id, testPassword)!!
         assertEquals("Robin", reopenedRobin.vault.identity.userDisplayName)
-        assertEquals("Robins privata chatt", vault.loadConversation(reopenedRobin).single().content)
+        assertEquals("Robins privata chatt", dataStore.load(reopenedRobin, ChatData).single().content)
         assertEquals("Test", reopenedTest.vault.identity.userDisplayName)
-        assertEquals("Testets privata chatt", vault.loadConversation(reopenedTest).single().content)
+        assertEquals("Testets privata chatt", dataStore.load(reopenedTest, ChatData).single().content)
         assertFalse(reopenedRobin.vault.identity.clientId == reopenedTest.vault.identity.clientId)
         reopenedRobin.close()
         reopenedTest.close()

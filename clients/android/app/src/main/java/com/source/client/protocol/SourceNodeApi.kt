@@ -258,14 +258,16 @@ class SourceNodeApi {
         }
     }
 
-    suspend fun uploadConversationSnapshot(
+    suspend fun uploadSnapshot(
         apiBaseUrl: String,
         trusted: TrustedNode,
+        appId: String,
         snapshotId: String,
         snapshot: ByteArray,
     ) = withContext(Dispatchers.IO) {
+        requireStorageAppId(appId)
         val connection = openConnection(
-            "${apiBaseUrl.removeSuffix("/")}/storage/$CHAT_STORAGE_APP/snapshots/$snapshotId",
+            "${apiBaseUrl.removeSuffix("/")}/storage/$appId/snapshots/$snapshotId",
             trusted.tlsCaCertificate,
             trusted.clientCredential,
         )
@@ -284,12 +286,14 @@ class SourceNodeApi {
         }
     }
 
-    suspend fun latestConversationSnapshot(
+    suspend fun latestSnapshot(
         apiBaseUrl: String,
         trusted: TrustedNode,
+        appId: String,
     ): ByteArray? = withContext(Dispatchers.IO) {
+        requireStorageAppId(appId)
         val connection = openConnection(
-            "${apiBaseUrl.removeSuffix("/")}/storage/$CHAT_STORAGE_APP/snapshots/latest",
+            "${apiBaseUrl.removeSuffix("/")}/storage/$appId/snapshots/latest",
             trusted.tlsCaCertificate,
             trusted.clientCredential,
         )
@@ -368,6 +372,10 @@ class SourceNodeApi {
         .digest(value)
         .joinToString("") { "%02x".format(it) }
 
+    private fun requireStorageAppId(appId: String) {
+        require(STORAGE_APP_PATTERN.matches(appId)) { "Invalid storage application identifier" }
+    }
+
     private fun sslSocketFactory(encodedCaCertificate: String): SSLSocketFactory {
         val certificate = runCatching {
             CertificateFactory.getInstance("X.509").generateCertificate(
@@ -404,7 +412,7 @@ class SourceNodeApi {
     private companion object {
         const val NETWORK_TIMEOUT_MILLIS = 8_000
         const val CHAT_TIMEOUT_MILLIS = 310_000
-        const val CHAT_STORAGE_APP = "source-client"
+        val STORAGE_APP_PATTERN = Regex("^[a-z][a-z0-9-]{1,31}$")
     }
 }
 

@@ -6,10 +6,15 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.source.client.R
 import com.source.client.SourceClientApplication
+import com.source.client.ai.AiRuntimeRouter
+import com.source.client.storage.ChatData
+import com.source.client.storage.SourceDataStore
+import com.source.client.storage.SourceDataSync
 import com.source.client.model.AiSelection
 import com.source.client.model.ChatMessage
 import com.source.client.model.DiscoveredNode
-import com.source.client.model.NodeStatus
+import com.source.client.model.NodeConnectionState
+import com.source.client.model.NodeDisconnectReason
 import com.source.client.model.PairingInvitation
 import com.source.client.model.VaultProfile
 import com.source.client.protocol.PairingPayloadException
@@ -40,7 +45,7 @@ sealed interface AppScreen {
     data class Setup(val canCancel: Boolean = false, val error: String? = null, val busy: Boolean = false) : AppScreen
     data class Locked(val profile: VaultProfile, val error: String? = null, val busy: Boolean = false) : AppScreen
     data class Main(
-        val status: NodeStatus,
+        val status: NodeConnectionState,
         val userDisplayName: String,
         val chat: ChatUiState = ChatUiState(),
     ) : AppScreen
@@ -57,7 +62,8 @@ sealed interface AppScreen {
 class SourceViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as SourceClientApplication
     private val _screen = MutableStateFlow<AppScreen>(initialScreen())
-    private val conversationSync = ConversationSync(app.secureVault, app.nodeApi)
+    private val sourceDataStore = SourceDataStore(app.secureVault)
+    private val conversationSync = SourceDataSync(ChatData, sourceDataStore, app.nodeApi)
     private val nodeConnection: NodeConnection
     private val chatController: ChatController
     private var session: VaultSession? = null
@@ -71,20 +77,23 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             app = app,
             scope = viewModelScope,
             session = { session },
-            connectionAllowed = { _screen.value is AppScreen.Main },
-            onStatus = ::updateNodeStatus,
+            onState = ::updateNodeState,
             onConnected = ::onNodeConnected,
             onHeartbeat = ::onNodeHeartbeat,
-            onRecoveryConfigured = ::backupConversationIfNeeded,
+            onRecoveryConfigured = ::backupConversationAfterRecoveryConfigured,
+        )
+        val aiRuntime = AiRuntimeRouter(
+            local = app.localAiRuntime,
+            nodeApi = app.nodeApi,
+            connectedNode = { nodeConnection.current },
+            onNodeUnavailable = { nodeConnection.disconnect(it.trusted) },
         )
         chatController = ChatController(
-            localAiRuntime = app.localAiRuntime,
-            nodeApi = app.nodeApi,
+            aiRuntime = aiRuntime,
             scope = viewModelScope,
             session = { session },
             connectedNode = { nodeConnection.current },
             conversationSync = conversationSync,
-            onNodeUnavailable = { nodeConnection.disconnect(it.trusted) },
             readableError = ::readableChatError,
             message = ::message,
             onStateChanged = ::publishChat,
@@ -164,7 +173,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
                 } else {
                     session = unlocked
                     val messages = withContext(Dispatchers.Default) {
-                        app.secureVault.loadConversation(unlocked)
+                        sourceDataStore.load(unlocked, ChatData)
                     }
                     conversationSync.reset()
                     chatController.reset(messages)
@@ -204,12 +213,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     fun onBackground() {
         foreground = false
         pairingJob?.cancel()
-        val connected = ((_screen.value as? AppScreen.Main)?.status as? NodeStatus.Connected)?.node
         nodeConnection.onBackground()
-        if (_screen.value is AppScreen.Pairing || _screen.value is AppScreen.Recovery) {
-            updateNodeStatus(nodeConnection.statusForCurrentNodes())
-        }
-        if (connected != null) updateNodeStatus(NodeStatus.PairedOffline(connected))
     }
 
     fun scan(node: DiscoveredNode) {
@@ -217,7 +221,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun cancelScanner() {
-        _screen.value = mainScreen(nodeConnection.statusForCurrentNodes())
+        _screen.value = mainScreen(nodeConnection.stateForCurrentNodes())
     }
 
     fun onQrScanned(raw: String) {
@@ -234,11 +238,12 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
         }
         if (invitation.recovery) {
             _screen.value = AppScreen.Recovery(scanner.node, invitation)
+            nodeConnection.beginRecovery(scanner.node, invitation.nodeName)
             return
         }
         val activeSession = session ?: return
         _screen.value = AppScreen.Pairing(invitation.nodeName)
-        nodeConnection.cancelActiveAttempt()
+        nodeConnection.beginPairing(scanner.node, invitation.nodeName)
         pairingJob?.cancel()
         pairingJob = viewModelScope.launch {
             try {
@@ -255,13 +260,14 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                _screen.value = mainScreen(NodeStatus.Error(readableError(error)))
+                nodeConnection.fail(readableError(error))
             }
         }
     }
 
     fun cancelRecovery() {
-        _screen.value = mainScreen(nodeConnection.statusForCurrentNodes())
+        nodeConnection.cancelConnectionFlow()
+        _screen.value = mainScreen(nodeConnection.state)
     }
 
     fun recover(rawRecoveryKey: String) {
@@ -273,7 +279,6 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
         }
         val activeSession = session ?: return
         _screen.value = recoveryScreen.copy(error = null, busy = true)
-        nodeConnection.cancelActiveAttempt()
         pairingJob?.cancel()
         pairingJob = viewModelScope.launch {
             try {
@@ -308,7 +313,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun openMain() {
         val displayName = session?.vault?.identity?.userDisplayName ?: return
-        _screen.value = AppScreen.Main(NodeStatus.Searching, displayName, chatController.state)
+        _screen.value = AppScreen.Main(NodeConnectionState.Discovering, displayName, chatController.state)
         if (foreground) nodeConnection.onForeground()
     }
 
@@ -352,24 +357,38 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
         conversationSync.backupIfNeeded(session, nodeConnection.current, chatController.state.messages)
     }
 
+    private suspend fun backupConversationAfterRecoveryConfigured() {
+        conversationSync.requireBackup()
+        backupConversationIfNeeded()
+    }
+
     private fun publishChat(chat: ChatUiState) {
         val main = _screen.value as? AppScreen.Main ?: return
         _screen.value = main.copy(chat = chat)
     }
 
-    private fun updateNodeStatus(status: NodeStatus) {
+    private fun updateNodeState(status: NodeConnectionState) {
         val current = _screen.value
-        _screen.value = if (current is AppScreen.Main) current.copy(status = status, chat = chatController.state)
-        else mainScreen(status)
+        _screen.value = when {
+            current is AppScreen.Main -> current.copy(status = status, chat = chatController.state)
+            current is AppScreen.Pairing && status is NodeConnectionState.Connected -> mainScreen(status)
+            current is AppScreen.Pairing && status is NodeConnectionState.Failed -> mainScreen(status)
+            current is AppScreen.Recovery && status is NodeConnectionState.Connected -> mainScreen(status)
+            current is AppScreen.Pairing && status is NodeConnectionState.Disconnected -> mainScreen(status)
+            current is AppScreen.Recovery && status is NodeConnectionState.Disconnected &&
+                status.reason == NodeDisconnectReason.BACKGROUND -> mainScreen(status)
+            else -> current
+        }
     }
 
-    private fun mainScreen(status: NodeStatus): AppScreen.Main = AppScreen.Main(
+    private fun mainScreen(status: NodeConnectionState): AppScreen.Main = AppScreen.Main(
         status = status,
         userDisplayName = session?.vault?.identity?.userDisplayName.orEmpty(),
         chat = chatController.state,
     )
 
     private fun readableChatError(error: Exception): String = when {
+        error is SourceAiFailureException -> apiErrorMessage(error.code, R.string.error_ai_failed)
         error is SourceApiException -> apiErrorMessage(error.code, R.string.error_node_ai_failed)
         error.message?.contains("model part", ignoreCase = true) == true ->
             message(R.string.error_local_model_unavailable)

@@ -76,6 +76,11 @@ data class DiscoveredNode(
     val apiBaseUrl: String,
 )
 
+data class ConnectedNode(
+    val discovered: DiscoveredNode,
+    val trusted: TrustedNode,
+)
+
 data class PairingInvitation(
     val protocol: Int,
     val nodeId: String,
@@ -89,12 +94,28 @@ data class PairingInvitation(
     val recovery: Boolean = false,
 )
 
-sealed interface NodeStatus {
-    data object Searching : NodeStatus
-    data object NoneFound : NodeStatus
-    data class Found(val nodes: List<DiscoveredNode>) : NodeStatus
-    data class Connecting(val name: String) : NodeStatus
-    data class Connected(val node: TrustedNode) : NodeStatus
-    data class PairedOffline(val node: TrustedNode) : NodeStatus
-    data class Error(val message: String, val canRetry: Boolean = true) : NodeStatus
+enum class NodeDisconnectReason { BACKGROUND, NETWORK_UNAVAILABLE, NOT_FOUND, LOST, AUTHENTICATION_FAILED }
+
+enum class NodeRecoveryPhase { REPLACING_CLIENT, CONFIGURING_DATA_KEY }
+
+sealed interface NodeConnectionState {
+    data object Discovering : NodeConnectionState
+    data class Found(val nodes: List<DiscoveredNode>) : NodeConnectionState
+    data class Pairing(val node: DiscoveredNode, val name: String) : NodeConnectionState
+    data class Recovering(
+        val node: DiscoveredNode,
+        val name: String,
+        val phase: NodeRecoveryPhase,
+    ) : NodeConnectionState
+    data class Authenticating(
+        val node: DiscoveredNode,
+        val trusted: TrustedNode,
+        val attempt: Int,
+    ) : NodeConnectionState
+    data class Connected(val connection: ConnectedNode) : NodeConnectionState
+    data class Disconnected(
+        val trusted: TrustedNode?,
+        val reason: NodeDisconnectReason,
+    ) : NodeConnectionState
+    data class Failed(val message: String, val canRetry: Boolean = true) : NodeConnectionState
 }

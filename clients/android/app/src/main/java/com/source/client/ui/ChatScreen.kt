@@ -51,7 +51,7 @@ import com.source.client.R
 import com.source.client.model.ChatMessage
 import com.source.client.model.ChatRole
 import com.source.client.model.DiscoveredNode
-import com.source.client.model.NodeStatus
+import com.source.client.model.NodeConnectionState
 
 @Composable
 internal fun MainScreen(
@@ -97,7 +97,7 @@ internal fun MainScreen(
                 )
             }
         }
-        NodeStatusSummary(state.status, connect, retry, Modifier.fillMaxWidth())
+        NodeConnectionSummary(state.status, connect, retry, Modifier.fillMaxWidth())
         Spacer(Modifier.height(12.dp))
         if (state.chat.messages.isEmpty()) {
             Spacer(Modifier.weight(1f))
@@ -156,7 +156,7 @@ internal fun MainScreen(
     if (settingsOpen) {
         SettingsDialog(
             userDisplayName = state.userDisplayName,
-            recoveryKey = (state.status as? NodeStatus.Connected)?.node?.recoveryKey,
+            recoveryKey = (state.status as? NodeConnectionState.Connected)?.connection?.trusted?.recoveryKey,
             onShowRecoveryKey = {
                 settingsOpen = false
                 recoveryKeyToShow = it
@@ -201,26 +201,27 @@ private fun ChatBubble(message: ChatMessage) {
 }
 
 @Composable
-private fun NodeStatusSummary(
-    status: NodeStatus,
+private fun NodeConnectionSummary(
+    status: NodeConnectionState,
     connect: (DiscoveredNode) -> Unit,
     retry: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val node = (status as? NodeStatus.Found)?.nodes?.firstOrNull()
+    val node = (status as? NodeConnectionState.Found)?.nodes?.firstOrNull()
     val label = when (status) {
-        NodeStatus.Searching -> stringResource(R.string.this_device)
-        NodeStatus.NoneFound -> stringResource(R.string.this_device)
-        is NodeStatus.Found -> node?.displayName ?: stringResource(R.string.node)
-        is NodeStatus.Connecting -> status.name
-        is NodeStatus.Connected -> status.node.displayName
-        is NodeStatus.PairedOffline -> stringResource(R.string.this_device)
-        is NodeStatus.Error -> stringResource(R.string.this_device)
+        NodeConnectionState.Discovering -> stringResource(R.string.this_device)
+        is NodeConnectionState.Found -> node?.displayName ?: stringResource(R.string.node)
+        is NodeConnectionState.Pairing -> status.name
+        is NodeConnectionState.Recovering -> status.name
+        is NodeConnectionState.Authenticating -> status.trusted.displayName
+        is NodeConnectionState.Connected -> status.connection.trusted.displayName
+        is NodeConnectionState.Disconnected -> stringResource(R.string.this_device)
+        is NodeConnectionState.Failed -> stringResource(R.string.this_device)
     }
     val indicatorColor = when (status) {
-        is NodeStatus.Connected -> Moss
-        is NodeStatus.Error -> MaterialTheme.colorScheme.error
-        is NodeStatus.Found -> Color(0xFF9A6A24)
+        is NodeConnectionState.Connected -> Moss
+        is NodeConnectionState.Failed -> MaterialTheme.colorScheme.error
+        is NodeConnectionState.Found -> Color(0xFF9A6A24)
         else -> Ink.copy(alpha = .34f)
     }
 
@@ -228,7 +229,9 @@ private fun NodeStatusSummary(
         modifier = modifier.heightIn(min = 32.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (status is NodeStatus.Searching || status is NodeStatus.Connecting) {
+        if (status is NodeConnectionState.Discovering || status is NodeConnectionState.Authenticating ||
+            status is NodeConnectionState.Pairing || status is NodeConnectionState.Recovering
+        ) {
             CircularProgressIndicator(Modifier.size(9.dp), strokeWidth = 1.5.dp, color = Moss)
         } else {
             Box(Modifier.size(8.dp).background(indicatorColor, CircleShape))
@@ -238,14 +241,14 @@ private fun NodeStatusSummary(
             text = label,
             modifier = Modifier.weight(1f),
             style = MaterialTheme.typography.labelLarge,
-            color = if (status is NodeStatus.Connected) Moss else Ink.copy(alpha = .58f),
+            color = if (status is NodeConnectionState.Connected) Moss else Ink.copy(alpha = .58f),
             fontWeight = FontWeight.Medium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
         when {
             node != null -> TextButton(onClick = { connect(node) }) { Text(stringResource(R.string.connect)) }
-            status is NodeStatus.Error && status.canRetry -> TextButton(onClick = retry) {
+            status is NodeConnectionState.Failed && status.canRetry -> TextButton(onClick = retry) {
                 Text(stringResource(R.string.try_again))
             }
         }

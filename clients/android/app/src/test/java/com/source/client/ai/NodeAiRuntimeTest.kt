@@ -47,7 +47,7 @@ class NodeAiRuntimeTest {
     }
 
     @Test
-    fun `node failed events become typed API failures`() = runBlocking {
+    fun `node failed events remain shared runtime events`() = runBlocking {
         val runtime = NodeAiRuntime {
             flow {
                 emit(SourceAiEvent.Started(request.runId))
@@ -55,13 +55,13 @@ class NodeAiRuntimeTest {
             }
         }
 
-        val failure = runCatching { runtime.stream(request).toList() }.exceptionOrNull()
+        val events = runtime.stream(request).toList()
 
-        assertEquals("chat_rate_limited", (failure as SourceApiException).code)
+        assertEquals("chat_rate_limited", (events.last() as SourceAiEvent.Failed).code)
     }
 
     @Test
-    fun `node failed events after output retain the reported error`() = runBlocking {
+    fun `node failed events after output retain the reported event`() = runBlocking {
         val runtime = NodeAiRuntime {
             flow {
                 emit(SourceAiEvent.Started(request.runId))
@@ -70,9 +70,8 @@ class NodeAiRuntimeTest {
             }
         }
 
-        val failure = runCatching { runtime.stream(request).toList() }.exceptionOrNull()
+        val events = runtime.stream(request).toList()
 
-        assertEquals("model_unavailable", (failure as SourceApiException).code)
-        assertTrue(failure.responseStarted)
+        assertEquals("model_unavailable", (events.last() as SourceAiEvent.Failed).code)
     }
 }

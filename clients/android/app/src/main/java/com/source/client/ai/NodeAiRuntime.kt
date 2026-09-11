@@ -26,22 +26,17 @@ class NodeAiRuntime internal constructor(
 
     override fun stream(request: SourceAiRequest): Flow<SourceAiEvent> = flow {
         var emittedOutput = false
-        var completed = false
+        var terminated = false
         try {
             source(request).collect { event ->
                 when (event) {
                     is SourceAiEvent.Delta -> emittedOutput = emittedOutput || event.text.isNotEmpty()
-                    is SourceAiEvent.Completed -> completed = true
-                    is SourceAiEvent.Failed -> throw SourceApiException(
-                        event.code,
-                        "The Node AI could not complete the response.",
-                        responseStarted = emittedOutput,
-                    )
+                    is SourceAiEvent.Completed, is SourceAiEvent.Failed -> terminated = true
                     is SourceAiEvent.Started -> Unit
                 }
                 emit(event)
             }
-            if (!completed) {
+            if (!terminated) {
                 throw SourceApiException("model_unavailable", "The Node returned an incomplete AI response.")
             }
         } catch (error: CancellationException) {
