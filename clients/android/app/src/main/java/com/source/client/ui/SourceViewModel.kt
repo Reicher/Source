@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.source.client.R
 import com.source.client.SourceClientApplication
 import com.source.client.ai.AiRuntimeRouter
+import com.source.client.knowledge.BronzeTextSource
 import com.source.client.storage.ChatData
 import com.source.client.storage.EncryptedBlobStore
 import com.source.client.storage.SourceDataStore
@@ -66,7 +67,7 @@ sealed interface LibraryPreviewUiState {
     ) : LibraryPreviewUiState
 }
 
-enum class MainDestination { CHAT, LIBRARY }
+enum class MainDestination { CHAT, LIBRARY, KNOWLEDGE }
 
 sealed interface AppScreen {
     data class Accounts(val profiles: List<VaultProfile>) : AppScreen
@@ -77,6 +78,7 @@ sealed interface AppScreen {
         val userDisplayName: String,
         val chat: ChatUiState = ChatUiState(),
         val library: LibraryUiState = LibraryUiState(),
+        val knowledge: KnowledgeUiState = KnowledgeUiState(),
         val destination: MainDestination = MainDestination.CHAT,
         val libraryPreview: LibraryPreviewUiState? = null,
     ) : AppScreen
@@ -98,6 +100,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     private val nodeConnection: NodeConnection
     private val chatController: ChatController
     private val libraryController: LibraryController
+    private val silverController: SilverController
     private var session: VaultSession? = null
     private var foreground = false
     private var pairingJob: Job? = null
@@ -129,6 +132,8 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             conversationSync = conversationSync,
             readableError = ::readableChatError,
             message = ::message,
+            onInteractiveInferenceStarted = { silverController.pauseForInteraction() },
+            onInteractiveInferenceFinished = { silverController.resumeAfterInteraction() },
             onStateChanged = ::publishChat,
         )
         libraryController = LibraryController(
@@ -140,6 +145,22 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             connectedNode = { nodeConnection.current },
             message = ::message,
             onStateChanged = ::publishLibrary,
+        )
+        val silverAiRuntime = AiRuntimeRouter(
+            local = app.localAiRuntime,
+            nodeApi = app.nodeApi,
+            connectedNode = { nodeConnection.current?.takeIf { it.aiModel != null } },
+            onNodeUnavailable = { nodeConnection.disconnect(it.trusted) },
+        )
+        silverController = SilverController(
+            aiRuntime = silverAiRuntime,
+            scope = viewModelScope,
+            localStore = sourceDataStore,
+            nodeApi = app.nodeApi,
+            session = { session },
+            connectedNode = { nodeConnection.current },
+            bronzeSources = ::bronzeTextSources,
+            onStateChanged = ::publishSilver,
         )
         nodeConnection.start()
     }
@@ -192,6 +213,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
                     sourceDataStore.save(checkNotNull(session), ChatData, conversations)
                 }
                 libraryController.reset(session)
+                silverController.reset(session)
                 app.markLoginConversationStarted()
                 openMain()
             } catch (_: Exception) {
@@ -234,6 +256,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
                         sourceDataStore.save(unlocked, ChatData, activeConversations)
                     }
                     libraryController.reset(unlocked)
+                    silverController.reset(unlocked)
                     app.markLoginConversationStarted()
                     openMain()
                 }
@@ -250,12 +273,16 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     fun logout() {
         pairingJob?.cancel()
         chatController.reset()
+        silverController.pauseForInteraction()
         nodeConnection.clear()
         conversationSync.reset()
         session?.close()
         session = null
         mainDestination = MainDestination.CHAT
-        viewModelScope.launch { libraryController.reset() }
+        viewModelScope.launch {
+            libraryController.reset()
+            silverController.reset()
+        }
         _screen.value = AppScreen.Accounts(app.secureVault.profiles)
     }
 
@@ -275,7 +302,10 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
 
     fun importFile(uri: Uri) {
         viewModelScope.launch {
-            if (libraryController.import(uri)) libraryController.syncAll()
+            if (libraryController.import(uri)) {
+                libraryController.syncAll()
+                silverController.refresh()
+            }
         }
     }
 
@@ -288,10 +318,12 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     fun deleteLibraryItemFromSource(itemId: String) {
         if (itemId.startsWith("conversation:")) {
             chatController.deleteConversation(itemId.removePrefix("conversation:"))
+            silverController.removeSource(itemId)
             return
         }
         viewModelScope.launch {
             libraryController.deleteFromSource(itemId)
+            silverController.removeSource(itemId)
             libraryController.syncAll()
         }
     }
@@ -335,6 +367,13 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     fun closeLibraryPreview() {
         val main = _screen.value as? AppScreen.Main ?: return
         _screen.value = main.copy(libraryPreview = null)
+    }
+
+    fun openKnowledgeSource(itemId: String) {
+        val main = _screen.value as? AppScreen.Main ?: return
+        mainDestination = MainDestination.LIBRARY
+        _screen.value = main.copy(destination = MainDestination.LIBRARY)
+        openLibraryItem(itemId)
     }
 
     fun clearLibraryFeedback() = libraryController.clearFeedback()
@@ -452,6 +491,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             displayName,
             chatController.state,
             presentedLibrary(),
+            presentedKnowledge(),
             mainDestination,
         )
         if (foreground) nodeConnection.onForeground()
@@ -464,6 +504,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             synchronizeConversation()
         }
         libraryController.syncAll(resetAcknowledgements = true)
+        silverController.synchronize()
     }
 
     private suspend fun onNodeHeartbeat() {
@@ -473,6 +514,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             backupConversationIfNeeded()
         }
         libraryController.syncAll()
+        silverController.synchronize()
     }
 
     private suspend fun synchronizeConversation() {
@@ -507,12 +549,17 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun publishChat(chat: ChatUiState) {
         val main = _screen.value as? AppScreen.Main ?: return
-        _screen.value = main.copy(chat = chat, library = presentedLibrary())
+        _screen.value = main.copy(chat = chat, library = presentedLibrary(), knowledge = presentedKnowledge())
     }
 
     private fun publishLibrary(library: LibraryUiState) {
         val main = _screen.value as? AppScreen.Main ?: return
-        _screen.value = main.copy(library = presentedLibrary(library))
+        _screen.value = main.copy(library = presentedLibrary(library), knowledge = presentedKnowledge(library))
+    }
+
+    private fun publishSilver(@Suppress("UNUSED_PARAMETER") silver: SilverUiState) {
+        val main = _screen.value as? AppScreen.Main ?: return
+        _screen.value = main.copy(library = presentedLibrary(), knowledge = presentedKnowledge())
     }
 
     private fun updateNodeState(status: NodeConnectionState) {
@@ -534,15 +581,38 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
         userDisplayName = session?.vault?.identity?.userDisplayName.orEmpty(),
         chat = chatController.state,
         library = presentedLibrary(),
+        knowledge = presentedKnowledge(),
         destination = mainDestination,
     )
 
     private fun presentedLibrary(raw: LibraryUiState = libraryController.state): LibraryUiState =
-        withConversationLibraryItems(
+        withSilverState(withConversationLibraryItems(
             raw,
             chatController.conversations,
             conversationsBackedUp = conversationSync.isBackedUp,
+        ), silverController.state)
+
+    private fun presentedKnowledge(raw: LibraryUiState = libraryController.state): KnowledgeUiState =
+        buildKnowledgeUiState(
+            silverController.state.dataset,
+            withConversationLibraryItems(
+                raw,
+                chatController.conversations,
+                conversationsBackedUp = conversationSync.isBackedUp,
+            ),
         )
+
+    private suspend fun bronzeTextSources(): List<BronzeTextSource> =
+        libraryController.bronzeTextSources() + chatController.conversations.conversations.mapNotNull { conversation ->
+            val text = ChatData.refinementText(conversation)
+            if (text.isBlank()) null else BronzeTextSource(
+                id = "conversation:${conversation.id}",
+                name = conversationFilename(conversation.createdAtMillis),
+                sourceType = "conversation",
+                contentSha256 = ChatData.conversationContentSha256(conversation),
+                text = text,
+            )
+        }
 
     private fun readableChatError(error: Exception): String = when {
         error is SourceAiFailureException -> apiErrorMessage(error.code, R.string.error_ai_failed)

@@ -9,6 +9,7 @@
   "client": {
     "family": "Qwen3.5",
     "parameters": "4B",
+    "parameterCount": 4000000000,
     "quantization": "Q4_K_M",
     "repository": "bartowski/Qwen_Qwen3.5-4B-GGUF",
     "revision": "4168f45a16a1290d65a4ec0fa312ae917a4c15d6",
@@ -38,6 +39,7 @@
   "node": {
     "family": "Qwen3.5",
     "parameters": "9B",
+    "parameterCount": 9000000000,
     "quantization": "Q5_K_M",
     "repository": "bartowski/Qwen_Qwen3.5-9B-GGUF",
     "revision": "182be2fd6c7bc44887d88a91cb03ff009cc9f549",

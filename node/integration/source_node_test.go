@@ -34,7 +34,7 @@ type fakeAI struct{ received []localai.Message }
 
 func (f *fakeAI) Status(context.Context) bool { return true }
 func (f *fakeAI) Capabilities() map[string]any {
-	return map[string]any{"contractVersion": 1, "modalities": []string{"text"}, "streaming": true, "cancellation": true, "maximumContextTokens": 8192, "promptPolicy": "none-v1", "reasoning": "off"}
+	return map[string]any{"contractVersion": 1, "modelId": "source-test-model", "parameterCount": int64(9_000_000_000), "modalities": []string{"text"}, "streaming": true, "cancellation": true, "maximumContextTokens": 8192, "promptPolicy": "none-v1", "reasoning": "off"}
 }
 func (f *fakeAI) StreamChat(_ context.Context, m []localai.Message, yield func(localai.Event) error) error {
 	f.received = m

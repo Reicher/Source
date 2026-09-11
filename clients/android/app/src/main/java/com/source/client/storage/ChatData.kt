@@ -7,6 +7,7 @@ import com.source.client.model.ChatMessage
 import com.source.client.model.ChatRole
 import org.json.JSONArray
 import org.json.JSONObject
+import java.security.MessageDigest
 import java.util.UUID
 
 object ChatData : SourceData<ChatConversations> {
@@ -43,6 +44,14 @@ object ChatData : SourceData<ChatConversations> {
 
     fun encodedConversation(conversation: ChatConversation): String =
         encodeConversation(conversation).toString(2)
+
+    fun conversationContentSha256(conversation: ChatConversation): String = MessageDigest.getInstance("SHA-256")
+        .digest(encodeConversation(conversation).toString().toByteArray(Charsets.UTF_8))
+        .joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
+
+    fun refinementText(conversation: ChatConversation): String = conversation.messages.joinToString("\n\n") { message ->
+        "${message.role.apiValue.replaceFirstChar(Char::uppercaseChar)}: ${message.content}"
+    }
 
     override fun decode(value: ByteArray): ChatConversations {
         val root = JSONObject(value.toString(Charsets.UTF_8))

@@ -24,13 +24,10 @@ type aiRequest struct {
 			Text string `json:"text"`
 		} `json:"content"`
 	} `json:"messages"`
+	Workload string `json:"workload"`
 }
 
 func (h *Handler) streamAI(w http.ResponseWriter, r *http.Request, session *auth.Session) {
-	if !h.chat.Take(session.User.ID) {
-		h.fail(w, apperror.New(429, "chat_rate_limited", "Too many AI requests. Wait a moment."))
-		return
-	}
 	var body aiRequest
 	if err := readJSON(r, 64*1024, &body); err != nil {
 		h.fail(w, err)
@@ -39,6 +36,16 @@ func (h *Handler) streamAI(w http.ResponseWriter, r *http.Request, session *auth
 	messages, err := validateAI(body)
 	if err != nil {
 		h.fail(w, err)
+		return
+	}
+	limiter := h.chat
+	code := "chat_rate_limited"
+	if body.Workload == "background" {
+		limiter = h.background
+		code = "background_ai_rate_limited"
+	}
+	if !limiter.Take(session.User.ID) {
+		h.fail(w, apperror.New(429, code, "Too many AI requests. Wait a moment."))
 		return
 	}
 
@@ -54,7 +61,11 @@ func (h *Handler) streamAI(w http.ResponseWriter, r *http.Request, session *auth
 		}
 		return err
 	}
-	_ = emit(map[string]any{"type": "started", "runId": body.RunID})
+	capabilities := h.ai.Capabilities()
+	_ = emit(map[string]any{
+		"type": "started", "runId": body.RunID,
+		"modelId": capabilities["modelId"], "parameterCount": capabilities["parameterCount"],
+	})
 	sequence := 0
 	err = h.ai.StreamChat(r.Context(), messages, func(event localai.Event) error {
 		if event.Type == "delta" {
@@ -78,6 +89,9 @@ func validateAI(body aiRequest) ([]localai.Message, error) {
 	}
 	if len(body.Messages) < 1 || len(body.Messages) > 20 {
 		return nil, apperror.New(400, "invalid_messages", "Send between 1 and 20 messages.")
+	}
+	if body.Workload != "" && body.Workload != "interactive" && body.Workload != "background" {
+		return nil, apperror.New(400, "invalid_ai_request", "The AI workload is invalid.")
 	}
 	messages := make([]localai.Message, 0, len(body.Messages))
 	total := 0

@@ -20,15 +20,16 @@ import (
 )
 
 type Handler struct {
-	db      *database.DB
-	cfg     config.Config
-	ai      localai.Backend
-	pairing *pairing.Service
-	auth    *auth.Service
-	storage *storage.Storage
-	chat    *ratelimit.Limiter
-	logger  *log.Logger
-	mux     *http.ServeMux
+	db         *database.DB
+	cfg        config.Config
+	ai         localai.Backend
+	pairing    *pairing.Service
+	auth       *auth.Service
+	storage    *storage.Storage
+	chat       *ratelimit.Limiter
+	background *ratelimit.Limiter
+	logger     *log.Logger
+	mux        *http.ServeMux
 }
 
 type statusWriter struct {
@@ -63,11 +64,12 @@ func (w *statusWriter) Flush() {
 func New(db *database.DB, cfg config.Config, ai localai.Backend, p *pairing.Service, logger *log.Logger) http.Handler {
 	h := &Handler{
 		db: db, cfg: cfg, ai: ai, pairing: p,
-		auth:    auth.New(db, cfg.Now),
-		storage: storage.New(db, cfg.StorageRoot, cfg.SnapshotRetention, cfg.Now),
-		chat:    ratelimit.New(10, time.Minute, cfg.Now),
-		logger:  logger,
-		mux:     http.NewServeMux(),
+		auth:       auth.New(db, cfg.Now),
+		storage:    storage.New(db, cfg.StorageRoot, cfg.SnapshotRetention, cfg.Now),
+		chat:       ratelimit.New(10, time.Minute, cfg.Now),
+		background: ratelimit.New(10_000, time.Hour, cfg.Now),
+		logger:     logger,
+		mux:        http.NewServeMux(),
 	}
 	h.registerRoutes()
 	return h

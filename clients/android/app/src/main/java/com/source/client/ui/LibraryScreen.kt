@@ -1,10 +1,8 @@
 package com.source.client.ui
 
-import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,13 +24,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.outlined.Audiotrack
 import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.CloudDone
 import androidx.compose.material.icons.outlined.Description
-import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.PhoneAndroid
-import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.outlined.SyncProblem
 import androidx.compose.material3.AlertDialog
@@ -62,10 +57,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -147,7 +139,7 @@ internal fun LibraryScreen(
             }
         }
         FloatingActionButton(
-            onClick = { picker.launch(arrayOf("*/*")) },
+            onClick = { picker.launch(SUPPORTED_TEXT_MIME_TYPES) },
             modifier = Modifier.align(Alignment.BottomEnd).padding(bottom = 20.dp),
             containerColor = Moss,
             contentColor = Color.White,
@@ -226,6 +218,10 @@ private fun LibraryItemRow(
                 fontWeight = FontWeight.Medium,
             )
             Spacer(Modifier.width(10.dp))
+            if (item.silverProcessing == SilverProcessingState.PROCESSING) {
+                CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp, color = Moss.copy(alpha = .68f))
+                Spacer(Modifier.width(7.dp))
+            }
             StatusIcon(item.syncState)
         }
         if (expanded) {
@@ -308,12 +304,7 @@ private fun syncLabel(state: LibrarySyncState): String = stringResource(
 )
 
 private fun typeIcon(item: LibraryUiItem): ImageVector {
-    val mime = item.mimeType.lowercase()
-    val extension = item.filename.substringAfterLast('.', "").lowercase()
     return when {
-        mime.startsWith("image/") -> Icons.Outlined.Image
-        mime.startsWith("audio/") -> Icons.Outlined.Audiotrack
-        mime == "application/pdf" || extension == "pdf" -> Icons.Outlined.PictureAsPdf
         item.previewKind == LibraryPreviewKind.TEXT || item.sourceType == "conversation" -> Icons.Outlined.Description
         else -> Icons.AutoMirrored.Outlined.InsertDriveFile
     }
@@ -353,45 +344,9 @@ internal fun LibraryPreviewScreen(state: LibraryPreviewUiState, onBack: () -> Un
                         fontFamily = FontFamily.Monospace,
                     )
                 }
-                is LibraryPreviewContent.Image -> PreviewImage(content.bytes, Modifier.fillMaxSize().padding(padding))
             }
         }
     }
-}
-
-@Composable
-private fun PreviewImage(bytes: ByteArray, modifier: Modifier = Modifier) {
-    val bitmap: ImageBitmap? = remember(bytes) {
-        runCatching { decodePreviewBitmap(bytes)?.asImageBitmap() }.getOrNull()
-    }
-    if (bitmap == null) {
-        Box(modifier.padding(24.dp), contentAlignment = Alignment.Center) {
-            Text(stringResource(R.string.error_library_preview_failed), color = MaterialTheme.colorScheme.error)
-        }
-    } else {
-        Image(
-            bitmap = bitmap,
-            contentDescription = null,
-            modifier = modifier.padding(12.dp),
-            contentScale = ContentScale.Fit,
-        )
-    }
-}
-
-private fun decodePreviewBitmap(bytes: ByteArray): android.graphics.Bitmap? {
-    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
-    var sampleSize = 1
-    while ((bounds.outWidth / sampleSize).toLong() * (bounds.outHeight / sampleSize) > MAXIMUM_PREVIEW_PIXELS) {
-        sampleSize *= 2
-    }
-    return BitmapFactory.decodeByteArray(
-        bytes,
-        0,
-        bytes.size,
-        BitmapFactory.Options().apply { inSampleSize = sampleSize },
-    )
 }
 
 internal fun formatBytes(bytes: Long): String {
@@ -409,5 +364,3 @@ internal fun formatBytes(bytes: Long): String {
 
 private fun formatDate(millis: Long): String =
     DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(millis))
-
-private const val MAXIMUM_PREVIEW_PIXELS = 12_000_000L

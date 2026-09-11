@@ -1,6 +1,7 @@
 package com.source.client.protocol
 
 import com.source.client.model.LocalIdentity
+import com.source.client.model.AiModelMetadata
 import com.source.client.model.PairingInvitation
 import com.source.client.model.PairingResult
 import com.source.client.model.TrustedNode
@@ -174,6 +175,32 @@ class SourceNodeApi {
         trusted.copy(displayName = displayName)
     }
 
+    suspend fun availableAiModel(apiBaseUrl: String, trusted: TrustedNode): AiModelMetadata? =
+        withContext(Dispatchers.IO) {
+            val connection = openConnection(
+                "${apiBaseUrl.removeSuffix("/")}/status",
+                trusted.tlsCaCertificate,
+                trusted.clientCredential,
+            )
+            try {
+                connection.requestMethod = "GET"
+                connection.readTimeout = NETWORK_TIMEOUT_MILLIS
+                connection.setRequestProperty("Accept", "application/json")
+                val status = connection.responseCode
+                if (status !in 200..299) throw apiError(connection, status)
+                val response = connection.inputStream.bufferedReader(Charsets.UTF_8).use { JSONObject(it.readText()) }
+                if (!response.optBoolean("llmAvailable", false) || response.isNull("ai")) return@withContext null
+                response.getJSONObject("ai").let { ai ->
+                    AiModelMetadata(
+                        modelId = ai.requiredString("modelId"),
+                        parameterCount = ai.getLong("parameterCount"),
+                    )
+                }
+            } finally {
+                connection.disconnect()
+            }
+        }
+
     fun streamAi(
         apiBaseUrl: String,
         trusted: TrustedNode,
@@ -195,6 +222,7 @@ class SourceNodeApi {
                     put("contractVersion", SOURCE_AI_CONTRACT_VERSION)
                     put("runId", request.runId)
                     put("conversationId", request.conversationId)
+                    put("workload", request.workload.name.lowercase())
                     put("messages", JSONArray().apply {
                         request.messages.forEach { message ->
                             put(JSONObject().apply {
@@ -228,7 +256,15 @@ class SourceNodeApi {
                             throw SourceApiException("invalid_response", "The Node returned the wrong run identifier.")
                         }
                         trySend(when (event.optString("type")) {
-                            "started" -> SourceAiEvent.Started(eventRunId)
+                            "started" -> SourceAiEvent.Started(
+                                eventRunId,
+                                runCatching {
+                                    AiModelMetadata(
+                                        modelId = event.requiredString("modelId"),
+                                        parameterCount = event.getLong("parameterCount"),
+                                    )
+                                }.getOrNull(),
+                            )
                             "delta" -> SourceAiEvent.Delta(
                                 eventRunId,
                                 event.getLong("sequence"),

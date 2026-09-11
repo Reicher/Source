@@ -43,6 +43,7 @@ fun SourceApp(screen: AppScreen, viewModel: SourceViewModel) {
                     viewModel::openLibraryItem,
                     viewModel::closeLibraryPreview,
                     viewModel::clearLibraryFeedback,
+                    viewModel::openKnowledgeSource,
                 )
                 is AppScreen.Scanner -> ScannerPermissionScreen(
                     screen,

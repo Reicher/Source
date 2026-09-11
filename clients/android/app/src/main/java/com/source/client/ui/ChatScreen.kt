@@ -26,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.Hub
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -83,6 +84,7 @@ internal fun MainScreen(
     openLibraryItem: (String) -> Unit,
     closeLibraryPreview: () -> Unit,
     clearLibraryFeedback: () -> Unit,
+    openKnowledgeSource: (String) -> Unit,
 ) {
     state.libraryPreview?.let { preview ->
         LibraryPreviewScreen(preview, closeLibraryPreview)
@@ -106,6 +108,12 @@ internal fun MainScreen(
                     icon = { Icon(Icons.Outlined.Folder, null) },
                     label = { Text(stringResource(R.string.library)) },
                 )
+                NavigationBarItem(
+                    selected = state.destination == MainDestination.KNOWLEDGE,
+                    onClick = { selectDestination(MainDestination.KNOWLEDGE) },
+                    icon = { Icon(Icons.Outlined.Hub, null) },
+                    label = { Text(stringResource(R.string.knowledge)) },
+                )
             }
         },
     ) { scaffoldPadding ->
@@ -121,7 +129,13 @@ internal fun MainScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    stringResource(if (state.destination == MainDestination.CHAT) R.string.app_name else R.string.library),
+                    stringResource(
+                        when (state.destination) {
+                            MainDestination.CHAT -> R.string.app_name
+                            MainDestination.LIBRARY -> R.string.library
+                            MainDestination.KNOWLEDGE -> R.string.knowledge
+                        },
+                    ),
                     style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -186,6 +200,11 @@ internal fun MainScreen(
                     onDeleteFromSource = deleteLibraryItemFromSource,
                     onOpen = openLibraryItem,
                     onFeedbackShown = clearLibraryFeedback,
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                )
+                MainDestination.KNOWLEDGE -> KnowledgeScreen(
+                    state = state.knowledge,
+                    onOpenSource = openKnowledgeSource,
                     modifier = Modifier.fillMaxWidth().weight(1f),
                 )
             }

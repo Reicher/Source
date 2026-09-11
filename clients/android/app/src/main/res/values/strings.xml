@@ -23,6 +23,11 @@
     <string name="send">Send</string>
     <string name="chat">Chat</string>
     <string name="library">Library</string>
+    <string name="knowledge">Knowledge</string>
+    <string name="knowledge_empty_title">No knowledge yet</string>
+    <string name="knowledge_empty_description">Entities and claims will appear as Source refines your text.</string>
+    <string name="knowledge_entity_summary">%1$s · %2$d claims</string>
+    <string name="knowledge_confidence">%1$d%% confidence</string>
     <string name="library_add_file">Add file</string>
     <string name="library_empty_title">Your Library is empty</string>
     <string name="library_empty_description">Add a file to store an encrypted copy in Source.</string>

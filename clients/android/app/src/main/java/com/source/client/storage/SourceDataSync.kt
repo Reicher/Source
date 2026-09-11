@@ -87,6 +87,28 @@ class SourceDataSync<T>(
                 backupLocked(session, connected, localValue)
                 return@withLock
             }
+            data.merge(localValue, remoteValue)?.let { merged ->
+                val localIdentity = data.version(localValue).contentIdentity
+                val remoteIdentity = data.version(remoteValue).contentIdentity
+                val mergedIdentity = data.version(merged).contentIdentity
+                when (mergedIdentity) {
+                    localIdentity -> backupLocked(session, connected, localValue)
+                    remoteIdentity -> {
+                        localRevision += 1
+                        withContext(Dispatchers.Default) { localStore.save(session, data, remoteValue) }
+                        backupDirty = false
+                        applyRemote(remoteValue)
+                    }
+                    else -> {
+                        localRevision += 1
+                        withContext(Dispatchers.Default) { localStore.save(session, data, merged) }
+                        backupDirty = true
+                        applyRemote(merged)
+                        backupLocked(session, connected, merged)
+                    }
+                }
+                return@withLock
+            }
             when (resolveSourceData(data.version(localValue), data.version(remoteValue))) {
                 SourceDataResolution.USE_REMOTE -> {
                     localRevision += 1

@@ -1,6 +1,7 @@
 package com.source.client.ai
 
 import android.content.Context
+import com.source.client.model.AiModelMetadata
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -28,7 +29,7 @@ class LocalAiRuntime(context: Context) : SourceAiRuntime {
 
     override fun stream(request: SourceAiRequest): Flow<SourceAiEvent> = callbackFlow {
         validate(request)
-        trySendBlocking(SourceAiEvent.Started(request.runId))
+        trySendBlocking(SourceAiEvent.Started(request.runId, LOCAL_AI_MODEL))
         var sequence = 0L
         val generation = launch(Dispatchers.IO) {
             inferenceMutex.withLock {
@@ -107,3 +108,7 @@ class LocalAiRuntime(context: Context) : SourceAiRuntime {
 }
 
 internal const val LOCAL_AI_EVENT_BUFFER_CAPACITY = 64
+internal val LOCAL_AI_MODEL = AiModelMetadata(
+    modelId = "qwen3.5-4b-q4-k-m",
+    parameterCount = 4_000_000_000L,
+)

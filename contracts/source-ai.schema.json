@@ -48,6 +48,7 @@
         "contractVersion": { "const": 1 },
         "runId": { "type": "string", "format": "uuid" },
         "conversationId": { "type": "string", "minLength": 1 },
+        "workload": { "enum": ["interactive", "background"] },
         "messages": {
           "type": "array",
           "minItems": 1,
@@ -61,6 +62,8 @@
       "required": ["contractVersion", "modalities", "streaming", "cancellation", "maximumContextTokens", "promptPolicy", "reasoning"],
       "properties": {
         "contractVersion": { "const": 1 },
+        "modelId": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "parameterCount": { "type": "integer", "minimum": 1 },
         "modalities": {
           "type": "array",
           "uniqueItems": true,
@@ -81,7 +84,9 @@
           "required": ["type", "runId"],
           "properties": {
             "type": { "const": "started" },
-            "runId": { "type": "string", "format": "uuid" }
+            "runId": { "type": "string", "format": "uuid" },
+            "modelId": { "type": "string", "minLength": 1, "maxLength": 200 },
+            "parameterCount": { "type": "integer", "minimum": 1 }
           }
         },
         {

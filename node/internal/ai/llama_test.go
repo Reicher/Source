@@ -26,7 +26,11 @@ func TestLlamaStreamsOnlyVisibleContent(t *testing.T) {
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hidden\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"!\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
 	}))
 	defer server.Close()
-	client := New(config.Config{AIBackendURL: server.URL, AIModel: "source-model", AIMaximumOutputTokens: 2048, AITimeout: time.Second})
+	client := New(config.Config{AIBackendURL: server.URL, AIModel: "source-model", AIParameterCount: 123, AIMaximumOutputTokens: 2048, AITimeout: time.Second})
+	capabilities := client.Capabilities()
+	if capabilities["modelId"] != "source-model" || capabilities["parameterCount"] != int64(123) {
+		t.Fatalf("unexpected model metadata: %#v", capabilities)
+	}
 	if !client.Status(context.Background()) {
 		t.Fatal("health endpoint was not available")
 	}

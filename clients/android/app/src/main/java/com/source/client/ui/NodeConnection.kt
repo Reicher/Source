@@ -119,7 +119,7 @@ internal class NodeConnection(
     }
 
     suspend fun acceptConnection(discovered: DiscoveredNode, trusted: TrustedNode) {
-        transition(NodeConnectionState.Connected(ConnectedNode(discovered, trusted)))
+        transition(NodeConnectionState.Connected(connectedNode(discovered, trusted)))
         onConnected()
         startHeartbeat(discovered, trusted)
     }
@@ -212,7 +212,7 @@ internal class NodeConnection(
                         )
                         app.secureVault.save(activeSession)
                     }
-                    transition(NodeConnectionState.Connected(ConnectedNode(discovered, refreshed)))
+                    transition(NodeConnectionState.Connected(connectedNode(discovered, refreshed)))
                     onConnected()
                     refreshed = configureRecoveryIfNeeded(activeSession, discovered, refreshed)
                     startHeartbeat(discovered, refreshed)
@@ -271,7 +271,7 @@ internal class NodeConnection(
         app.nodeApi.setupRecovery(discovered.apiBaseUrl, pending, recoveryKey, envelope)
         val updated = pending.copy(recoverySetupPending = false)
         saveTrustedNode(activeSession, updated)
-        transition(NodeConnectionState.Connected(ConnectedNode(discovered, updated)))
+        transition(NodeConnectionState.Connected(connectedNode(discovered, updated)))
         onRecoveryConfigured()
         return updated
     }
@@ -283,7 +283,7 @@ internal class NodeConnection(
                 delay(HEARTBEAT_INTERVAL_MILLIS)
                 try {
                     val refreshed = app.nodeApi.authenticate(discovered.apiBaseUrl, trusted)
-                    transition(NodeConnectionState.Connected(ConnectedNode(discovered, refreshed)))
+                    transition(NodeConnectionState.Connected(connectedNode(discovered, refreshed)))
                     onHeartbeat()
                 } catch (error: CancellationException) {
                     throw error
@@ -306,6 +306,17 @@ internal class NodeConnection(
     private fun transition(next: NodeConnectionState) {
         state = next
         onState(next)
+    }
+
+    private suspend fun connectedNode(discovered: DiscoveredNode, trusted: TrustedNode): ConnectedNode {
+        val model = try {
+            app.nodeApi.availableAiModel(discovered.apiBaseUrl, trusted)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            null
+        }
+        return ConnectedNode(discovered, trusted, model)
     }
 
     private companion object {

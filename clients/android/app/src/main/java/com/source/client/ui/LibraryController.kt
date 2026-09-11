@@ -4,6 +4,7 @@ import android.content.ContentResolver
 import android.net.Uri
 import android.provider.OpenableColumns
 import com.source.client.R
+import com.source.client.knowledge.BronzeTextSource
 import com.source.client.model.ChatConversation
 import com.source.client.model.ConnectedNode
 import com.source.client.model.ChatConversations
@@ -20,6 +21,8 @@ import com.source.client.storage.LibraryTombstone
 import com.source.client.storage.SourceDataStore
 import com.source.client.storage.SourceDataSync
 import java.util.UUID
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
@@ -31,11 +34,10 @@ import kotlinx.coroutines.withContext
 
 enum class LibrarySyncState { LOCAL_ONLY, LOCAL_AND_SYNCED, NODE_ONLY, SYNCING, FAILED }
 
-enum class LibraryPreviewKind { TEXT, IMAGE }
+enum class LibraryPreviewKind { TEXT }
 
 sealed interface LibraryPreviewContent {
     data class Text(val value: String) : LibraryPreviewContent
-    data class Image(val bytes: ByteArray) : LibraryPreviewContent
 }
 
 data class LibraryPreviewData(
@@ -56,6 +58,7 @@ data class LibraryUiItem(
     val canRemoveFromDevice: Boolean,
     val canDeleteFromSource: Boolean,
     val previewKind: LibraryPreviewKind?,
+    val silverProcessing: SilverProcessingState? = null,
 )
 
 data class LibraryUiState(
@@ -112,6 +115,7 @@ internal class LibraryController(
         var committed = false
         try {
             val metadata = withContext(Dispatchers.IO) { readMetadata(uri) }
+            require(isSupportedText(metadata.mimeType, metadata.name)) { "Only supported text files can be imported" }
             imported = withContext(Dispatchers.IO) {
                 contentResolver.openInputStream(uri)?.use { input -> blobStore.importFile(activeSession, input) }
                     ?: throw IllegalArgumentException("The selected file could not be opened")
@@ -132,6 +136,10 @@ internal class LibraryController(
                 createdAtMillis = now,
                 contentSha256 = importedBlob.contentSha256,
             )
+            require(item.byteCount <= MAXIMUM_TEXT_PREVIEW_BYTES) { "The text file is too large" }
+            withContext(Dispatchers.IO) {
+                decodeUtf8(blobStore.readPreview(activeSession, item, MAXIMUM_TEXT_PREVIEW_BYTES))
+            }
             manifest = manifest.copy(
                 items = manifest.items + item,
                 modifiedAtMillis = nextModifiedAt(now),
@@ -185,18 +193,31 @@ internal class LibraryController(
         val item = manifest.items.firstOrNull { it.id == itemId } ?: return@withLock null
         if (!blobStore.exists(activeSession, item.id)) return@withLock null
         val kind = previewKind(item.mimeType, item.name) ?: return@withLock null
-        val maximumBytes = when (kind) {
-            LibraryPreviewKind.TEXT -> MAXIMUM_TEXT_PREVIEW_BYTES
-            LibraryPreviewKind.IMAGE -> MAXIMUM_IMAGE_PREVIEW_BYTES
-        }
+        val maximumBytes = MAXIMUM_TEXT_PREVIEW_BYTES
         val bytes = withContext(Dispatchers.IO) { blobStore.readPreview(activeSession, item, maximumBytes) }
         LibraryPreviewData(
             filename = item.name,
             content = when (kind) {
-                LibraryPreviewKind.TEXT -> LibraryPreviewContent.Text(bytes.toString(Charsets.UTF_8))
-                LibraryPreviewKind.IMAGE -> LibraryPreviewContent.Image(bytes)
+                LibraryPreviewKind.TEXT -> LibraryPreviewContent.Text(decodeUtf8(bytes))
             },
         )
+    }
+
+    suspend fun bronzeTextSources(): List<BronzeTextSource> = mutex.withLock {
+        val activeSession = session() ?: return@withLock emptyList()
+        manifest.items.mapNotNull { item ->
+            if (!isSupportedText(item.mimeType, item.name)) return@mapNotNull null
+            val text = if (blobStore.exists(activeSession, item.id) && item.byteCount <= MAXIMUM_TEXT_PREVIEW_BYTES) {
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        decodeUtf8(blobStore.readPreview(activeSession, item, MAXIMUM_TEXT_PREVIEW_BYTES))
+                    }
+                }.getOrNull().orEmpty()
+            } else {
+                ""
+            }
+            BronzeTextSource(item.id, item.name, item.sourceType, item.contentSha256, text)
+        }
     }
 
     suspend fun syncAll(resetAcknowledgements: Boolean = false) = mutex.withLock {
@@ -340,16 +361,22 @@ internal class LibraryController(
 }
 
 internal fun previewKind(mimeType: String, filename: String): LibraryPreviewKind? {
+    return if (isSupportedText(mimeType, filename)) LibraryPreviewKind.TEXT else null
+}
+
+internal fun isSupportedText(mimeType: String, filename: String): Boolean {
     val normalizedMime = mimeType.lowercase()
     val extension = filename.substringAfterLast('.', missingDelimiterValue = "").lowercase()
-    return when {
-        normalizedMime.startsWith("image/") -> LibraryPreviewKind.IMAGE
-        normalizedMime.startsWith("text/") || normalizedMime == "application/json" ||
-            extension in setOf("txt", "json", "md", "csv", "log", "xml", "yaml", "yml") ->
-            LibraryPreviewKind.TEXT
-        else -> null
-    }
+    return normalizedMime.startsWith("text/") ||
+        normalizedMime in setOf("application/json", "application/xml", "application/yaml", "application/x-yaml") ||
+        (normalizedMime == "application/octet-stream" && extension in SUPPORTED_TEXT_EXTENSIONS)
 }
+
+private fun decodeUtf8(bytes: ByteArray): String = Charsets.UTF_8.newDecoder()
+    .onMalformedInput(CodingErrorAction.REPORT)
+    .onUnmappableCharacter(CodingErrorAction.REPORT)
+    .decode(ByteBuffer.wrap(bytes))
+    .toString()
 
 internal fun withConversationLibraryItems(
     rawLibrary: LibraryUiState,
@@ -382,6 +409,20 @@ internal fun withConversationLibraryItems(
         ).sortedByDescending(LibraryUiItem::createdAtMillis),
 )
 
+internal fun withSilverState(library: LibraryUiState, silver: SilverUiState): LibraryUiState = library.copy(
+    items = library.items.map { item ->
+        item.copy(
+            syncState = when (item.id) {
+                in silver.syncing -> LibrarySyncState.SYNCING
+                in silver.syncFailed -> LibrarySyncState.FAILED
+                in silver.pendingSync -> LibrarySyncState.LOCAL_ONLY
+                else -> item.syncState
+            },
+            silverProcessing = silver.processing[item.id],
+        )
+    },
+)
+
 private val conversationFilenameFormat: DateTimeFormatter =
     DateTimeFormatter.ofPattern("yyyy-MM-dd-HHmm").withZone(ZoneOffset.UTC)
 
@@ -389,4 +430,5 @@ internal fun conversationFilename(createdAtMillis: Long): String =
     "conversation-${conversationFilenameFormat.format(Instant.ofEpochMilli(createdAtMillis))}.json"
 
 private const val MAXIMUM_TEXT_PREVIEW_BYTES = 2L * 1024 * 1024
-private const val MAXIMUM_IMAGE_PREVIEW_BYTES = 32L * 1024 * 1024
+internal val SUPPORTED_TEXT_MIME_TYPES = arrayOf("text/*", "application/json", "application/xml", "application/yaml")
+private val SUPPORTED_TEXT_EXTENSIONS = setOf("txt", "json", "md", "csv", "log", "xml", "yaml", "yml")

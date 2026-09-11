@@ -25,6 +25,7 @@ func TestLoadReadsNormalizedSourceEnvironment(t *testing.T) {
 		"SOURCE_ALLOWED_STORAGE_APPS":           "thoughts,notes",
 		"SOURCE_AI_BACKEND_URL":                 "http://model:8080",
 		"SOURCE_AI_MODEL":                       "source-test-model",
+		"SOURCE_AI_PARAMETER_COUNT":             "123456789",
 		"SOURCE_AI_MAX_OUTPUT_TOKENS":           "99",
 		"SOURCE_AI_TIMEOUT_SECONDS":             "11",
 		"SOURCE_NODE_STORAGE_ROOT":              storageRoot,
@@ -49,7 +50,7 @@ func TestLoadReadsNormalizedSourceEnvironment(t *testing.T) {
 	if _, ok := cfg.AllowedStorageApps["notes"]; !ok || len(cfg.AllowedStorageApps) != 2 {
 		t.Fatalf("unexpected allowed storage apps: %#v", cfg.AllowedStorageApps)
 	}
-	if cfg.AIBackendURL != "http://model:8080" || cfg.AIModel != "source-test-model" || cfg.AIMaximumOutputTokens != 99 || cfg.AITimeout != 11*time.Second {
+	if cfg.AIBackendURL != "http://model:8080" || cfg.AIModel != "source-test-model" || cfg.AIParameterCount != 123456789 || cfg.AIMaximumOutputTokens != 99 || cfg.AITimeout != 11*time.Second {
 		t.Fatalf("unexpected AI config: %#v", cfg)
 	}
 	if cfg.DatabasePath != filepath.Join(stateRoot, "source-node.sqlite") || cfg.StorageRoot != storageRoot {
@@ -92,6 +93,7 @@ func clearConfigEnvironment(t *testing.T) {
 		"SOURCE_NODE_STORAGE_ROOT",
 		"SOURCE_AI_BACKEND_URL",
 		"SOURCE_AI_MODEL",
+		"SOURCE_AI_PARAMETER_COUNT",
 	} {
 		t.Setenv(name, "")
 	}

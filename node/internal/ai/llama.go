@@ -26,13 +26,14 @@ type Backend interface {
 }
 type Client struct {
 	url, model          string
+	parameterCount      int64
 	maximumOutputTokens int
 	timeout             time.Duration
 	http                *http.Client
 }
 
 func New(cfg config.Config) *Client {
-	return &Client{url: strings.TrimRight(cfg.AIBackendURL, "/"), model: cfg.AIModel, maximumOutputTokens: cfg.AIMaximumOutputTokens, timeout: cfg.AITimeout, http: &http.Client{}}
+	return &Client{url: strings.TrimRight(cfg.AIBackendURL, "/"), model: cfg.AIModel, parameterCount: cfg.AIParameterCount, maximumOutputTokens: cfg.AIMaximumOutputTokens, timeout: cfg.AITimeout, http: &http.Client{}}
 }
 func (c *Client) Status(ctx context.Context) bool {
 	ctx, cancel := context.WithTimeout(ctx, min(c.timeout, 1500*time.Millisecond))
@@ -49,7 +50,7 @@ func (c *Client) Status(ctx context.Context) bool {
 	return res.StatusCode >= 200 && res.StatusCode < 300
 }
 func (c *Client) Capabilities() map[string]any {
-	return map[string]any{"contractVersion": 1, "modalities": []string{"text"}, "streaming": true, "cancellation": true, "maximumContextTokens": 8192, "promptPolicy": "none-v1", "reasoning": "off"}
+	return map[string]any{"contractVersion": 1, "modelId": c.model, "parameterCount": c.parameterCount, "modalities": []string{"text"}, "streaming": true, "cancellation": true, "maximumContextTokens": 8192, "promptPolicy": "none-v1", "reasoning": "off"}
 }
 func (c *Client) StreamChat(ctx context.Context, messages []Message, yield func(Event) error) error {
 	for _, m := range messages {

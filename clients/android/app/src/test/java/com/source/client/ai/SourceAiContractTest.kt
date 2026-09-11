@@ -12,6 +12,7 @@ class SourceAiContractTest {
         assertFalse(SourceAiRole.entries.any { it.name == "SYSTEM" })
         assertEquals("none-v1", PROMPT_POLICY_NONE_V1)
         assertEquals(setOf(SourceAiReasoning.OFF), SourceAiReasoning.entries.toSet())
+        assertEquals(setOf(SourceAiWorkload.INTERACTIVE, SourceAiWorkload.BACKGROUND), SourceAiWorkload.entries.toSet())
     }
 
     @Test

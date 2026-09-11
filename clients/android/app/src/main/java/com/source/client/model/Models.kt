@@ -108,7 +108,18 @@ data class DiscoveredNode(
 data class ConnectedNode(
     val discovered: DiscoveredNode,
     val trusted: TrustedNode,
+    val aiModel: AiModelMetadata? = null,
 )
+
+data class AiModelMetadata(
+    val modelId: String,
+    val parameterCount: Long,
+) {
+    init {
+        require(modelId.isNotBlank() && modelId.length <= 200) { "Invalid AI model identifier" }
+        require(parameterCount > 0) { "AI model parameter count must be positive" }
+    }
+}
 
 data class PairingInvitation(
     val protocol: Int,

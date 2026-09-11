@@ -1,10 +1,12 @@
 package com.source.client.ai
 
+import com.source.client.model.AiModelMetadata
 import java.util.UUID
 import kotlinx.coroutines.flow.Flow
 
 enum class SourceAiCapability { TEXT, VISION }
 enum class SourceAiReasoning { OFF }
+enum class SourceAiWorkload { INTERACTIVE, BACKGROUND }
 
 enum class SourceAiRole { USER, ASSISTANT }
 
@@ -22,6 +24,7 @@ data class SourceAiRequest(
     val runId: String = UUID.randomUUID().toString(),
     val conversationId: String,
     val messages: List<SourceAiMessage>,
+    val workload: SourceAiWorkload = SourceAiWorkload.INTERACTIVE,
 )
 
 data class SourceAiCapabilities(
@@ -36,7 +39,10 @@ data class SourceAiCapabilities(
 sealed interface SourceAiEvent {
     val runId: String
 
-    data class Started(override val runId: String) : SourceAiEvent
+    data class Started(
+        override val runId: String,
+        val model: AiModelMetadata? = null,
+    ) : SourceAiEvent
     data class Delta(override val runId: String, val sequence: Long, val text: String) : SourceAiEvent
     data class Completed(
         override val runId: String,

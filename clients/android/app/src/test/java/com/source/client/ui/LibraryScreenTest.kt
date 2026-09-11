@@ -81,7 +81,7 @@ class LibraryScreenTest {
     fun `preview support is limited to simple local formats`() {
         assertEquals(LibraryPreviewKind.TEXT, previewKind("text/plain", "notes.txt"))
         assertEquals(LibraryPreviewKind.TEXT, previewKind("application/octet-stream", "data.json"))
-        assertEquals(LibraryPreviewKind.IMAGE, previewKind("image/jpeg", "photo.jpg"))
+        assertEquals(null, previewKind("image/jpeg", "photo.jpg"))
         assertEquals(null, previewKind("application/pdf", "document.pdf"))
     }
 }

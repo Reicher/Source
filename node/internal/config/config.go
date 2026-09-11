@@ -29,6 +29,7 @@ type Config struct {
 	AllowedStorageApps       map[string]struct{}
 	AIBackendURL             string
 	AIModel                  string
+	AIParameterCount         int64
 	AIMaximumOutputTokens    int
 	AITimeout                time.Duration
 	Now                      func() time.Time
@@ -73,6 +74,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	parameterCount, err := positiveInt64("SOURCE_AI_PARAMETER_COUNT", 9_000_000_000)
+	if err != nil {
+		return Config{}, err
+	}
 	aiTimeout, err := positiveInt("SOURCE_AI_TIMEOUT_SECONDS", 300)
 	if err != nil {
 		return Config{}, err
@@ -81,7 +86,7 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	apps, err := identifiers("SOURCE_ALLOWED_STORAGE_APPS", "thoughts,source-client,source-library")
+	apps, err := identifiers("SOURCE_ALLOWED_STORAGE_APPS", "thoughts,source-client,source-library,source-silver")
 	if err != nil {
 		return Config{}, err
 	}
@@ -109,9 +114,21 @@ func Load() (Config, error) {
 		MaximumLibraryItemBytes:  int64(maxLibraryMiB) * 1024 * 1024,
 		SnapshotRetention:        retention,
 		AllowedStorageApps:       apps, AIBackendURL: env("SOURCE_AI_BACKEND_URL", "http://llama:8080"),
-		AIModel: env("SOURCE_AI_MODEL", "source-qwen3.5-9b"), AIMaximumOutputTokens: maxTokens,
+		AIModel: env("SOURCE_AI_MODEL", "source-qwen3.5-9b"), AIParameterCount: parameterCount, AIMaximumOutputTokens: maxTokens,
 		AITimeout: time.Duration(aiTimeout) * time.Second, Now: time.Now,
 	}, nil
+}
+
+func positiveInt64(name string, fallback int64) (int64, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", name)
+	}
+	return value, nil
 }
 
 func env(name, fallback string) string {

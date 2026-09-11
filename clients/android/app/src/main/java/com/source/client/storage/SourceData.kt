@@ -32,6 +32,8 @@ interface SourceData<T> {
     fun encode(value: T): ByteArray
     fun decode(value: ByteArray): T
     fun version(value: T): SourceDataVersion
+    /** Optional dataset-specific merge, used when independent clients can safely reconcile item-by-item. */
+    fun merge(local: T, remote: T): T? = null
 }
 
 internal enum class SourceDataResolution { USE_REMOTE, MATCH, KEEP_LOCAL }
