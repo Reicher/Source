@@ -59,4 +59,20 @@ class NodeAiRuntimeTest {
 
         assertEquals("chat_rate_limited", (failure as SourceApiException).code)
     }
+
+    @Test
+    fun `node failed events after output retain the reported error`() = runBlocking {
+        val runtime = NodeAiRuntime {
+            flow {
+                emit(SourceAiEvent.Started(request.runId))
+                emit(SourceAiEvent.Delta(request.runId, 0, "partial"))
+                emit(SourceAiEvent.Failed(request.runId, "model_unavailable", true))
+            }
+        }
+
+        val failure = runCatching { runtime.stream(request).toList() }.exceptionOrNull()
+
+        assertEquals("model_unavailable", (failure as SourceApiException).code)
+        assertTrue(failure.responseStarted)
+    }
 }

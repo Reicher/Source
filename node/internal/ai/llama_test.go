@@ -3,6 +3,7 @@ package localai
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -42,6 +43,42 @@ func TestLlamaStreamsOnlyVisibleContent(t *testing.T) {
 	}
 	if request["stream"] != true {
 		t.Fatal("streaming was not requested")
+	}
+}
+
+func TestLlamaTimeoutIsResetWhileStreamIsActive(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		for _, data := range []string{
+			`{"choices":[{"delta":{"content":"Still "}}]}`,
+			`{"choices":[{"delta":{"content":"working"},"finish_reason":"stop"}]}`,
+			`[DONE]`,
+		} {
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+			time.Sleep(60 * time.Millisecond)
+		}
+	}))
+	defer server.Close()
+
+	client := New(config.Config{
+		AIBackendURL:          server.URL,
+		AIModel:               "source-model",
+		AIMaximumOutputTokens: 2048,
+		AITimeout:             100 * time.Millisecond,
+	})
+	var events []Event
+	err := client.StreamChat(context.Background(), []Message{{Role: "user", Content: "Hello"}}, func(event Event) error {
+		events = append(events, event)
+		return nil
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 || events[2].Type != "completed" {
+		t.Fatalf("unexpected events: %#v", events)
 	}
 }
 

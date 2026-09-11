@@ -29,6 +29,7 @@ class ChatRoutingTest {
     fun `transport and unavailable model errors fall back but rate limits do not`() {
         assertTrue(canFallbackFromNode(IOException("offline")))
         assertTrue(canFallbackFromNode(SourceApiException("model_unavailable", "offline")))
+        assertTrue(!canFallbackFromNode(SourceApiException("model_unavailable", "partial", responseStarted = true)))
         assertTrue(!canFallbackFromNode(SourceApiException("chat_rate_limited", "wait")))
     }
 

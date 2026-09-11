@@ -14,7 +14,7 @@ internal fun resolveAiRuntime(selection: AiSelection, nodeConnected: Boolean): A
 }
 
 internal fun canFallbackFromNode(error: Exception): Boolean =
-    error !is SourceApiException || error.code in setOf("model_unavailable", "http_502", "http_503", "http_504")
+    error !is SourceApiException || (!error.responseStarted && error.code in setOf("model_unavailable", "http_502", "http_503", "http_504"))
 
 /** Keeps the newest complete suffix accepted by both the Source API and the local model. */
 internal fun boundedChatContext(messages: List<ChatMessage>): List<ChatMessage> {

@@ -30,7 +30,11 @@ import javax.net.ssl.SSLException
 import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.TrustManagerFactory
 
-class SourceApiException(val code: String, message: String) : IOException(message)
+class SourceApiException(
+    val code: String,
+    message: String,
+    val responseStarted: Boolean = false,
+) : IOException(message)
 
 class SourceNodeApi {
     private val random = SecureRandom()
@@ -226,7 +230,7 @@ class SourceNodeApi {
                             "delta" -> SourceAiEvent.Delta(
                                 eventRunId,
                                 event.getLong("sequence"),
-                                event.requiredString("text"),
+                                requiredAiDeltaText(event.opt("text")),
                             )
                             "completed" -> SourceAiEvent.Completed(
                                 eventRunId,
@@ -402,4 +406,12 @@ class SourceNodeApi {
         const val CHAT_TIMEOUT_MILLIS = 310_000
         const val CHAT_STORAGE_APP = "source-client"
     }
+}
+
+internal fun requiredAiDeltaText(value: Any?): String {
+    val text = value as? String
+    if (text.isNullOrEmpty()) {
+        throw SourceApiException("invalid_response", "The Node returned invalid AI streaming data.")
+    }
+    return text
 }

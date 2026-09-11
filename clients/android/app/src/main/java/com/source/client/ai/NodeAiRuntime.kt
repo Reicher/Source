@@ -35,6 +35,7 @@ class NodeAiRuntime internal constructor(
                     is SourceAiEvent.Failed -> throw SourceApiException(
                         event.code,
                         "The Node AI could not complete the response.",
+                        responseStarted = emittedOutput,
                     )
                     is SourceAiEvent.Started -> Unit
                 }
@@ -46,10 +47,12 @@ class NodeAiRuntime internal constructor(
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
-            if (emittedOutput && (error as? SourceApiException)?.code != STREAM_INTERRUPTED_CODE) {
+            val apiError = error as? SourceApiException
+            if (emittedOutput && apiError?.responseStarted != true && apiError?.code != STREAM_INTERRUPTED_CODE) {
                 throw SourceApiException(
                     STREAM_INTERRUPTED_CODE,
                     "The connection to the Node was interrupted during the response.",
+                    responseStarted = true,
                 )
             }
             throw error

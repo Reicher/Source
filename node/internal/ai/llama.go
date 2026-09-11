@@ -57,8 +57,14 @@ func (c *Client) StreamChat(ctx context.Context, messages []Message, yield func(
 			return errors.New("Only explicit user and assistant messages are allowed")
 		}
 	}
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	// Treat the configured timeout as an inactivity limit. Slow models can take
+	// longer than this to finish a response while still producing a healthy
+	// stream, so a single deadline for the whole request would cancel active
+	// generations.
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	timeout := time.AfterFunc(c.timeout, cancel)
+	defer timeout.Stop()
 	body, e := json.Marshal(map[string]any{"model": c.model, "messages": messages, "stream": true, "temperature": 0.6, "top_p": 0.9, "max_tokens": c.maximumOutputTokens})
 	if e != nil {
 		return e
@@ -72,6 +78,7 @@ func (c *Client) StreamChat(ctx context.Context, messages []Message, yield func(
 	if e != nil {
 		return e
 	}
+	timeout.Reset(c.timeout)
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		return fmt.Errorf("Model returned HTTP %d", res.StatusCode)
@@ -81,6 +88,7 @@ func (c *Client) StreamChat(ctx context.Context, messages []Message, yield func(
 	visible := 0
 	finish := "stop"
 	for scanner.Scan() {
+		timeout.Reset(c.timeout)
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data:") {
 			continue
