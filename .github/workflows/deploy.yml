@@ -29,5 +29,10 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           clean: false
           persist-credentials: false
+      - name: Attach Node-local configuration
+        run: |
+          ln -sfn "$HOME/.config/source/.env" .env
+          rm -rf artifacts
+          ln -s "$HOME/.local/share/source/artifacts" artifacts
       - name: Deploy Source
         run: ./scripts/deploy.sh
