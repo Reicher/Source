@@ -1,6 +1,7 @@
 package com.source.client.ui
 
 import android.app.Application
+import android.net.Uri
 import androidx.annotation.StringRes
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -8,6 +9,7 @@ import com.source.client.R
 import com.source.client.SourceClientApplication
 import com.source.client.ai.AiRuntimeRouter
 import com.source.client.storage.ChatData
+import com.source.client.storage.EncryptedBlobStore
 import com.source.client.storage.SourceDataStore
 import com.source.client.storage.SourceDataSync
 import com.source.client.model.AiSelection
@@ -42,6 +44,8 @@ data class ChatUiState(
     val error: String? = null,
 )
 
+enum class MainDestination { CHAT, LIBRARY }
+
 sealed interface AppScreen {
     data class Accounts(val profiles: List<VaultProfile>) : AppScreen
     data class Setup(val canCancel: Boolean = false, val error: String? = null, val busy: Boolean = false) : AppScreen
@@ -50,6 +54,8 @@ sealed interface AppScreen {
         val status: NodeConnectionState,
         val userDisplayName: String,
         val chat: ChatUiState = ChatUiState(),
+        val library: LibraryUiState = LibraryUiState(),
+        val destination: MainDestination = MainDestination.CHAT,
     ) : AppScreen
     data class Scanner(val node: DiscoveredNode, val error: String? = null) : AppScreen
     data class Recovery(
@@ -68,9 +74,11 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     private val conversationSync = SourceDataSync(ChatData, sourceDataStore, app.nodeApi)
     private val nodeConnection: NodeConnection
     private val chatController: ChatController
+    private val libraryController: LibraryController
     private var session: VaultSession? = null
     private var foreground = false
     private var pairingJob: Job? = null
+    private var mainDestination = MainDestination.CHAT
 
     val screen: StateFlow<AppScreen> = _screen.asStateFlow()
 
@@ -99,6 +107,16 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             readableError = ::readableChatError,
             message = ::message,
             onStateChanged = ::publishChat,
+        )
+        libraryController = LibraryController(
+            contentResolver = app.contentResolver,
+            blobStore = EncryptedBlobStore(app),
+            localStore = sourceDataStore,
+            nodeApi = app.nodeApi,
+            session = { session },
+            connectedNode = { nodeConnection.current },
+            message = ::message,
+            onStateChanged = ::publishLibrary,
         )
         nodeConnection.start()
     }
@@ -150,6 +168,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
                 withContext(Dispatchers.Default) {
                     sourceDataStore.save(checkNotNull(session), ChatData, conversations)
                 }
+                libraryController.reset(session)
                 app.markLoginConversationStarted()
                 openMain()
             } catch (_: Exception) {
@@ -191,6 +210,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
                     withContext(Dispatchers.Default) {
                         sourceDataStore.save(unlocked, ChatData, activeConversations)
                     }
+                    libraryController.reset(unlocked)
                     app.markLoginConversationStarted()
                     openMain()
                 }
@@ -211,6 +231,8 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
         conversationSync.reset()
         session?.close()
         session = null
+        mainDestination = MainDestination.CHAT
+        viewModelScope.launch { libraryController.reset() }
         _screen.value = AppScreen.Accounts(app.secureVault.profiles)
     }
 
@@ -221,6 +243,27 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     fun newConversation() = chatController.newConversation()
 
     fun cancelInference() = chatController.cancelInference()
+
+    fun selectDestination(destination: MainDestination) {
+        val main = _screen.value as? AppScreen.Main ?: return
+        mainDestination = destination
+        _screen.value = main.copy(destination = destination)
+    }
+
+    fun importFile(uri: Uri) {
+        viewModelScope.launch {
+            if (libraryController.import(uri)) libraryController.syncAll()
+        }
+    }
+
+    fun deleteLibraryItem(itemId: String) {
+        viewModelScope.launch {
+            libraryController.delete(itemId)
+            libraryController.syncAll()
+        }
+    }
+
+    fun clearLibraryFeedback() = libraryController.clearFeedback()
 
     fun onForeground() {
         foreground = true
@@ -330,7 +373,13 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun openMain() {
         val displayName = session?.vault?.identity?.userDisplayName ?: return
-        _screen.value = AppScreen.Main(NodeConnectionState.Discovering, displayName, chatController.state)
+        _screen.value = AppScreen.Main(
+            NodeConnectionState.Discovering,
+            displayName,
+            chatController.state,
+            presentedLibrary(),
+            mainDestination,
+        )
         if (foreground) nodeConnection.onForeground()
     }
 
@@ -340,6 +389,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
         } else {
             synchronizeConversation()
         }
+        libraryController.syncAll(resetAcknowledgements = true)
     }
 
     private suspend fun onNodeHeartbeat() {
@@ -348,6 +398,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
         } else {
             backupConversationIfNeeded()
         }
+        libraryController.syncAll()
     }
 
     private suspend fun synchronizeConversation() {
@@ -377,11 +428,17 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     private suspend fun backupConversationAfterRecoveryConfigured() {
         conversationSync.requireBackup()
         backupConversationIfNeeded()
+        libraryController.syncAll(resetAcknowledgements = true)
     }
 
     private fun publishChat(chat: ChatUiState) {
         val main = _screen.value as? AppScreen.Main ?: return
-        _screen.value = main.copy(chat = chat)
+        _screen.value = main.copy(chat = chat, library = presentedLibrary())
+    }
+
+    private fun publishLibrary(library: LibraryUiState) {
+        val main = _screen.value as? AppScreen.Main ?: return
+        _screen.value = main.copy(library = presentedLibrary(library))
     }
 
     private fun updateNodeState(status: NodeConnectionState) {
@@ -402,7 +459,12 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
         status = status,
         userDisplayName = session?.vault?.identity?.userDisplayName.orEmpty(),
         chat = chatController.state,
+        library = presentedLibrary(),
+        destination = mainDestination,
     )
+
+    private fun presentedLibrary(raw: LibraryUiState = libraryController.state): LibraryUiState =
+        withConversationLibraryItems(raw, chatController.conversations)
 
     private fun readableChatError(error: Exception): String = when {
         error is SourceAiFailureException -> apiErrorMessage(error.code, R.string.error_ai_failed)

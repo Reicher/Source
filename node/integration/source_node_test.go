@@ -60,8 +60,9 @@ func TestSourceAPIEndToEnd(t *testing.T) {
 		DatabasePath:             filepath.Join(root, "state", "source-node.sqlite"),
 		StorageRoot:              filepath.Join(root, "vaults"),
 		MaximumSnapshotBytes:     1024, SnapshotRetention: 20,
-		AllowedStorageApps: map[string]struct{}{"thoughts": {}, "source-client": {}},
-		AIModel:            "source-qwen3.5-9b", AITimeout: time.Second,
+		MaximumLibraryItemBytes: 1024,
+		AllowedStorageApps:      map[string]struct{}{"thoughts": {}, "source-client": {}},
+		AIModel:                 "source-qwen3.5-9b", AITimeout: time.Second,
 		Now: func() time.Time { return now },
 	}
 	if e := os.MkdirAll(cfg.StorageRoot, 0700); e != nil {
@@ -191,6 +192,48 @@ func TestSourceAPIEndToEnd(t *testing.T) {
 	if !bytes.Equal(restored, ciphertext) || latest.Header.Get("X-Snapshot-Id") != snapshotID {
 		t.Fatal("snapshot round trip changed data or metadata")
 	}
+
+	libraryItemID, _ := security.UUID()
+	libraryContentHash := strings.Repeat("a", 64)
+	encryptedItem := bytes.Repeat([]byte{9}, 64)
+	encryptedItemSum := sha256.Sum256(encryptedItem)
+	libraryURL := api.URL + "/api/v1/library/items/" + libraryItemID
+	libraryHeaders := map[string]string{
+		"Authorization":           "Bearer " + credential,
+		"Content-Type":            "application/octet-stream",
+		"X-Source-Content-SHA256": libraryContentHash,
+		"X-Content-SHA256":        hex.EncodeToString(encryptedItemSum[:]),
+	}
+	libraryUpload := request(t, http.MethodPut, libraryURL, libraryHeaders, encryptedItem)
+	wantStatus(t, libraryUpload, 201)
+	libraryUpload.Body.Close()
+	libraryRetry := request(t, http.MethodPut, libraryURL, libraryHeaders, encryptedItem)
+	wantStatus(t, libraryRetry, 200)
+	libraryRetry.Body.Close()
+	libraryDelete := request(t, http.MethodDelete, libraryURL, map[string]string{
+		"Authorization": "Bearer " + credential, "X-Source-Content-SHA256": libraryContentHash,
+	}, nil)
+	wantStatus(t, libraryDelete, 204)
+	libraryDelete.Body.Close()
+	delayedRetry := request(t, http.MethodPut, libraryURL, libraryHeaders, encryptedItem)
+	wantStatus(t, delayedRetry, 409)
+	wantErrorCode(t, delayedRetry.Body, "library_item_deleted")
+	pendingItemID, _ := security.UUID()
+	pendingURL := api.URL + "/api/v1/library/items/" + pendingItemID
+	pendingDelete := request(t, http.MethodDelete, pendingURL, map[string]string{
+		"Authorization": "Bearer " + credential, "X-Source-Content-SHA256": strings.Repeat("b", 64),
+	}, nil)
+	wantStatus(t, pendingDelete, 204)
+	pendingDelete.Body.Close()
+	pendingHeaders := map[string]string{
+		"Authorization":           libraryHeaders["Authorization"],
+		"Content-Type":            libraryHeaders["Content-Type"],
+		"X-Source-Content-SHA256": strings.Repeat("b", 64),
+		"X-Content-SHA256":        libraryHeaders["X-Content-SHA256"],
+	}
+	pendingUpload := request(t, http.MethodPut, pendingURL, pendingHeaders, encryptedItem)
+	wantStatus(t, pendingUpload, 409)
+	wantErrorCode(t, pendingUpload.Body, "library_item_deleted")
 
 	userID := paired["user"].(map[string]any)["id"].(string)
 	recoveryInvite := request(t, http.MethodPost, adm.URL+"/admin/api/users/"+userID+"/recovery-invitations", map[string]string{"Origin": adm.URL, "Cookie": cookie, "X-Source-Csrf": csrf}, nil)

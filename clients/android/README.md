@@ -14,7 +14,10 @@ Source monorepo. It intentionally implements only the first vertical slices:
 7. keep one encrypted conversation and run it either through a local on-device
    model or the authenticated Source Node chat API;
 8. store, version, reconcile, back up, and restore chat through a generic
-   encrypted Source-data path that additional datasets can reuse.
+   encrypted Source-data path that additional datasets can reuse;
+9. import generic files into a per-user encrypted Library, deduplicate them by
+   SHA-256 content identity, and reliably sync raw encrypted items and deletion
+   tombstones to a paired Node.
 
 The app has no cloud SDK, account service, telemetry, analytics, or background
 service. Its QR decoder and AI runtimes run on-device and have no runtime

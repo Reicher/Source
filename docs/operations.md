@@ -108,9 +108,15 @@ Source Node:
 
 ```sh
 ./scripts/provision-model.sh
-docker compose up -d --build
-docker compose ps
+./scripts/deploy.sh
 ```
+
+`scripts/deploy.sh` runs preflight, builds and updates the Compose services,
+waits for every service to be running and healthy, and verifies the loopback
+health endpoint. It refuses to run as root and is safe to run repeatedly. It
+does not create or modify `.env`, provision a model, or delete or reset
+persistent state. Run it directly after an SSH login for a manual deployment;
+GitHub is not required.
 
 The `discovery` sidecar uses host networking to publish `_source._tcp` mDNS on
 the physical LAN. Native Linux supports this directly; Docker Desktop must have
@@ -167,6 +173,111 @@ The same request should work from a trusted LAN client and fail from the public
 internet or from any interface not named by `SOURCE_BIND_IP`.
 
 The API contract is `contracts/source-api.openapi.yml`.
+
+## Automatic deployment with GitHub Actions
+
+The repository keeps tests on GitHub-hosted runners. After the existing
+`Test` workflow succeeds for a push to `main`, the separate `Deploy` workflow
+runs only its deployment job on a Source Node labeled `source-node`. A pull
+request workflow run can never satisfy that job's event checks, so pull-request
+code is not checked out or executed on the Node by this workflow.
+
+The runner connects outbound to GitHub. Do not expose a runner, SSH, Docker, or
+an additional HTTP port to the internet. Source's runtime services keep the
+same LAN, loopback, and internal-network boundaries described above and do not
+depend on GitHub after deployment.
+
+### Prepare the runner account and workspace
+
+Install the GitHub runner as a dedicated unprivileged local account. Prefer
+rootless Docker. If the host uses the conventional Docker daemon, give only
+this dedicated account Docker access and treat that membership as privileged:
+access to the Docker socket is effectively host-root access even though the
+runner and deployment script do not use `sudo`.
+
+Download the current Linux runner from the repository's **Settings > Actions >
+Runners > New self-hosted runner** page and follow GitHub's displayed commands
+as the dedicated account. Register it at repository scope with the additional
+label `source-node`, install its service under that account, and choose a
+stable work directory. Do not register a shared organization-wide runner for
+this deployment.
+
+GitHub supplies the current download URL and a short-lived registration token.
+The registration and service commands have this shape; replace every bracketed
+value and run `config.sh` as the dedicated account:
+
+```sh
+./config.sh --url https://github.com/<owner>/<repository> \
+  --token <registration-token> \
+  --labels source-node \
+  --work _work
+sudo ./svc.sh install <runner-account>
+```
+
+Installing and later starting the service are the limited operations that
+require root; the service process itself runs as `<runner-account>`.
+
+The Actions checkout is also the live Compose checkout. Before enabling the
+runner service, prepare its repository work directory (GitHub uses
+`<runner-work>/<repository>/<repository>`) with the normal Node-local files:
+
+```sh
+mkdir -p <runner-directory>/_work/<repository>
+git clone https://github.com/<owner>/<repository>.git \
+  <runner-directory>/_work/<repository>/<repository>
+cd <runner-directory>/_work/<repository>/<repository>
+cp .env.example .env
+./scripts/setup.sh
+./scripts/preflight.sh
+./scripts/provision-model.sh
+./scripts/deploy.sh
+./scripts/export-ca.sh
+```
+
+Review `.env` before setup. An absolute `SOURCE_DATA_ROOT` outside the runner
+work directory is recommended for production. Set `SOURCE_UID` and
+`SOURCE_GID` to the dedicated account's numeric IDs, and keep `.env`, `data/`,
+`artifacts/`, models, keys, certificates, backups, and all other Node state
+untracked. The workflow intentionally sets `clean: false`; changing that to a
+destructive checkout clean would remove ignored local state in the worktree.
+
+Create a GitHub environment named `source-node` and restrict its deployment
+branches to `main`. Protect `main` so the `Test` workflow is required before
+merge, prevent force pushes, and limit changes to `.github/workflows/` and
+`scripts/deploy.sh` to trusted maintainers. The runner requires no repository
+write permission or deployment secret; each job receives only read access to
+the tested revision.
+
+This repository is public, so also set **Settings > Actions > General > Fork
+pull request workflows** to require approval for all outside collaborators.
+Runner labels route jobs but are not an authorization boundary: never approve
+a pull-request workflow that adds a self-hosted job. For a platform-enforced
+boundary, use an organization runner group restricted to this repository and,
+where the GitHub plan supports it, set **Workflow access** to **Selected
+workflows** with
+`<owner>/<repository>/.github/workflows/deploy.yml@refs/heads/main`. Do not
+enable the persistent runner if other untrusted users can modify or approve
+workflows.
+
+Once the bootstrap deployment is healthy, start the runner service from its
+installation directory:
+
+```sh
+cd <runner-directory>
+sudo ./svc.sh start
+```
+
+Later pushes to `main` deploy automatically only after all tests pass.
+Deployments are serialized, and failures leave the workflow failed for
+inspection. If GitHub or the runner service is unavailable, SSH to the Node
+and deploy a tested `main` revision manually:
+
+```sh
+cd <runner-directory>/_work/<repository>/<repository>
+git switch main
+git pull --ff-only origin main
+./scripts/deploy.sh
+```
 
 ## Backup and restore
 

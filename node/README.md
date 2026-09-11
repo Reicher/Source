@@ -14,7 +14,7 @@ the Node deployment.
 - `internal/security` owns random tokens, Argon2id, Ed25519 keys, and signing.
 - `internal/auth` authenticates client credentials.
 - `internal/pairing` implements pairing and recovery state machines.
-- `internal/storage` stores opaque encrypted snapshots and retention metadata.
+- `internal/storage` stores opaque encrypted snapshots and streamed Library items.
 - `internal/httpapi` implements the versioned Source API.
 - `internal/admin` implements localhost administration and its embedded UI.
 - `internal/discovery` advertises `_source._tcp` over DNS-SD/mDNS.
@@ -51,7 +51,9 @@ go run ./cmd/source-node healthcheck
 
 SQLite state defaults to `/state/source-node.sqlite`. Snapshot bytes remain
 under `/vaults/<storage namespace>/<application>/snapshots`, separate from
-metadata. Node identity is an Ed25519 key stored in SQLite as PKCS#8/SPKI DER.
+metadata. Client-encrypted Library items are stored atomically under
+`/vaults/<storage namespace>/library/items`; SQLite retains their content
+identities and deletion tombstones. Node identity is an Ed25519 key stored in SQLite as PKCS#8/SPKI DER.
 Administrator passwords and recovery keys use the existing Argon2id encoding.
 
 The schema is upgraded by ordered, transactional migrations tracked in the

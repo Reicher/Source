@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sync"
 	"time"
 
 	"source.local/node/internal/apperror"
@@ -22,6 +23,7 @@ type Storage struct {
 	root      string
 	retention int
 	now       func() time.Time
+	mu        sync.Mutex
 }
 type Value struct {
 	Metadata *database.Snapshot
@@ -38,6 +40,8 @@ func (s *Storage) List(user, app string) ([]database.Snapshot, error) {
 	return s.db.ListSnapshots(user, app)
 }
 func (s *Storage) Put(user, app, id string, body []byte) (*database.Snapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if e := validate(app, id); e != nil {
 		return nil, e
 	}
@@ -45,7 +49,7 @@ func (s *Storage) Put(user, app, id string, body []byte) (*database.Snapshot, er
 	if e != nil {
 		return nil, e
 	}
-	used, e := s.db.TotalSnapshotBytes(user)
+	used, e := s.db.TotalStorageBytes(user)
 	if e != nil {
 		return nil, e
 	}
@@ -92,7 +96,7 @@ func (s *Storage) Put(user, app, id string, body []byte) (*database.Snapshot, er
 	}
 	if len(items) > s.retention {
 		for _, old := range items[s.retention:] {
-			if _, e = s.Delete(user, app, old.ID); e != nil {
+			if _, e = s.deleteLocked(user, app, old.ID); e != nil {
 				return nil, e
 			}
 		}
@@ -131,6 +135,11 @@ func (s *Storage) Latest(user, app string) (*Value, error) {
 	return s.Get(user, app, latest.ID)
 }
 func (s *Storage) Delete(user, app, id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deleteLocked(user, app, id)
+}
+func (s *Storage) deleteLocked(user, app, id string) (bool, error) {
 	if e := validate(app, id); e != nil {
 		return false, e
 	}

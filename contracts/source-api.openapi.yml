@@ -220,6 +220,68 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /library/items/{itemId}:
+    parameters:
+      - name: itemId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      operationId: putLibraryItem
+      description: Idempotently store one opaque, client-encrypted raw Library item.
+      parameters:
+        - name: X-Source-Content-SHA256
+          in: header
+          required: true
+          description: Stable SHA-256 identity of the plaintext content.
+          schema: { type: string, pattern: "^[0-9a-f]{64}$" }
+        - name: X-Content-SHA256
+          in: header
+          required: true
+          description: SHA-256 checksum of the encrypted request body verified by the Node.
+          schema: { type: string, pattern: "^[0-9a-f]{64}$" }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary, minLength: 36 }
+      responses:
+        "200":
+          description: The identical item was already stored.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [item]
+                properties:
+                  item: { $ref: "#/components/schemas/LibraryItem" }
+        "201":
+          description: The encrypted item was atomically stored.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [item]
+                properties:
+                  item: { $ref: "#/components/schemas/LibraryItem" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "415": { $ref: "#/components/responses/Error" }
+    delete:
+      operationId: deleteLibraryItem
+      description: Idempotently record a tombstone and remove any stored bytes.
+      parameters:
+        - name: X-Source-Content-SHA256
+          in: header
+          required: true
+          schema: { type: string, pattern: "^[0-9a-f]{64}$" }
+      responses:
+        "204": { description: Tombstone recorded; encrypted bytes are absent. }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     bearerAuth:
@@ -412,6 +474,17 @@ components:
         bytes: { type: integer, minimum: 1 }
         sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
         createdAt: { type: integer, format: int64, description: Unix epoch milliseconds }
+    LibraryItem:
+      type: object
+      additionalProperties: false
+      required: [id, contentSha256, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        contentSha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        encryptedSha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        bytes: { type: integer, minimum: 1 }
+        createdAt: { type: integer, format: int64 }
+        deletedAt: { type: integer, format: int64 }
     Error:
       type: object
       additionalProperties: false

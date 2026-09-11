@@ -8,6 +8,8 @@ import com.source.client.ai.SOURCE_AI_CONTRACT_VERSION
 import com.source.client.ai.SourceAiEvent
 import com.source.client.ai.SourceAiRequest
 import com.source.client.security.SourceCrypto
+import com.source.client.storage.EncryptedUploadPayload
+import com.source.client.storage.LibraryItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -312,6 +314,58 @@ class SourceNodeApi {
         }
     }
 
+    suspend fun uploadLibraryItem(
+        apiBaseUrl: String,
+        trusted: TrustedNode,
+        item: LibraryItem,
+        payload: EncryptedUploadPayload,
+    ) = withContext(Dispatchers.IO) {
+        val connection = openConnection(
+            "${apiBaseUrl.removeSuffix("/")}/library/items/${item.id}",
+            trusted.tlsCaCertificate,
+            trusted.clientCredential,
+        )
+        try {
+            connection.requestMethod = "PUT"
+            connection.readTimeout = LIBRARY_TIMEOUT_MILLIS
+            connection.doOutput = true
+            connection.setFixedLengthStreamingMode(payload.byteCount)
+            connection.setRequestProperty("Content-Type", "application/octet-stream")
+            connection.setRequestProperty("Accept", "application/json")
+            connection.setRequestProperty("X-Source-Content-SHA256", item.contentSha256)
+            connection.setRequestProperty("X-Content-SHA256", payload.encryptedSha256)
+            connection.outputStream.use { output ->
+                payload.file.inputStream().buffered().use { input -> input.copyTo(output, LIBRARY_BUFFER_BYTES) }
+            }
+            val status = connection.responseCode
+            if (status !in 200..299) throw apiError(connection, status)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    suspend fun deleteLibraryItem(
+        apiBaseUrl: String,
+        trusted: TrustedNode,
+        itemId: String,
+        contentSha256: String,
+    ) = withContext(Dispatchers.IO) {
+        val connection = openConnection(
+            "${apiBaseUrl.removeSuffix("/")}/library/items/$itemId",
+            trusted.tlsCaCertificate,
+            trusted.clientCredential,
+        )
+        try {
+            connection.requestMethod = "DELETE"
+            connection.readTimeout = NETWORK_TIMEOUT_MILLIS
+            connection.setRequestProperty("X-Source-Content-SHA256", contentSha256)
+            val status = connection.responseCode
+            if (status !in 200..299) throw apiError(connection, status)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
     private fun postJson(
         url: String,
         body: JSONObject,
@@ -402,6 +456,8 @@ class SourceNodeApi {
         "model_unavailable" -> "The local AI model on the Node is unavailable."
         "chat_rate_limited" -> "Too many AI requests. Wait a moment."
         "storage_quota_exceeded" -> "The user storage space on the Node is full."
+        "library_item_deleted" -> "The Node has already recorded this item as deleted."
+        "library_item_identity_conflict", "library_content_exists" -> "The Node rejected a conflicting Library item."
         else -> "The Node could not complete the request."
     }
 
@@ -412,6 +468,8 @@ class SourceNodeApi {
     private companion object {
         const val NETWORK_TIMEOUT_MILLIS = 8_000
         const val CHAT_TIMEOUT_MILLIS = 310_000
+        const val LIBRARY_TIMEOUT_MILLIS = 10 * 60_000
+        const val LIBRARY_BUFFER_BYTES = 64 * 1024
         val STORAGE_APP_PATTERN = Regex("^[a-z][a-z0-9-]{1,31}$")
     }
 }

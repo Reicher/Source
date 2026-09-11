@@ -85,6 +85,7 @@ func (h *Handler) registerRoutes() {
 	h.mux.HandleFunc("/api/v1/storage/{app}/snapshots", h.method(http.MethodGet, h.requireClient(h.listSnapshots)))
 	h.mux.HandleFunc("/api/v1/storage/{app}/snapshots/latest", h.method(http.MethodGet, h.requireClient(h.latestSnapshot)))
 	h.mux.HandleFunc("/api/v1/storage/{app}/snapshots/{snapshot}", h.storageItem)
+	h.mux.HandleFunc("/api/v1/library/items/{item}", h.libraryItem)
 	h.mux.HandleFunc("/", h.unmatched)
 }
 

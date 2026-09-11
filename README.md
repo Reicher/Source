@@ -24,17 +24,18 @@ provides:
   recovery of an existing user on a replacement client;
 - isolated users created together with their first key-proven client, with
   per-user quotas and a data model prepared for additional client identities;
-- opaque storage for client-encrypted snapshots, protected by a node-specific
-  recovery key held by the user;
+- opaque storage for client-encrypted snapshots and streamed raw Library items,
+  protected by a node-specific recovery key held by the user;
 - authenticated chat through a pinned local llama.cpp runtime;
 - a versioned OpenAPI contract.
 
 The first Android Source Client now lives in [`clients/android`](clients/android/README.md).
 It implements local identity, LAN discovery, QR pairing, automatic trusted
-reconnect, and one encrypted local-first AI conversation. Chat is the first
-consumer of the client's generic versioned data store and encrypted Node
-snapshot synchronization path; notes, contacts, and the broader personal-data
-model are not implemented yet. Thoughts is the first intended
+reconnect, encrypted local-first chat, and a raw Source Library with generic
+file ingestion, hash deduplication, deletion tombstones, and Client-to-Node
+sync. Chat and Library metadata share the generic versioned encrypted-data
+path; knowledge extraction and the broader personal-data model are not
+implemented yet. Thoughts is the first intended
 Source-compatible application.
 
 ## Install Source Node
@@ -47,7 +48,7 @@ cp .env.example .env
 ./scripts/setup.sh
 ./scripts/preflight.sh
 ./scripts/provision-model.sh
-docker compose up -d --build
+./scripts/deploy.sh
 ./scripts/export-ca.sh
 ```
 
@@ -61,7 +62,8 @@ set `SOURCE_BIND_IP` and `SOURCE_GATEWAY_HOST` in `.env` to the same reserved
 LAN address. Never forward the Source port from a router to the public internet.
 
 See [`docs/operations.md`](docs/operations.md) for setup, user administration,
-security boundaries, verification, backup, and restore guidance.
+security boundaries, verification, automatic deployment from GitHub Actions,
+backup, and restore guidance.
 
 ## Development
 

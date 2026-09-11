@@ -11,10 +11,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -26,13 +24,18 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -73,81 +76,111 @@ internal fun MainScreen(
     newConversation: () -> Unit,
     cancelInference: () -> Unit,
     logout: () -> Unit,
+    selectDestination: (MainDestination) -> Unit,
+    importFile: (android.net.Uri) -> Unit,
+    deleteLibraryItem: (String) -> Unit,
+    clearLibraryFeedback: () -> Unit,
 ) {
     var draft by rememberSaveable(state.chat.conversationId) { mutableStateOf("") }
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
     var recoveryKeyToShow by rememberSaveable { mutableStateOf<String?>(null) }
-    Column(
-        Modifier
-            .fillMaxSize()
-            .statusBarsPadding()
-            .navigationBarsPadding()
-            .padding(horizontal = 20.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Row(
-            Modifier.fillMaxWidth().heightIn(min = 64.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                stringResource(R.string.app_name),
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Spacer(Modifier.weight(1f))
-            TextButton(
-                onClick = newConversation,
-                enabled = !state.chat.busy,
-            ) {
-                Text(stringResource(R.string.new_conversation))
+    Scaffold(
+        bottomBar = {
+            NavigationBar(containerColor = Paper) {
+                NavigationBarItem(
+                    selected = state.destination == MainDestination.CHAT,
+                    onClick = { selectDestination(MainDestination.CHAT) },
+                    icon = { Icon(Icons.Outlined.ChatBubbleOutline, null) },
+                    label = { Text(stringResource(R.string.chat)) },
+                )
+                NavigationBarItem(
+                    selected = state.destination == MainDestination.LIBRARY,
+                    onClick = { selectDestination(MainDestination.LIBRARY) },
+                    icon = { Icon(Icons.Outlined.Folder, null) },
+                    label = { Text(stringResource(R.string.library)) },
+                )
             }
-            IconButton(onClick = { settingsOpen = true }) {
-                Icon(
-                    Icons.Outlined.Settings,
-                    contentDescription = stringResource(R.string.settings),
-                    tint = Ink.copy(alpha = .78f),
+        },
+    ) { scaffoldPadding ->
+        Column(
+            Modifier
+                .fillMaxSize()
+                .padding(scaffoldPadding)
+                .padding(horizontal = 20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Row(
+                Modifier.fillMaxWidth().heightIn(min = 64.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    stringResource(if (state.destination == MainDestination.CHAT) R.string.app_name else R.string.library),
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.weight(1f))
+                if (state.destination == MainDestination.CHAT) {
+                    TextButton(onClick = newConversation, enabled = !state.chat.busy) {
+                        Text(stringResource(R.string.new_conversation))
+                    }
+                }
+                IconButton(onClick = { settingsOpen = true }) {
+                    Icon(
+                        Icons.Outlined.Settings,
+                        contentDescription = stringResource(R.string.settings),
+                        tint = Ink.copy(alpha = .78f),
+                    )
+                }
+            }
+            NodeConnectionSummary(state.status, connect, retry, Modifier.fillMaxWidth())
+            Spacer(Modifier.height(12.dp))
+            when (state.destination) {
+                MainDestination.CHAT -> {
+                    ChatTimeline(state.chat, Modifier.fillMaxWidth().weight(1f))
+                    state.chat.error?.let { ErrorText(it) }
+                    Spacer(Modifier.height(10.dp))
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
+                        OutlinedTextField(
+                            value = draft,
+                            onValueChange = { draft = it },
+                            modifier = Modifier.weight(1f),
+                            placeholder = { Text(stringResource(R.string.message)) },
+                            enabled = !state.chat.busy,
+                            maxLines = 5,
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                            keyboardActions = KeyboardActions(onSend = {
+                                if (draft.isNotBlank()) {
+                                    send(draft)
+                                    draft = ""
+                                }
+                            }),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                if (state.chat.busy) cancelInference() else {
+                                    send(draft)
+                                    draft = ""
+                                }
+                            },
+                            enabled = state.chat.busy || draft.isNotBlank(),
+                            modifier = Modifier.height(56.dp),
+                            shape = RoundedCornerShape(14.dp),
+                        ) {
+                            Text(stringResource(if (state.chat.busy) R.string.cancel else R.string.send))
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                }
+                MainDestination.LIBRARY -> LibraryScreen(
+                    state = state.library,
+                    onImport = importFile,
+                    onDelete = deleteLibraryItem,
+                    onFeedbackShown = clearLibraryFeedback,
+                    modifier = Modifier.fillMaxWidth().weight(1f),
                 )
             }
         }
-        NodeConnectionSummary(state.status, connect, retry, Modifier.fillMaxWidth())
-        Spacer(Modifier.height(12.dp))
-        ChatTimeline(state.chat, Modifier.fillMaxWidth().weight(1f))
-        state.chat.error?.let { ErrorText(it) }
-        Spacer(Modifier.height(10.dp))
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
-            OutlinedTextField(
-                value = draft,
-                onValueChange = { draft = it },
-                modifier = Modifier.weight(1f),
-                placeholder = { Text(stringResource(R.string.message)) },
-                enabled = !state.chat.busy,
-                maxLines = 5,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = KeyboardActions(onSend = {
-                    if (draft.isNotBlank()) {
-                        send(draft)
-                        draft = ""
-                    }
-                }),
-            )
-            Spacer(Modifier.width(8.dp))
-            Button(
-                onClick = {
-                    if (state.chat.busy) {
-                        cancelInference()
-                    } else {
-                        send(draft)
-                        draft = ""
-                    }
-                },
-                enabled = state.chat.busy || draft.isNotBlank(),
-                modifier = Modifier.height(56.dp),
-                shape = RoundedCornerShape(14.dp),
-            ) {
-                Text(stringResource(if (state.chat.busy) R.string.cancel else R.string.send))
-            }
-        }
-        Spacer(Modifier.height(12.dp))
     }
     if (settingsOpen) {
         SettingsDialog(

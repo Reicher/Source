@@ -28,6 +28,24 @@ CREATE INDEX snapshots_latest_idx ON snapshots(user_id,app_id,created_at DESC);`
 ALTER TABLE users ADD COLUMN recovery_key_hash TEXT;
 ALTER TABLE users ADD COLUMN recovery_envelope TEXT;`,
 	},
+	{
+		version: 3,
+		up: `
+CREATE TABLE library_items(
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    item_id TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    encrypted_sha256 TEXT,
+    byte_count INTEGER,
+    created_at INTEGER NOT NULL,
+    deleted_at INTEGER,
+    PRIMARY KEY(user_id,item_id),
+    CHECK(length(content_sha256)=64),
+    CHECK((deleted_at IS NULL AND encrypted_sha256 IS NOT NULL AND byte_count>0) OR deleted_at IS NOT NULL)
+) STRICT;
+CREATE UNIQUE INDEX library_active_content_idx ON library_items(user_id,content_sha256) WHERE deleted_at IS NULL;
+CREATE INDEX library_items_updated_idx ON library_items(user_id,COALESCE(deleted_at,created_at) DESC);`,
+	},
 }
 
 const schemaVersionTable = `

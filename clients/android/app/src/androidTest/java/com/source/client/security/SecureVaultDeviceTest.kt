@@ -4,6 +4,10 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.source.client.storage.ChatData
+import com.source.client.storage.EncryptedBlobStore
+import com.source.client.storage.LibraryData
+import com.source.client.storage.LibraryItem
+import com.source.client.storage.LibraryManifest
 import com.source.client.storage.SourceDataStore
 import com.source.client.model.ChatConversation
 import com.source.client.model.ChatConversations
@@ -17,6 +21,8 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.security.KeyStore
+import java.security.MessageDigest
+import java.io.ByteArrayInputStream
 
 @RunWith(AndroidJUnit4::class)
 class SecureVaultDeviceTest {
@@ -129,6 +135,42 @@ class SecureVaultDeviceTest {
     }
 
     @Test
+    fun libraryFileIsCopiedEncryptedAndManifestRoundTrips() {
+        val vault = SecureVault(context, preferencesName, alias)
+        val dataStore = SourceDataStore(vault)
+        val blobStore = EncryptedBlobStore(context)
+        val created = vault.create("Robin", "password".toCharArray())
+        val secret = "raw private Library contents".toByteArray()
+        val imported = blobStore.importFile(created, ByteArrayInputStream(secret))
+        val encryptedFile = context.filesDir.resolve("library/${created.profileId}/${imported.id}.blob")
+        assertTrue(encryptedFile.isFile)
+        assertFalse(encryptedFile.readBytes().toString(Charsets.UTF_8).contains(secret.toString(Charsets.UTF_8)))
+
+        val item = LibraryItem(
+            id = imported.id,
+            name = "private.txt",
+            mimeType = "text/plain",
+            byteCount = imported.byteCount,
+            createdAtMillis = System.currentTimeMillis(),
+            contentSha256 = imported.contentSha256,
+        )
+        val manifest = LibraryManifest(listOf(item), modifiedAtMillis = item.createdAtMillis)
+        dataStore.save(created, LibraryData, manifest)
+        assertEquals(manifest, dataStore.load(created, LibraryData))
+
+        val nodeKey = ByteArray(32) { 7 }
+        blobStore.createUploadPayload(created, item, nodeKey).use { payload ->
+            assertEquals(secret.size + 36L, payload.byteCount)
+            val hash = MessageDigest.getInstance("SHA-256").digest(payload.file.readBytes())
+                .joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
+            assertEquals(hash, payload.encryptedSha256)
+        }
+        created.close()
+        secret.fill(0)
+        nodeKey.fill(0)
+    }
+
+    @Test
     fun multipleUsersKeepPasswordsIdentitiesAndConversationsSeparate() {
         val vault = SecureVault(context, preferencesName, alias)
         val dataStore = SourceDataStore(vault)
@@ -198,6 +240,8 @@ class SecureVaultDeviceTest {
         context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE).edit().clear().commit()
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         if (store.containsAlias(alias)) store.deleteEntry(alias)
+        context.filesDir.resolve("library").deleteRecursively()
+        context.cacheDir.resolve("library-sync").deleteRecursively()
     }
 
     private fun conversations(messages: List<ChatMessage>): ChatConversations {

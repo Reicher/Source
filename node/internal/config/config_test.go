@@ -21,6 +21,7 @@ func TestLoadReadsNormalizedSourceEnvironment(t *testing.T) {
 		"SOURCE_PAIRING_INVITATION_TTL_SECONDS": "456",
 		"SOURCE_SNAPSHOT_MAX_MIB":               "7",
 		"SOURCE_SNAPSHOT_RETENTION_COUNT":       "8",
+		"SOURCE_LIBRARY_ITEM_MAX_MIB":           "2048",
 		"SOURCE_ALLOWED_STORAGE_APPS":           "thoughts,notes",
 		"SOURCE_AI_BACKEND_URL":                 "http://model:8080",
 		"SOURCE_AI_MODEL":                       "source-test-model",
@@ -41,6 +42,9 @@ func TestLoadReadsNormalizedSourceEnvironment(t *testing.T) {
 	}
 	if cfg.MaximumSnapshotBytes != 7*1024*1024 || cfg.SnapshotRetention != 8 {
 		t.Fatalf("unexpected snapshot config: bytes=%d retention=%d", cfg.MaximumSnapshotBytes, cfg.SnapshotRetention)
+	}
+	if cfg.MaximumLibraryItemBytes != 2048*1024*1024 {
+		t.Fatalf("unexpected library item limit: %d", cfg.MaximumLibraryItemBytes)
 	}
 	if _, ok := cfg.AllowedStorageApps["notes"]; !ok || len(cfg.AllowedStorageApps) != 2 {
 		t.Fatalf("unexpected allowed storage apps: %#v", cfg.AllowedStorageApps)
@@ -74,6 +78,7 @@ func clearConfigEnvironment(t *testing.T) {
 		"SOURCE_PAIRING_INVITATION_TTL_SECONDS",
 		"SOURCE_SNAPSHOT_MAX_MIB",
 		"SOURCE_SNAPSHOT_RETENTION_COUNT",
+		"SOURCE_LIBRARY_ITEM_MAX_MIB",
 		"SOURCE_AI_MAX_OUTPUT_TOKENS",
 		"SOURCE_AI_TIMEOUT_SECONDS",
 		"SOURCE_DISCOVERY_ENABLED",

@@ -114,7 +114,7 @@ func (d *DB) GetNodeState(includeSecrets bool) (NodeState, error) {
 }
 
 func (d *DB) ListUsers() ([]User, error) {
-	rows, err := d.sql.Query(`SELECT u.id,u.display_name,u.storage_namespace,u.quota_bytes,u.created_at,u.disabled_at,u.recovery_key_hash,u.recovery_envelope,(u.recovery_key_hash IS NOT NULL AND u.recovery_envelope IS NOT NULL),COALESCE((SELECT SUM(s.byte_count) FROM snapshots s WHERE s.user_id=u.id),0),(SELECT COUNT(*) FROM clients c WHERE c.user_id=u.id AND c.revoked_at IS NULL) FROM users u ORDER BY u.created_at,u.id`)
+	rows, err := d.sql.Query(`SELECT u.id,u.display_name,u.storage_namespace,u.quota_bytes,u.created_at,u.disabled_at,u.recovery_key_hash,u.recovery_envelope,(u.recovery_key_hash IS NOT NULL AND u.recovery_envelope IS NOT NULL),COALESCE((SELECT SUM(s.byte_count) FROM snapshots s WHERE s.user_id=u.id),0)+COALESCE((SELECT SUM(l.byte_count) FROM library_items l WHERE l.user_id=u.id AND l.deleted_at IS NULL),0),(SELECT COUNT(*) FROM clients c WHERE c.user_id=u.id AND c.revoked_at IS NULL) FROM users u ORDER BY u.created_at,u.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -298,9 +298,11 @@ func (d *DB) LatestSnapshot(userID, appID string) (*Snapshot, error) {
 	}
 	return &s, e
 }
-func (d *DB) TotalSnapshotBytes(userID string) (int64, error) {
+func (d *DB) TotalStorageBytes(userID string) (int64, error) {
 	var n int64
-	e := d.sql.QueryRow(`SELECT COALESCE(SUM(byte_count),0) FROM snapshots WHERE user_id=?`, userID).Scan(&n)
+	e := d.sql.QueryRow(`SELECT
+        COALESCE((SELECT SUM(byte_count) FROM snapshots WHERE user_id=?),0) +
+        COALESCE((SELECT SUM(byte_count) FROM library_items WHERE user_id=? AND deleted_at IS NULL),0)`, userID, userID).Scan(&n)
 	return n, e
 }
 func (d *DB) DeleteSnapshot(userID, appID, snapshotID string) error {

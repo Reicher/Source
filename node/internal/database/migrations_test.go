@@ -17,6 +17,7 @@ func TestOpenAppliesAndPersistsMigrations(t *testing.T) {
 	assertSchemaVersion(t, db.sql, len(migrations))
 	assertUserColumn(t, db.sql, "recovery_key_hash")
 	assertUserColumn(t, db.sql, "recovery_envelope")
+	assertTable(t, db.sql, "library_items")
 	if err = db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -56,6 +57,7 @@ func TestOpenMigratesVersionOneDatabase(t *testing.T) {
 	assertSchemaVersion(t, db.sql, len(migrations))
 	assertUserColumn(t, db.sql, "recovery_key_hash")
 	assertUserColumn(t, db.sql, "recovery_envelope")
+	assertTable(t, db.sql, "library_items")
 }
 
 func TestOpenRejectsNewerSchemaVersion(t *testing.T) {
@@ -113,4 +115,12 @@ func assertUserColumn(t *testing.T, db *sql.DB, want string) {
 		t.Fatal(err)
 	}
 	t.Fatalf("users column %q is missing", want)
+}
+
+func assertTable(t *testing.T, db *sql.DB, want string) {
+	t.Helper()
+	var name string
+	if err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, want).Scan(&name); err != nil {
+		t.Fatalf("table %q is missing: %v", want, err)
+	}
 }

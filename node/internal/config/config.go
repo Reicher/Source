@@ -24,6 +24,7 @@ type Config struct {
 	DatabasePath             string
 	StorageRoot              string
 	MaximumSnapshotBytes     int64
+	MaximumLibraryItemBytes  int64
 	SnapshotRetention        int
 	AllowedStorageApps       map[string]struct{}
 	AIBackendURL             string
@@ -60,6 +61,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	maxLibraryMiB, err := positiveInt("SOURCE_LIBRARY_ITEM_MAX_MIB", 2048)
+	if err != nil {
+		return Config{}, err
+	}
 	retention, err := positiveInt("SOURCE_SNAPSHOT_RETENTION_COUNT", 20)
 	if err != nil {
 		return Config{}, err
@@ -76,7 +81,7 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	apps, err := identifiers("SOURCE_ALLOWED_STORAGE_APPS", "thoughts,source-client")
+	apps, err := identifiers("SOURCE_ALLOWED_STORAGE_APPS", "thoughts,source-client,source-library")
 	if err != nil {
 		return Config{}, err
 	}
@@ -100,8 +105,10 @@ func Load() (Config, error) {
 		SuggestedNodeName:        hostname,
 		DatabasePath:             env("SOURCE_NODE_DATABASE_PATH", filepath.Join(stateRoot, "source-node.sqlite")),
 		StorageRoot:              env("SOURCE_NODE_STORAGE_ROOT", "/vaults"),
-		MaximumSnapshotBytes:     int64(maxMiB) * 1024 * 1024, SnapshotRetention: retention,
-		AllowedStorageApps: apps, AIBackendURL: env("SOURCE_AI_BACKEND_URL", "http://llama:8080"),
+		MaximumSnapshotBytes:     int64(maxMiB) * 1024 * 1024,
+		MaximumLibraryItemBytes:  int64(maxLibraryMiB) * 1024 * 1024,
+		SnapshotRetention:        retention,
+		AllowedStorageApps:       apps, AIBackendURL: env("SOURCE_AI_BACKEND_URL", "http://llama:8080"),
 		AIModel: env("SOURCE_AI_MODEL", "source-qwen3.5-9b"), AIMaximumOutputTokens: maxTokens,
 		AITimeout: time.Duration(aiTimeout) * time.Second, Now: time.Now,
 	}, nil

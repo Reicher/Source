@@ -23,14 +23,14 @@ object ChatData : SourceData<ChatConversations> {
         value.activeConversationId?.let { put("activeConversationId", it) }
         put("conversations", JSONArray().apply {
             value.conversations.forEach { conversation ->
-                put(JSONObject().apply {
-                    put("id", conversation.id)
-                    put("createdAtMillis", conversation.createdAtMillis)
-                    put("messages", encodeMessages(conversation.messages))
-                })
+                put(encodeConversation(conversation))
             }
         })
     }.toString().toByteArray(Charsets.UTF_8)
+
+    /** Size of the conversation's existing JSON representation, without creating a separate file. */
+    fun encodedConversationByteCount(conversation: ChatConversation): Long =
+        encodeConversation(conversation).toString().toByteArray(Charsets.UTF_8).size.toLong()
 
     override fun decode(value: ByteArray): ChatConversations {
         val root = JSONObject(value.toString(Charsets.UTF_8))
@@ -86,6 +86,12 @@ object ChatData : SourceData<ChatConversations> {
                 put("createdAtMillis", message.createdAtMillis)
             })
         }
+    }
+
+    private fun encodeConversation(conversation: ChatConversation) = JSONObject().apply {
+        put("id", conversation.id)
+        put("createdAtMillis", conversation.createdAtMillis)
+        put("messages", encodeMessages(conversation.messages))
     }
 
     private fun decodeMessages(messages: JSONArray) = List(messages.length()) { index ->
