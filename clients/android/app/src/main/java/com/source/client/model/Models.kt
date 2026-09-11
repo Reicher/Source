@@ -63,6 +63,29 @@ data class ChatMessage(
     }
 }
 
+data class ChatConversation(
+    val id: String = UUID.randomUUID().toString(),
+    val createdAtMillis: Long = System.currentTimeMillis(),
+    val messages: List<ChatMessage> = emptyList(),
+)
+
+data class ChatConversations(
+    val conversations: List<ChatConversation> = emptyList(),
+    val activeConversationId: String? = null,
+) {
+    val activeConversation: ChatConversation?
+        get() = conversations.firstOrNull { it.id == activeConversationId }
+
+    fun withFreshConversation(conversation: ChatConversation = ChatConversation()): ChatConversations = copy(
+        conversations = conversations + conversation,
+        activeConversationId = conversation.id,
+    )
+
+    fun replaceActive(conversation: ChatConversation): ChatConversations = copy(
+        conversations = conversations.map { if (it.id == conversation.id) conversation else it },
+    )
+}
+
 enum class AiSelection {
     AUTO,
     THIS_DEVICE,

@@ -33,6 +33,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 data class ChatUiState(
+    val conversationId: String = "",
+    val conversationCreatedAtMillis: Long = 0L,
     val messages: List<ChatMessage> = emptyList(),
     val streamingMessage: ChatMessage? = null,
     val selection: AiSelection = AiSelection.AUTO,
@@ -142,7 +144,13 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             try {
                 session = withContext(Dispatchers.Default) { app.secureVault.create(name, chars) }
                 conversationSync.reset()
-                chatController.reset()
+                val conversations = chatController.reset(
+                    startFreshConversation = app.shouldStartFreshConversationOnLogin(),
+                )
+                withContext(Dispatchers.Default) {
+                    sourceDataStore.save(checkNotNull(session), ChatData, conversations)
+                }
+                app.markLoginConversationStarted()
                 openMain()
             } catch (_: Exception) {
                 _screen.value = AppScreen.Setup(
@@ -172,11 +180,18 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
                     _screen.value = locked.copy(error = message(R.string.error_incorrect_password))
                 } else {
                     session = unlocked
-                    val messages = withContext(Dispatchers.Default) {
+                    val conversations = withContext(Dispatchers.Default) {
                         sourceDataStore.load(unlocked, ChatData)
                     }
                     conversationSync.reset()
-                    chatController.reset(messages)
+                    val activeConversations = chatController.reset(
+                        conversations,
+                        startFreshConversation = app.shouldStartFreshConversationOnLogin(),
+                    )
+                    withContext(Dispatchers.Default) {
+                        sourceDataStore.save(unlocked, ChatData, activeConversations)
+                    }
+                    app.markLoginConversationStarted()
                     openMain()
                 }
             } catch (_: Exception) {
@@ -202,6 +217,8 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     fun selectAi(selection: AiSelection) = chatController.selectAi(selection)
 
     fun sendMessage(raw: String) = chatController.sendMessage(raw)
+
+    fun newConversation() = chatController.newConversation()
 
     fun cancelInference() = chatController.cancelInference()
 
@@ -337,15 +354,15 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
         conversationSync.synchronize(
             session,
             nodeConnection.current,
-            chatController.state.messages,
-            chatController::applySynchronizedMessages,
+            chatController.conversations,
+            chatController::applySynchronizedConversations,
         )
     }
 
     private suspend fun restoreRecoveredConversation(@StringRes failureMessage: Int) {
         try {
-            val messages = conversationSync.restoreRecovered(session, nodeConnection.current)
-            chatController.completeRecoveryRestore(messages)
+            val conversations = conversationSync.restoreRecovered(session, nodeConnection.current)
+            chatController.completeRecoveryRestore(conversations)
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
@@ -354,7 +371,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private suspend fun backupConversationIfNeeded() {
-        conversationSync.backupIfNeeded(session, nodeConnection.current, chatController.state.messages)
+        conversationSync.backupIfNeeded(session, nodeConnection.current, chatController.conversations)
     }
 
     private suspend fun backupConversationAfterRecoveryConfigured() {

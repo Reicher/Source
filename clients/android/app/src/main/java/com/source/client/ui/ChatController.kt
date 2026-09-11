@@ -7,9 +7,11 @@ import com.source.client.ai.SourceAiMessage
 import com.source.client.ai.SourceAiRequest
 import com.source.client.ai.SourceAiRole
 import com.source.client.ai.SourceAiRuntime
+import com.source.client.storage.ChatData
 import com.source.client.storage.SourceDataSync
 import com.source.client.model.ConnectedNode
 import com.source.client.model.AiSelection
+import com.source.client.model.ChatConversations
 import com.source.client.model.ChatMessage
 import com.source.client.model.ChatRole
 import com.source.client.security.VaultSession
@@ -24,23 +26,62 @@ internal class ChatController(
     private val scope: CoroutineScope,
     private val session: () -> VaultSession?,
     private val connectedNode: () -> ConnectedNode?,
-    private val conversationSync: SourceDataSync<List<ChatMessage>>,
+    private val conversationSync: SourceDataSync<ChatConversations>,
     private val readableError: (Exception) -> String,
     private val message: (Int) -> String,
     private val onStateChanged: (ChatUiState) -> Unit,
 ) {
     private var inferenceJob: Job? = null
     private var activeRunId: String? = null
+    var conversations = ChatData.emptyValue
+        private set
 
     var state = ChatUiState()
         private set
 
-    fun reset(messages: List<ChatMessage> = emptyList()) {
+    fun reset(
+        loaded: ChatConversations = ChatData.emptyValue,
+        startFreshConversation: Boolean = false,
+    ): ChatConversations {
         activeRunId = null
         inferenceJob?.cancel()
         inferenceJob = null
         aiRuntime.select(AiSelection.AUTO)
-        update(ChatUiState(messages = messages))
+        conversations = if (startFreshConversation || loaded.activeConversation == null) {
+            loaded.withFreshConversation()
+        } else {
+            loaded
+        }
+        val active = checkNotNull(conversations.activeConversation)
+        update(
+            ChatUiState(
+                conversationId = active.id,
+                conversationCreatedAtMillis = active.createdAtMillis,
+                messages = active.messages,
+            ),
+        )
+        return conversations
+    }
+
+    fun newConversation() {
+        if (state.busy) return
+        val activeSession = session() ?: return
+        conversations = conversations.withFreshConversation()
+        val active = checkNotNull(conversations.activeConversation)
+        update(
+            state.copy(
+                conversationId = active.id,
+                conversationCreatedAtMillis = active.createdAtMillis,
+                messages = emptyList(),
+                streamingMessage = null,
+                error = null,
+            ),
+        )
+        conversationSync.changed()
+        scope.launch {
+            conversationSync.persist(activeSession, conversations)
+            conversationSync.backupIfNeeded(session(), connectedNode(), conversations)
+        }
     }
 
     fun selectAi(selection: AiSelection) {
@@ -62,9 +103,9 @@ internal class ChatController(
         val activeSession = session() ?: return
         val runId = UUID.randomUUID().toString()
         activeRunId = runId
-        update(
+        updateMessages(
+            state.messages + ChatMessage.user(content),
             state.copy(
-                messages = state.messages + ChatMessage.user(content),
                 streamingMessage = null,
                 busy = true,
                 error = null,
@@ -74,27 +115,27 @@ internal class ChatController(
 
         inferenceJob = scope.launch {
             try {
-                conversationSync.persist(activeSession, state.messages)
+                conversationSync.persist(activeSession, conversations)
                 val context = boundedChatContext(state.messages)
                 val assistant = streamAnswer(
                     aiRuntime,
                     context,
                     runId,
-                    activeSession.vault.identity.userId,
+                    state.conversationId,
                 )
                 if (activeRunId != runId) return@launch
-                update(
+                updateMessages(
+                    state.messages + assistant.copy(
+                        content = assistant.content.take(MAX_MESSAGE_CHARACTERS),
+                    ),
                     state.copy(
-                        messages = state.messages + assistant.copy(
-                            content = assistant.content.take(MAX_MESSAGE_CHARACTERS),
-                        ),
                         streamingMessage = null,
                         busy = false,
                         error = null,
                     ),
                 )
                 conversationSync.changed()
-                conversationSync.persist(activeSession, state.messages)
+                conversationSync.persist(activeSession, conversations)
             } catch (error: CancellationException) {
                 if (activeRunId == runId) update(state.copy(streamingMessage = null, busy = false))
                 throw error
@@ -108,7 +149,7 @@ internal class ChatController(
                 )
             } finally {
                 if (activeRunId == runId) activeRunId = null
-                conversationSync.backupIfNeeded(session(), connectedNode(), state.messages)
+                conversationSync.backupIfNeeded(session(), connectedNode(), conversations)
             }
         }
     }
@@ -121,16 +162,20 @@ internal class ChatController(
         update(state.copy(streamingMessage = null, busy = false, error = null))
     }
 
-    fun applySynchronizedMessages(messages: List<ChatMessage>) {
-        update(state.copy(messages = messages))
+    fun applySynchronizedConversations(data: ChatConversations) {
+        applyConversations(data, busy = state.busy)
     }
 
     fun beginRecoveryRestore() {
         update(state.copy(busy = true, error = null))
     }
 
-    fun completeRecoveryRestore(messages: List<ChatMessage>?) {
-        update(state.copy(messages = messages ?: state.messages, busy = false, error = null))
+    fun completeRecoveryRestore(data: ChatConversations?) {
+        if (data == null) {
+            update(state.copy(busy = false, error = null))
+        } else {
+            applyConversations(data, busy = false)
+        }
     }
 
     fun failRecoveryRestore(error: String) {
@@ -171,6 +216,27 @@ internal class ChatController(
     private fun update(next: ChatUiState) {
         state = next
         onStateChanged(next)
+    }
+
+    private fun updateMessages(messages: List<ChatMessage>, next: ChatUiState) {
+        val active = checkNotNull(conversations.activeConversation).copy(messages = messages)
+        conversations = conversations.replaceActive(active)
+        update(next.copy(messages = messages))
+    }
+
+    private fun applyConversations(data: ChatConversations, busy: Boolean) {
+        conversations = if (data.activeConversation == null) data.withFreshConversation() else data
+        val active = checkNotNull(conversations.activeConversation)
+        update(
+            state.copy(
+                conversationId = active.id,
+                conversationCreatedAtMillis = active.createdAtMillis,
+                messages = active.messages,
+                streamingMessage = null,
+                busy = busy,
+                error = null,
+            ),
+        )
     }
 
     private companion object {

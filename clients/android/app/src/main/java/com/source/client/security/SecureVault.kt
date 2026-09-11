@@ -146,11 +146,12 @@ class SecureVault(
         data: SourceDataDescriptor,
         snapshot: ByteArray,
         encryptionKey: ByteArray = session.key,
+        supportedFormatVersions: Set<Int> = setOf(data.formatVersion),
     ): ByteArray {
         check(!session.closed)
         val envelope = JSONObject(snapshot.toString(Charsets.UTF_8))
         require(envelope.getString("format") == data.snapshotFormat)
-        require(envelope.getInt("version") == data.formatVersion)
+        require(envelope.getInt("version") in supportedFormatVersions)
         return SourceCrypto.decrypt(
             encryptionKey,
             SourceCrypto.base64UrlDecode(envelope.getString("ciphertext")),

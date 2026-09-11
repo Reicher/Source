@@ -26,6 +26,7 @@ data class SourceDataVersion(
 
 interface SourceData<T> {
     val descriptor: SourceDataDescriptor
+    val supportedFormatVersions: Set<Int> get() = setOf(descriptor.formatVersion)
     val emptyValue: T
 
     fun encode(value: T): ByteArray

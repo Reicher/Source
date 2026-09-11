@@ -1,6 +1,7 @@
 package com.source.client.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -23,6 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -30,18 +33,25 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -52,6 +62,7 @@ import com.source.client.model.ChatMessage
 import com.source.client.model.ChatRole
 import com.source.client.model.DiscoveredNode
 import com.source.client.model.NodeConnectionState
+import kotlinx.coroutines.launch
 
 @Composable
 internal fun MainScreen(
@@ -59,18 +70,13 @@ internal fun MainScreen(
     connect: (DiscoveredNode) -> Unit,
     retry: () -> Unit,
     send: (String) -> Unit,
+    newConversation: () -> Unit,
     cancelInference: () -> Unit,
     logout: () -> Unit,
 ) {
-    var draft by rememberSaveable { mutableStateOf("") }
+    var draft by rememberSaveable(state.chat.conversationId) { mutableStateOf("") }
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
     var recoveryKeyToShow by rememberSaveable { mutableStateOf<String?>(null) }
-    val listState = rememberLazyListState()
-    LaunchedEffect(state.chat.messages.size, state.chat.streamingMessage?.content?.length) {
-        val lastIndex = state.chat.messages.size +
-            if (state.chat.streamingMessage != null || state.chat.busy) 0 else -1
-        if (lastIndex >= 0) listState.scrollToItem(lastIndex)
-    }
     Column(
         Modifier
             .fillMaxSize()
@@ -89,6 +95,12 @@ internal fun MainScreen(
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(Modifier.weight(1f))
+            TextButton(
+                onClick = newConversation,
+                enabled = !state.chat.busy,
+            ) {
+                Text(stringResource(R.string.new_conversation))
+            }
             IconButton(onClick = { settingsOpen = true }) {
                 Icon(
                     Icons.Outlined.Settings,
@@ -99,23 +111,7 @@ internal fun MainScreen(
         }
         NodeConnectionSummary(state.status, connect, retry, Modifier.fillMaxWidth())
         Spacer(Modifier.height(12.dp))
-        if (state.chat.messages.isEmpty()) {
-            Spacer(Modifier.weight(1f))
-        } else {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.fillMaxWidth().weight(1f),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                items(state.chat.messages, key = ChatMessage::id) { ChatBubble(it) }
-                state.chat.streamingMessage?.let { message ->
-                    item(key = "stream-${message.id}") { ChatBubble(message) }
-                }
-                if (state.chat.busy && state.chat.streamingMessage == null) {
-                    item { Text(stringResource(R.string.answering), color = Ink.copy(alpha = .55f)) }
-                }
-            }
-        }
+        ChatTimeline(state.chat, Modifier.fillMaxWidth().weight(1f))
         state.chat.error?.let { ErrorText(it) }
         Spacer(Modifier.height(10.dp))
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
@@ -171,6 +167,120 @@ internal fun MainScreen(
     recoveryKeyToShow?.let { recoveryKey ->
         RecoveryKeyDialog(recoveryKey, onDismiss = { recoveryKeyToShow = null })
     }
+}
+
+@Composable
+private fun ChatTimeline(chat: ChatUiState, modifier: Modifier = Modifier) {
+    key(chat.conversationId) {
+        ConversationTimeline(chat, modifier)
+    }
+}
+
+@Composable
+private fun ConversationTimeline(chat: ChatUiState, modifier: Modifier = Modifier) {
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    val bottomThreshold = with(LocalDensity.current) { 72.dp.roundToPx() }
+    val isNearBottom by remember(listState, bottomThreshold) {
+        derivedStateOf {
+            val layout = listState.layoutInfo
+            if (layout.totalItemsCount == 0) {
+                true
+            } else {
+                val last = layout.visibleItemsInfo.lastOrNull()
+                last != null && last.index == layout.totalItemsCount - 1 &&
+                    last.offset + last.size <= layout.viewportEndOffset + bottomThreshold
+            }
+        }
+    }
+    var followingLatest by rememberSaveable { mutableStateOf(true) }
+    var newerContentAvailable by rememberSaveable { mutableStateOf(false) }
+    val itemCount = chat.messages.size +
+        if (chat.streamingMessage != null || chat.busy) 1 else 0
+
+    LaunchedEffect(listState) {
+        var previousIndex = listState.firstVisibleItemIndex
+        var previousOffset = listState.firstVisibleItemScrollOffset
+        snapshotFlow {
+            Triple(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset, isNearBottom)
+        }.collect { (index, offset, nearBottom) ->
+            val movedTowardOlderContent = index < previousIndex ||
+                (index == previousIndex && offset < previousOffset)
+            when {
+                movedTowardOlderContent -> {
+                    followingLatest = false
+                    newerContentAvailable = false
+                }
+                nearBottom -> {
+                    followingLatest = true
+                    newerContentAvailable = false
+                }
+            }
+            previousIndex = index
+            previousOffset = offset
+        }
+    }
+
+    LaunchedEffect(
+        chat.messages.size,
+        chat.streamingMessage?.content?.length,
+        chat.busy,
+    ) {
+        if (itemCount == 0) return@LaunchedEffect
+        if (followingLatest) {
+            listState.scrollToLatest(itemCount)
+        } else {
+            newerContentAvailable = true
+        }
+    }
+
+    Box(modifier) {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            items(chat.messages, key = ChatMessage::id) { ChatBubble(it) }
+            chat.streamingMessage?.let { message ->
+                item(key = "stream-${message.id}") { ChatBubble(message) }
+            }
+            if (chat.busy && chat.streamingMessage == null) {
+                item(key = "answering") {
+                    Text(stringResource(R.string.answering), color = Ink.copy(alpha = .55f))
+                }
+            }
+        }
+        if (newerContentAvailable && !isNearBottom) {
+            SmallFloatingActionButton(
+                onClick = {
+                    followingLatest = true
+                    newerContentAvailable = false
+                    scope.launch { listState.scrollToLatest(itemCount) }
+                },
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp),
+                containerColor = Paper,
+                contentColor = Moss,
+            ) {
+                Icon(
+                    Icons.Filled.KeyboardArrowDown,
+                    contentDescription = stringResource(R.string.jump_to_latest),
+                )
+            }
+        }
+    }
+}
+
+private suspend fun LazyListState.scrollToLatest(itemCount: Int) {
+    if (itemCount <= 0) return
+    val lastIndex = itemCount - 1
+    var lastItem = layoutInfo.visibleItemsInfo.firstOrNull { it.index == lastIndex }
+    if (lastItem == null) {
+        scrollToItem(lastIndex)
+        lastItem = layoutInfo.visibleItemsInfo.firstOrNull { it.index == lastIndex }
+    }
+    lastItem ?: return
+    val overflow = lastItem.offset + lastItem.size - layoutInfo.viewportEndOffset
+    if (overflow > 0) scrollBy(overflow.toFloat())
 }
 
 @Composable

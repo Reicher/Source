@@ -33,6 +33,7 @@ fun SourceApp(screen: AppScreen, viewModel: SourceViewModel) {
                     viewModel::scan,
                     viewModel::retry,
                     viewModel::sendMessage,
+                    viewModel::newConversation,
                     viewModel::cancelInference,
                     viewModel::logout,
                 )

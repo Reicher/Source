@@ -14,6 +14,15 @@ class SourceClientApplication : Application() {
     val nodeApi by lazy { SourceNodeApi() }
     val nodeDiscovery by lazy { NsdNodeDiscovery(this) }
     val networkMonitor by lazy { LocalNetworkMonitor(this) }
+    private var freshConversationPending = true
+
+    @Synchronized
+    fun shouldStartFreshConversationOnLogin(): Boolean = freshConversationPending
+
+    @Synchronized
+    fun markLoginConversationStarted() {
+        freshConversationPending = false
+    }
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)

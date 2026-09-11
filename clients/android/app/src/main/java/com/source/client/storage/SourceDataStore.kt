@@ -42,7 +42,13 @@ class SourceDataStore(private val secureVault: SecureVault) {
         snapshot: ByteArray,
         encryptionKey: ByteArray = session.key,
     ): T {
-        val plaintext = secureVault.readDataSnapshot(session, data.descriptor, snapshot, encryptionKey)
+        val plaintext = secureVault.readDataSnapshot(
+            session,
+            data.descriptor,
+            snapshot,
+            encryptionKey,
+            data.supportedFormatVersions,
+        )
         return try {
             data.decode(plaintext)
         } finally {

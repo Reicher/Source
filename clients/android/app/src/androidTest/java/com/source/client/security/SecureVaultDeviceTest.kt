@@ -5,6 +5,8 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.source.client.storage.ChatData
 import com.source.client.storage.SourceDataStore
+import com.source.client.model.ChatConversation
+import com.source.client.model.ChatConversations
 import com.source.client.model.ChatMessage
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -42,7 +44,7 @@ class SecureVaultDeviceTest {
         val unlocked = SecureVault(context, preferencesName, alias).unlock(profileId, password)
         assertEquals(clientId, unlocked?.vault?.identity?.clientId)
         assertFalse(unlocked?.vault?.identity?.clientPrivateKey.isNullOrBlank())
-        assertTrue(unlocked != null && dataStore.load(unlocked, ChatData).isEmpty())
+        assertTrue(unlocked != null && dataStore.load(unlocked, ChatData).conversations.isEmpty())
         unlocked?.close()
         password.fill('\u0000')
     }
@@ -57,21 +59,50 @@ class SecureVaultDeviceTest {
             ChatMessage.user("A secret question"),
             ChatMessage.assistant("A local answer"),
         )
+        val conversations = conversations(messages)
 
-        dataStore.save(created, ChatData, messages)
-        val snapshot = dataStore.createSnapshot(created, ChatData, messages)
+        dataStore.save(created, ChatData, conversations)
+        val snapshot = dataStore.createSnapshot(created, ChatData, conversations)
         assertFalse(snapshot.toString(Charsets.UTF_8).contains("A secret question"))
         created.close()
 
         val reopened = SecureVault(context, preferencesName, alias).unlock(vault.profiles.single().id, password)!!
-        assertEquals(messages, dataStore.load(reopened, ChatData))
+        assertEquals(conversations, dataStore.load(reopened, ChatData))
 
-        dataStore.save(reopened, ChatData, emptyList())
+        dataStore.save(reopened, ChatData, ChatConversations())
         val restored = dataStore.readSnapshot(reopened, ChatData, snapshot)
         dataStore.save(reopened, ChatData, restored)
-        assertEquals(messages, restored)
-        assertEquals(messages, dataStore.load(reopened, ChatData))
+        assertEquals(conversations, restored)
+        assertEquals(conversations, dataStore.load(reopened, ChatData))
         reopened.close()
+        password.fill('\u0000')
+    }
+
+    @Test
+    fun legacyConversationSnapshotMigratesWithoutLosingMessages() {
+        val vault = SecureVault(context, preferencesName, alias)
+        val dataStore = SourceDataStore(vault)
+        val password = "local test password".toCharArray()
+        val created = vault.create("Robin", password)
+        val legacyPayload = """
+            {"version":1,"messages":[
+              {"id":"message-1","role":"user","content":"Existing chat","createdAtMillis":100}
+            ]}
+        """.trimIndent().toByteArray()
+        val snapshot = vault.createDataSnapshot(
+            created,
+            ChatData.descriptor.copy(formatVersion = 1),
+            legacyPayload,
+        )
+
+        val first = dataStore.readSnapshot(created, ChatData, snapshot)
+        val second = dataStore.readSnapshot(created, ChatData, snapshot)
+
+        assertEquals(first, second)
+        assertEquals(first.conversations.single().id, first.activeConversationId)
+        assertEquals(100L, first.activeConversation!!.createdAtMillis)
+        assertEquals("Existing chat", first.activeConversation!!.messages.single().content)
+        created.close()
         password.fill('\u0000')
     }
 
@@ -81,17 +112,18 @@ class SecureVaultDeviceTest {
         val dataStore = SourceDataStore(vault)
         val first = vault.create("First phone", "one".toCharArray())
         val messages = listOf(ChatMessage.user("Data from the old phone"))
+        val conversations = conversations(messages)
         val dataKey = SourceCrypto.base64UrlDecode(
             SourceCrypto.generateRecoveryMaterial("srcnode_${"n".repeat(43)}").dataKey,
         )
-        val snapshot = dataStore.createSnapshot(first, ChatData, messages, dataKey)
+        val snapshot = dataStore.createSnapshot(first, ChatData, conversations, dataKey)
         first.close()
 
         val replacement = vault.create("New phone", "two".toCharArray())
         val restored = dataStore.readSnapshot(replacement, ChatData, snapshot, dataKey)
         dataStore.save(replacement, ChatData, restored)
-        assertEquals(messages, restored)
-        assertEquals(messages, dataStore.load(replacement, ChatData))
+        assertEquals(conversations, restored)
+        assertEquals(conversations, dataStore.load(replacement, ChatData))
         replacement.close()
         dataKey.fill(0)
     }
@@ -103,10 +135,10 @@ class SecureVaultDeviceTest {
         val robinPassword = "Robin password".toCharArray()
         val testPassword = "test".toCharArray()
         val robin = vault.create("Robin", robinPassword)
-        dataStore.save(robin, ChatData, listOf(ChatMessage.user("Robins privata chatt")))
+        dataStore.save(robin, ChatData, conversations(listOf(ChatMessage.user("Robins privata chatt"))))
         robin.close()
         val testUser = vault.create("Test", testPassword)
-        dataStore.save(testUser, ChatData, listOf(ChatMessage.user("Testets privata chatt")))
+        dataStore.save(testUser, ChatData, conversations(listOf(ChatMessage.user("Testets privata chatt"))))
         testUser.close()
 
         val profiles = vault.profiles
@@ -116,9 +148,9 @@ class SecureVaultDeviceTest {
         val reopenedRobin = vault.unlock(profiles[0].id, robinPassword)!!
         val reopenedTest = vault.unlock(profiles[1].id, testPassword)!!
         assertEquals("Robin", reopenedRobin.vault.identity.userDisplayName)
-        assertEquals("Robins privata chatt", dataStore.load(reopenedRobin, ChatData).single().content)
+        assertEquals("Robins privata chatt", dataStore.load(reopenedRobin, ChatData).activeConversation!!.messages.single().content)
         assertEquals("Test", reopenedTest.vault.identity.userDisplayName)
-        assertEquals("Testets privata chatt", dataStore.load(reopenedTest, ChatData).single().content)
+        assertEquals("Testets privata chatt", dataStore.load(reopenedTest, ChatData).activeConversation!!.messages.single().content)
         assertFalse(reopenedRobin.vault.identity.clientId == reopenedTest.vault.identity.clientId)
         reopenedRobin.close()
         reopenedTest.close()
@@ -166,5 +198,10 @@ class SecureVaultDeviceTest {
         context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE).edit().clear().commit()
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         if (store.containsAlias(alias)) store.deleteEntry(alias)
+    }
+
+    private fun conversations(messages: List<ChatMessage>): ChatConversations {
+        val conversation = ChatConversation(id = "conversation-test", messages = messages)
+        return ChatConversations(listOf(conversation), conversation.id)
     }
 }
