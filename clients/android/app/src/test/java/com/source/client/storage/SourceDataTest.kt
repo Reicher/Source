@@ -1,6 +1,7 @@
 package com.source.client.storage
 
 import com.source.client.model.ChatConversation
+import com.source.client.model.ChatConversationTombstone
 import com.source.client.model.ChatConversations
 import com.source.client.model.ChatMessage
 import com.source.client.model.ChatRole
@@ -44,8 +45,8 @@ class SourceDataTest {
         assertEquals("source-client", ChatData.descriptor.remoteAppId)
         assertEquals("conversation", ChatData.descriptor.id)
         assertEquals("source-client-conversation", ChatData.descriptor.snapshotFormat)
-        assertEquals(2, ChatData.descriptor.formatVersion)
-        assertEquals(setOf(1, 2), ChatData.supportedFormatVersions)
+        assertEquals(3, ChatData.descriptor.formatVersion)
+        assertEquals(setOf(1, 2, 3), ChatData.supportedFormatVersions)
     }
 
     @Test
@@ -59,6 +60,19 @@ class SourceDataTest {
         assertEquals("fresh-2", secondFresh.activeConversationId)
         assertNotEquals(existing.activeConversationId, secondFresh.activeConversationId)
         assertEquals("existing", secondFresh.conversations.first().messages.single().content)
+    }
+
+    @Test
+    fun `conversation tombstone makes offline deletion newer than stored content`() {
+        val stored = conversations("stored", 100)
+        val deleted = ChatConversations(
+            tombstones = listOf(ChatConversationTombstone(stored.conversations.single().id, 200)),
+        )
+
+        assertEquals(
+            SourceDataResolution.KEEP_LOCAL,
+            resolveSourceData(ChatData.version(deleted), ChatData.version(stored)),
+        )
     }
 
     private fun conversations(content: String, createdAtMillis: Long): ChatConversations {

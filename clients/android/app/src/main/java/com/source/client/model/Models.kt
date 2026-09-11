@@ -69,9 +69,15 @@ data class ChatConversation(
     val messages: List<ChatMessage> = emptyList(),
 )
 
+data class ChatConversationTombstone(
+    val conversationId: String,
+    val deletedAtMillis: Long,
+)
+
 data class ChatConversations(
     val conversations: List<ChatConversation> = emptyList(),
     val activeConversationId: String? = null,
+    val tombstones: List<ChatConversationTombstone> = emptyList(),
 ) {
     val activeConversation: ChatConversation?
         get() = conversations.firstOrNull { it.id == activeConversationId }

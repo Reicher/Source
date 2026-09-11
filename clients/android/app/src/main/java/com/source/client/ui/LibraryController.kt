@@ -375,7 +375,7 @@ internal fun withConversationLibraryItems(
                     localAvailable = true,
                     nodeAvailable = conversationsBackedUp,
                     canRemoveFromDevice = false,
-                    canDeleteFromSource = false,
+                    canDeleteFromSource = true,
                     previewKind = LibraryPreviewKind.TEXT,
                 )
             }

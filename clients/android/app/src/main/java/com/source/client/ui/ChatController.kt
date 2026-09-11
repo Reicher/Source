@@ -14,6 +14,7 @@ import com.source.client.model.AiSelection
 import com.source.client.model.ChatConversations
 import com.source.client.model.ChatMessage
 import com.source.client.model.ChatRole
+import com.source.client.model.ChatConversationTombstone
 import com.source.client.security.VaultSession
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
@@ -78,6 +79,40 @@ internal class ChatController(
             ),
         )
         conversationSync.changed()
+        scope.launch {
+            conversationSync.persist(activeSession, conversations)
+            conversationSync.backupIfNeeded(session(), connectedNode(), conversations)
+            onStateChanged(state)
+        }
+    }
+
+    fun deleteConversation(conversationId: String) {
+        if (state.busy || conversations.conversations.none { it.id == conversationId }) return
+        val activeSession = session() ?: return
+        val now = System.currentTimeMillis().coerceAtLeast(1)
+        val remaining = conversations.conversations.filterNot { it.id == conversationId }
+        conversations = conversations.copy(
+            conversations = remaining,
+            activeConversationId = when {
+                conversations.activeConversationId != conversationId -> conversations.activeConversationId
+                remaining.isNotEmpty() -> remaining.maxByOrNull { it.createdAtMillis }?.id
+                else -> null
+            },
+            tombstones = conversations.tombstones.filterNot { it.conversationId == conversationId } +
+                ChatConversationTombstone(conversationId, now),
+        )
+        if (conversations.activeConversation == null) conversations = conversations.withFreshConversation()
+        val active = checkNotNull(conversations.activeConversation)
+        conversationSync.changed()
+        update(
+            state.copy(
+                conversationId = active.id,
+                conversationCreatedAtMillis = active.createdAtMillis,
+                messages = active.messages,
+                streamingMessage = null,
+                error = null,
+            ),
+        )
         scope.launch {
             conversationSync.persist(activeSession, conversations)
             conversationSync.backupIfNeeded(session(), connectedNode(), conversations)

@@ -74,7 +74,7 @@ class LibraryScreenTest {
         assertEquals("archive.pdf", presented.items[1].filename)
         assertEquals(123L, presented.items[2].byteCount)
         assertEquals(LibrarySyncState.LOCAL_ONLY, presented.items[2].syncState)
-        assertEquals(false, presented.items[2].canDeleteFromSource)
+        assertEquals(true, presented.items[2].canDeleteFromSource)
     }
 
     @Test

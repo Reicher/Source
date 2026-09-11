@@ -36,6 +36,8 @@ import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.outlined.SyncProblem
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
@@ -43,6 +45,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -161,16 +164,33 @@ internal fun LibraryScreen(
     deleting?.let { item ->
         AlertDialog(
             onDismissRequest = { deleting = null },
-            title = { Text(stringResource(R.string.library_delete_from_source_title)) },
-            text = { Text(stringResource(R.string.library_delete_from_source_message, item.filename)) },
+            title = { Text(stringResource(R.string.library_delete_title, item.filename)) },
+            text = { Text(stringResource(R.string.library_delete_location_message)) },
             confirmButton = {
-                TextButton(onClick = {
-                    deleting = null
-                    onDeleteFromSource(item.id)
-                }) { Text(stringResource(R.string.library_delete_from_source)) }
-            },
-            dismissButton = {
-                TextButton(onClick = { deleting = null }) { Text(stringResource(R.string.cancel)) }
+                Column(Modifier.fillMaxWidth()) {
+                    if (item.canRemoveFromDevice) {
+                        OutlinedButton(
+                            onClick = {
+                                deleting = null
+                                onRemoveFromDevice(item.id)
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text(stringResource(R.string.library_remove_from_device)) }
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    Button(
+                        onClick = {
+                            deleting = null
+                            onDeleteFromSource(item.id)
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                    ) { Text(stringResource(R.string.library_delete_from_source)) }
+                    TextButton(
+                        onClick = { deleting = null },
+                        modifier = Modifier.align(Alignment.End),
+                    ) { Text(stringResource(R.string.cancel)) }
+                }
             },
         )
     }
@@ -222,19 +242,12 @@ private fun LibraryItemRow(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     if (item.previewKind != null && item.localAvailable) {
-                        TextButton(onClick = onOpen) { Text(stringResource(R.string.library_read_open)) }
-                    }
-                    if (item.canRemoveFromDevice) {
-                        TextButton(onClick = onRemoveFromDevice) {
-                            Text(stringResource(R.string.library_remove_from_device))
-                        }
+                        Button(onClick = onOpen) { Text(stringResource(R.string.library_view)) }
                     }
                     if (item.canDeleteFromSource) {
-                        TextButton(onClick = onDeleteFromSource) {
-                            Text(
-                                stringResource(R.string.library_delete_from_source),
-                                color = MaterialTheme.colorScheme.error,
-                            )
+                        if (item.previewKind != null && item.localAvailable) Spacer(Modifier.width(8.dp))
+                        OutlinedButton(onClick = onDeleteFromSource) {
+                            Text(stringResource(R.string.delete), color = MaterialTheme.colorScheme.error)
                         }
                     }
                 }

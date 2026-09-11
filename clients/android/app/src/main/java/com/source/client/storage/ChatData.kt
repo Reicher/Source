@@ -2,6 +2,7 @@ package com.source.client.storage
 
 import com.source.client.model.ChatConversation
 import com.source.client.model.ChatConversations
+import com.source.client.model.ChatConversationTombstone
 import com.source.client.model.ChatMessage
 import com.source.client.model.ChatRole
 import org.json.JSONArray
@@ -13,9 +14,9 @@ object ChatData : SourceData<ChatConversations> {
         id = "conversation",
         remoteAppId = "source-client",
         snapshotFormat = "source-client-conversation",
-        formatVersion = 2,
+        formatVersion = 3,
     )
-    override val supportedFormatVersions = setOf(1, descriptor.formatVersion)
+    override val supportedFormatVersions = setOf(1, 2, descriptor.formatVersion)
     override val emptyValue = ChatConversations()
 
     override fun encode(value: ChatConversations): ByteArray = JSONObject().apply {
@@ -24,6 +25,14 @@ object ChatData : SourceData<ChatConversations> {
         put("conversations", JSONArray().apply {
             value.conversations.forEach { conversation ->
                 put(encodeConversation(conversation))
+            }
+        })
+        put("tombstones", JSONArray().apply {
+            value.tombstones.forEach { tombstone ->
+                put(JSONObject().apply {
+                    put("conversationId", tombstone.conversationId)
+                    put("deletedAtMillis", tombstone.deletedAtMillis)
+                })
             }
         })
     }.toString().toByteArray(Charsets.UTF_8)
@@ -39,7 +48,7 @@ object ChatData : SourceData<ChatConversations> {
         val root = JSONObject(value.toString(Charsets.UTF_8))
         return when (val version = root.getInt("version")) {
             1 -> migrateMessages(decodeMessages(root.getJSONArray("messages")))
-            descriptor.formatVersion -> {
+            2, descriptor.formatVersion -> {
                 val conversations = root.getJSONArray("conversations")
                 ChatConversations(
                     conversations = List(conversations.length()) { index ->
@@ -52,6 +61,19 @@ object ChatData : SourceData<ChatConversations> {
                         }
                     },
                     activeConversationId = root.optString("activeConversationId").takeIf(String::isNotBlank),
+                    tombstones = if (version >= 3) {
+                        val tombstones = root.getJSONArray("tombstones")
+                        List(tombstones.length()) { index ->
+                            tombstones.getJSONObject(index).let {
+                                ChatConversationTombstone(
+                                    conversationId = it.getString("conversationId"),
+                                    deletedAtMillis = it.getLong("deletedAtMillis"),
+                                )
+                            }
+                        }
+                    } else {
+                        emptyList()
+                    },
                 )
             }
             else -> throw IllegalArgumentException("Unsupported chat data version $version")
@@ -59,12 +81,15 @@ object ChatData : SourceData<ChatConversations> {
     }
 
     override fun version(value: ChatConversations) = SourceDataVersion(
-        modifiedAtMillis = value.conversations.maxOfOrNull { conversation ->
-            maxOf(
-                conversation.createdAtMillis,
-                conversation.messages.maxOfOrNull(ChatMessage::createdAtMillis) ?: Long.MIN_VALUE,
-            )
-        } ?: Long.MIN_VALUE,
+        modifiedAtMillis = maxOf(
+            value.conversations.maxOfOrNull { conversation ->
+                maxOf(
+                    conversation.createdAtMillis,
+                    conversation.messages.maxOfOrNull(ChatMessage::createdAtMillis) ?: Long.MIN_VALUE,
+                )
+            } ?: Long.MIN_VALUE,
+            value.tombstones.maxOfOrNull(ChatConversationTombstone::deletedAtMillis) ?: Long.MIN_VALUE,
+        ),
         contentIdentity = buildString {
             append(value.activeConversationId)
             value.conversations.forEach { conversation ->
@@ -76,6 +101,10 @@ object ChatData : SourceData<ChatConversations> {
                     append('\u0000').append(message.createdAtMillis)
                     append('\u0000').append(message.content)
                 }
+            }
+            value.tombstones.sortedBy(ChatConversationTombstone::conversationId).forEach { tombstone ->
+                append('\u0000').append(tombstone.conversationId)
+                append('\u0000').append(tombstone.deletedAtMillis)
             }
         },
     )

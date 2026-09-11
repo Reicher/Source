@@ -31,11 +31,11 @@
     <string name="library_item_already_exists">This file already exists in Library.</string>
     <string name="library_item_removed_from_device">Local copy removed. The file remains on the Node.</string>
     <string name="library_item_deleted_from_source">Item deleted from Source.</string>
-    <string name="library_delete_from_source_title">Permanently delete?</string>
-    <string name="library_delete_from_source_message">Delete “%1$s” from this device and Source Node? This cannot be undone.</string>
+    <string name="library_delete_title">Delete “%1$s”?</string>
+    <string name="library_delete_location_message">Choose whether to remove only the local copy or permanently delete the item from Source. Permanent deletion cannot be undone.</string>
     <string name="library_remove_from_device">Remove from device</string>
     <string name="library_delete_from_source">Delete from Source</string>
-    <string name="library_read_open">Read / Open</string>
+    <string name="library_view">View</string>
     <string name="library_size">Size</string>
     <string name="library_added">Added</string>
     <string name="library_stored">Stored</string>

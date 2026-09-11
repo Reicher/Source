@@ -10,6 +10,7 @@ import com.source.client.storage.LibraryItem
 import com.source.client.storage.LibraryManifest
 import com.source.client.storage.SourceDataStore
 import com.source.client.model.ChatConversation
+import com.source.client.model.ChatConversationTombstone
 import com.source.client.model.ChatConversations
 import com.source.client.model.ChatMessage
 import org.junit.After
@@ -67,7 +68,9 @@ class SecureVaultDeviceTest {
             ChatMessage.user("A secret question"),
             ChatMessage.assistant("A local answer"),
         )
-        val conversations = conversations(messages)
+        val conversations = conversations(messages).copy(
+            tombstones = listOf(ChatConversationTombstone("deleted-conversation", 500)),
+        )
 
         dataStore.save(created, ChatData, conversations)
         val snapshot = dataStore.createSnapshot(created, ChatData, conversations)

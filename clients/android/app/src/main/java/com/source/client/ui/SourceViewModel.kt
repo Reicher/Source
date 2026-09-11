@@ -286,6 +286,10 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun deleteLibraryItemFromSource(itemId: String) {
+        if (itemId.startsWith("conversation:")) {
+            chatController.deleteConversation(itemId.removePrefix("conversation:"))
+            return
+        }
         viewModelScope.launch {
             libraryController.deleteFromSource(itemId)
             libraryController.syncAll()
