@@ -85,6 +85,8 @@ internal fun MainScreen(
     closeLibraryPreview: () -> Unit,
     clearLibraryFeedback: () -> Unit,
     openKnowledgeSource: (String) -> Unit,
+    pauseSilverRefinement: () -> Unit,
+    resumeSilverRefinement: () -> Unit,
 ) {
     state.libraryPreview?.let { preview ->
         LibraryPreviewScreen(preview, closeLibraryPreview)
@@ -200,6 +202,8 @@ internal fun MainScreen(
                     onDeleteFromSource = deleteLibraryItemFromSource,
                     onOpen = openLibraryItem,
                     onFeedbackShown = clearLibraryFeedback,
+                    onPauseRefinement = pauseSilverRefinement,
+                    onResumeRefinement = resumeSilverRefinement,
                     modifier = Modifier.fillMaxWidth().weight(1f),
                 )
                 MainDestination.KNOWLEDGE -> KnowledgeScreen(

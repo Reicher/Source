@@ -44,6 +44,8 @@ fun SourceApp(screen: AppScreen, viewModel: SourceViewModel) {
                     viewModel::closeLibraryPreview,
                     viewModel::clearLibraryFeedback,
                     viewModel::openKnowledgeSource,
+                    viewModel::pauseSilverRefinement,
+                    viewModel::resumeSilverRefinement,
                 )
                 is AppScreen.Scanner -> ScannerPermissionScreen(
                     screen,

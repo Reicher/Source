@@ -30,6 +30,12 @@
     <string name="knowledge_confidence">%1$d%% confidence</string>
     <string name="knowledge_sync_status">Knowledge sync</string>
     <string name="knowledge_sync_failed">Knowledge sync failed</string>
+    <string name="knowledge_refinement">Knowledge refinement</string>
+    <string name="knowledge_refinement_running">Refining knowledge</string>
+    <string name="knowledge_refinement_paused">Refinement paused</string>
+    <string name="knowledge_refinement_batches">%1$d / %2$d batches</string>
+    <string name="pause">Pause</string>
+    <string name="resume">Resume</string>
     <string name="library_add_file">Add file</string>
     <string name="library_empty_title">Your Library is empty</string>
     <string name="library_empty_description">Add a file to store an encrypted copy in Source.</string>

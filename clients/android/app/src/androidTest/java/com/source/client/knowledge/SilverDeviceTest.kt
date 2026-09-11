@@ -12,9 +12,13 @@ import com.source.client.ai.SourceAiRequest
 import com.source.client.ai.SourceAiRuntime
 import com.source.client.model.AiModelMetadata
 import com.source.client.storage.SilverClaim
+import com.source.client.storage.SilverBatchCheckpoint
+import com.source.client.storage.SilverCheckpointData
+import com.source.client.storage.SilverCheckpointDataset
 import com.source.client.storage.SilverData
 import com.source.client.storage.SilverDataset
 import com.source.client.storage.SilverEntity
+import com.source.client.storage.SilverRefinementCheckpoint
 import com.source.client.storage.SilverResult
 import com.source.client.storage.SilverScalarValue
 import kotlinx.coroutines.flow.Flow
@@ -29,6 +33,37 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class SilverDeviceTest {
+    @Test
+    fun SilverCheckpointDataRoundTripsCompletedBatches() {
+        val sourceId = "source-1"
+        val sourceHash = "a".repeat(64)
+        fun batchResult(processedAt: Long) = SilverResult(
+            bronzeSourceId = sourceId,
+            bronzeContentSha256 = sourceHash,
+            entities = emptyList(),
+            claims = emptyList(),
+            modelId = "model-4b",
+            parameterCount = 4_000_000_000,
+            processorVersion = 2,
+            processedAtMillis = processedAt,
+        )
+        val dataset = SilverCheckpointDataset(
+            checkpoints = listOf(SilverRefinementCheckpoint(
+                bronzeSourceId = sourceId,
+                bronzeContentSha256 = sourceHash,
+                processorVersion = 2,
+                totalBatches = 3,
+                completedBatches = listOf(
+                    SilverBatchCheckpoint(0, "b".repeat(64), batchResult(100)),
+                    SilverBatchCheckpoint(1, "c".repeat(64), batchResult(101)),
+                ),
+            )),
+            refinementPaused = true,
+        )
+
+        assertEquals(dataset, SilverCheckpointData.decode(SilverCheckpointData.encode(dataset)))
+    }
+
     @Test
     fun SilverDataRoundTripsTaggedClaimsAndProcessingMetadata() {
         val source = "source-1"

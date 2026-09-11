@@ -39,68 +39,91 @@ internal suspend fun extractSilver(
     source: BronzeTextSource,
 ): ExtractedSilver {
     val refinementStartedAt = SystemClock.elapsedRealtime()
-    val entities = linkedMapOf<String, SilverEntity>()
-    val claims = linkedMapOf<String, SilverClaim>()
-    var usedModel: AiModelMetadata? = null
     val chunks = deterministicTextChunks(source.text)
     Log.i(
         SILVER_LOG_TAG,
         "refinement started sourceType=${source.sourceType} bytes=${source.text.toByteArray().size} chunks=${chunks.size}",
     )
-    chunks.forEachIndexed { index, chunk ->
-        Log.i(
-            SILVER_LOG_TAG,
-            "AI request started chunk=${index + 1}/${chunks.size} bytes=${chunk.toByteArray().size}",
-        )
-        val response = collectExtractionResponse(
-            runtime,
-            SourceAiRequest(
-                conversationId = "silver:${source.id}:$index",
-                messages = listOf(
-                    SourceAiMessage(
-                        SourceAiRole.USER,
-                        listOf(SourceAiContent.Text(extractionPrompt(chunk))),
-                    ),
-                ),
-                workload = SourceAiWorkload.BACKGROUND,
-            ),
-        )
-        Log.i(
-            SILVER_LOG_TAG,
-            "AI response received chunk=${index + 1}/${chunks.size} durationMs=${response.durationMillis} " +
-                "firstTokenMs=${response.firstTokenMillis ?: -1} inputTokens=${response.inputTokens ?: -1} " +
-                "outputTokens=${response.outputTokens ?: -1} outputChars=${response.text.length} " +
-                "reasoningBytes=${response.reasoningBytes ?: -1} finishReason=${response.finishReason}",
-        )
-        val model = response.model ?: error("The AI runtime did not identify the model used")
-        check(usedModel == null || usedModel == model) { "The AI runtime changed while refining one Bronze item" }
-        usedModel = model
-        val parseStartedAt = SystemClock.elapsedRealtime()
-        val parsed = try {
-            parseExtraction(response.text, chunk, source.id)
-        } catch (error: Exception) {
-            Log.w(
-                SILVER_LOG_TAG,
-                "response parse failed chunk=${index + 1}/${chunks.size} durationMs=${SystemClock.elapsedRealtime() - parseStartedAt} " +
-                    "outputChars=${response.text.length} error=${error.javaClass.simpleName}",
-            )
-            throw error
-        }
-        Log.i(
-            SILVER_LOG_TAG,
-            "response parsed chunk=${index + 1}/${chunks.size} durationMs=${SystemClock.elapsedRealtime() - parseStartedAt} " +
-                "rawEntities=${parsed.rawEntityCount} entities=${parsed.entities.size} " +
-                "rawClaims=${parsed.rawClaimCount} claims=${parsed.claims.size}",
-        )
-        parsed.entities.forEach { entities.putIfAbsent(it.id, it) }
-        parsed.claims.forEach { claim -> claims.putIfAbsent(claimIdentity(claim), claim) }
-    }
+    val extracted = chunks.mapIndexed { index, chunk ->
+        extractSilverBatch(runtime, source, chunk, index, chunks.size)
+    }.let(::combineSilverBatches)
     Log.i(
         SILVER_LOG_TAG,
         "refinement finished durationMs=${SystemClock.elapsedRealtime() - refinementStartedAt} " +
-            "entities=${entities.size} claims=${claims.size}",
+            "entities=${extracted.entities.size} claims=${extracted.claims.size}",
     )
-    return ExtractedSilver(entities.values.toList(), claims.values.toList(), checkNotNull(usedModel))
+    return extracted
+}
+
+internal suspend fun extractSilverBatch(
+    runtime: SourceAiRuntime,
+    source: BronzeTextSource,
+    chunk: String,
+    batchIndex: Int,
+    totalBatches: Int,
+): ExtractedSilver {
+    require(batchIndex in 0 until totalBatches)
+    Log.i(
+        SILVER_LOG_TAG,
+        "AI request started chunk=${batchIndex + 1}/$totalBatches bytes=${chunk.toByteArray().size}",
+    )
+    val response = collectExtractionResponse(
+        runtime,
+        SourceAiRequest(
+            conversationId = "silver:${source.id}:$batchIndex",
+            messages = listOf(
+                SourceAiMessage(
+                    SourceAiRole.USER,
+                    listOf(SourceAiContent.Text(extractionPrompt(chunk))),
+                ),
+            ),
+            workload = SourceAiWorkload.BACKGROUND,
+        ),
+    )
+    Log.i(
+        SILVER_LOG_TAG,
+        "AI response received chunk=${batchIndex + 1}/$totalBatches durationMs=${response.durationMillis} " +
+            "firstTokenMs=${response.firstTokenMillis ?: -1} inputTokens=${response.inputTokens ?: -1} " +
+            "outputTokens=${response.outputTokens ?: -1} outputChars=${response.text.length} " +
+            "reasoningBytes=${response.reasoningBytes ?: -1} finishReason=${response.finishReason}",
+    )
+    val parseStartedAt = SystemClock.elapsedRealtime()
+    val parsed = try {
+        parseExtraction(response.text, chunk, source.id)
+    } catch (error: Exception) {
+        Log.w(
+            SILVER_LOG_TAG,
+            "response parse failed chunk=${batchIndex + 1}/$totalBatches " +
+                "durationMs=${SystemClock.elapsedRealtime() - parseStartedAt} " +
+                "outputChars=${response.text.length} error=${error.javaClass.simpleName}",
+        )
+        throw error
+    }
+    Log.i(
+        SILVER_LOG_TAG,
+        "response parsed chunk=${batchIndex + 1}/$totalBatches " +
+            "durationMs=${SystemClock.elapsedRealtime() - parseStartedAt} " +
+            "rawEntities=${parsed.rawEntityCount} entities=${parsed.entities.size} " +
+            "rawClaims=${parsed.rawClaimCount} claims=${parsed.claims.size}",
+    )
+    return ExtractedSilver(
+        parsed.entities,
+        parsed.claims,
+        response.model ?: error("The AI runtime did not identify the model used"),
+    )
+}
+
+internal fun combineSilverBatches(batches: List<ExtractedSilver>): ExtractedSilver {
+    require(batches.isNotEmpty())
+    val model = batches.first().model
+    require(batches.all { it.model == model }) { "The AI runtime changed while refining one Bronze item" }
+    val entities = linkedMapOf<String, SilverEntity>()
+    val claims = linkedMapOf<String, SilverClaim>()
+    batches.forEach { batch ->
+        batch.entities.forEach { entities.putIfAbsent(it.id, it) }
+        batch.claims.forEach { claim -> claims.putIfAbsent(claimIdentity(claim), claim) }
+    }
+    return ExtractedSilver(entities.values.toList(), claims.values.toList(), model)
 }
 
 internal fun deterministicTextChunks(text: String, maximumUtf8Bytes: Int = MAXIMUM_CHUNK_UTF8_BYTES): List<String> {

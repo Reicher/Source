@@ -193,7 +193,7 @@ object SilverData : SourceData<SilverDataset> {
         }
     }
 
-    private fun encodeResult(result: SilverResult) = JSONObject().apply {
+    internal fun encodeResult(result: SilverResult) = JSONObject().apply {
         put("bronzeSourceId", result.bronzeSourceId)
         put("bronzeContentSha256", result.bronzeContentSha256)
         put("modelId", result.modelId)
@@ -226,7 +226,7 @@ object SilverData : SourceData<SilverDataset> {
         claim.evidenceExcerpt?.let { put("evidenceExcerpt", it) }
     }
 
-    private fun decodeResult(value: JSONObject): SilverResult {
+    internal fun decodeResult(value: JSONObject): SilverResult {
         val entities = value.getJSONArray("entities")
         val claims = value.getJSONArray("claims")
         return SilverResult(

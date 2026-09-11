@@ -110,4 +110,35 @@ class LibraryScreenTest {
         assertEquals(LibrarySyncState.LOCAL_AND_SYNCED, presented.syncState)
         assertEquals(LibrarySyncState.FAILED, presented.silverSyncState)
     }
+
+    @Test
+    fun `Silver batch progress is presented independently from the sync icon`() {
+        val item = LibraryUiItem(
+            id = "source-1",
+            filename = "contacts.csv",
+            sourceType = "file",
+            mimeType = "text/csv",
+            byteCount = 60_000,
+            createdAtMillis = 100,
+            syncState = LibrarySyncState.LOCAL_AND_SYNCED,
+            localAvailable = true,
+            nodeAvailable = true,
+            canRemoveFromDevice = true,
+            canDeleteFromSource = true,
+            previewKind = LibraryPreviewKind.TEXT,
+        )
+
+        val presented = withSilverState(
+            LibraryUiState(listOf(item)),
+            SilverUiState(
+                processing = mapOf(item.id to SilverProcessingState.PROCESSING),
+                progress = mapOf(item.id to SilverBatchProgress(7, 25)),
+                refinementPaused = true,
+            ),
+        )
+
+        assertEquals(LibrarySyncState.LOCAL_AND_SYNCED, presented.items.single().syncState)
+        assertEquals(SilverBatchProgress(7, 25), presented.items.single().silverProgress)
+        assertEquals(true, presented.silverRefinementPaused)
+    }
 }

@@ -378,13 +378,19 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
 
     fun clearLibraryFeedback() = libraryController.clearFeedback()
 
+    fun pauseSilverRefinement() = silverController.pauseRefinement()
+
+    fun resumeSilverRefinement() = silverController.resumeRefinement()
+
     fun onForeground() {
         foreground = true
+        silverController.resumeAfterBackground()
         nodeConnection.onForeground()
     }
 
     fun onBackground() {
         foreground = false
+        silverController.pauseForBackground()
         pairingJob?.cancel()
         nodeConnection.onBackground()
     }

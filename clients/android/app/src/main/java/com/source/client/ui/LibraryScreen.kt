@@ -76,6 +76,8 @@ internal fun LibraryScreen(
     onDeleteFromSource: (String) -> Unit,
     onOpen: (String) -> Unit,
     onFeedbackShown: () -> Unit,
+    onPauseRefinement: () -> Unit,
+    onResumeRefinement: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -112,6 +114,36 @@ internal fun LibraryScreen(
             }
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
+                if (state.silverRefinementPaused || state.items.any { it.silverProcessing != null }) {
+                    item(key = "refinement-control") {
+                        Row(
+                            Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                stringResource(
+                                    if (state.silverRefinementPaused) {
+                                        R.string.knowledge_refinement_paused
+                                    } else {
+                                        R.string.knowledge_refinement_running
+                                    },
+                                ),
+                                modifier = Modifier.weight(1f),
+                                color = Ink.copy(alpha = .65f),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            TextButton(
+                                onClick = if (state.silverRefinementPaused) {
+                                    onResumeRefinement
+                                } else {
+                                    onPauseRefinement
+                                },
+                            ) {
+                                Text(stringResource(if (state.silverRefinementPaused) R.string.resume else R.string.pause))
+                            }
+                        }
+                    }
+                }
                 if (state.importing) {
                     item(key = "importing") {
                         Row(
@@ -219,7 +251,23 @@ private fun LibraryItemRow(
             )
             Spacer(Modifier.width(10.dp))
             if (item.silverProcessing == SilverProcessingState.PROCESSING) {
-                CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp, color = Moss.copy(alpha = .68f))
+                val progress = item.silverProgress
+                if (progress == null) {
+                    CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp, color = Moss.copy(alpha = .68f))
+                } else {
+                    CircularProgressIndicator(
+                        progress = { progress.completedBatches.toFloat() / progress.totalBatches },
+                        modifier = Modifier.size(15.dp),
+                        strokeWidth = 1.5.dp,
+                        color = Moss.copy(alpha = .68f),
+                    )
+                    Spacer(Modifier.width(5.dp))
+                    Text(
+                        "${progress.completedBatches}/${progress.totalBatches}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Ink.copy(alpha = .55f),
+                    )
+                }
                 Spacer(Modifier.width(7.dp))
             } else if (item.silverSyncState == LibrarySyncState.FAILED) {
                 Icon(
@@ -239,6 +287,16 @@ private fun LibraryItemRow(
                 DetailLine(stringResource(R.string.library_stored), storageLabel(item))
                 if (item.syncState == LibrarySyncState.SYNCING || item.syncState == LibrarySyncState.FAILED) {
                     DetailLine(stringResource(R.string.library_sync_status), syncLabel(item.syncState))
+                }
+                item.silverProgress?.let { progress ->
+                    DetailLine(
+                        stringResource(R.string.knowledge_refinement),
+                        stringResource(
+                            R.string.knowledge_refinement_batches,
+                            progress.completedBatches,
+                            progress.totalBatches,
+                        ),
+                    )
                 }
                 item.silverSyncState?.let { silverSync ->
                     DetailLine(stringResource(R.string.knowledge_sync_status), syncLabel(silverSync))

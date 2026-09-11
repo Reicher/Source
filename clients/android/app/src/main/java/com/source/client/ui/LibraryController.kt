@@ -59,6 +59,7 @@ data class LibraryUiItem(
     val canDeleteFromSource: Boolean,
     val previewKind: LibraryPreviewKind?,
     val silverProcessing: SilverProcessingState? = null,
+    val silverProgress: SilverBatchProgress? = null,
     val silverSyncState: LibrarySyncState? = null,
 )
 
@@ -66,6 +67,7 @@ data class LibraryUiState(
     val items: List<LibraryUiItem> = emptyList(),
     val importing: Boolean = false,
     val feedback: String? = null,
+    val silverRefinementPaused: Boolean = false,
 )
 
 internal class LibraryController(
@@ -411,6 +413,7 @@ internal fun withConversationLibraryItems(
 )
 
 internal fun withSilverState(library: LibraryUiState, silver: SilverUiState): LibraryUiState = library.copy(
+    silverRefinementPaused = silver.refinementPaused,
     items = library.items.map { item ->
         item.copy(
             silverSyncState = when (item.id) {
@@ -424,6 +427,7 @@ internal fun withSilverState(library: LibraryUiState, silver: SilverUiState): Li
                 }
             },
             silverProcessing = silver.processing[item.id],
+            silverProgress = silver.progress[item.id],
         )
     },
 )
