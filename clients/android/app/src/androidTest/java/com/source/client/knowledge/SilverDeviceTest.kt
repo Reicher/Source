@@ -70,7 +70,7 @@ class SilverDeviceTest {
 
             override fun stream(request: SourceAiRequest): Flow<SourceAiEvent> = flowOf(
                 SourceAiEvent.Started(request.runId, model),
-                SourceAiEvent.Delta(request.runId, 0, """{"entities":[{"key":"e1","name":"Source","type":"Project"},{"key":"e2","name":"Berlin","type":"Place"}],"claims":[{"subjectKey":"e1","predicate":"based-in","objectKey":"e2","confidence":0.9,"evidenceExcerpt":"Source is based in Berlin"},{"subjectKey":"e1","predicate":"status","value":"active","confidence":0.8,"evidenceExcerpt":"invented evidence"}]}"""),
+                SourceAiEvent.Delta(request.runId, 0, """{"entities":[{"key":"e1","name":"Source","type":"Project"},{"key":"e2","name":"Berlin","type":"Place"}],"claims":[{"subjectKey":"e1","predicate":"based-in","objectKey":"e2","confidence":0.9,"evidenceExcerpt":"Source is based in Berlin"},{"subjectKey":"e1","predicate":"status","value":"active","confidence":0.8,"evidenceExcerpt":"invented evidence"},{"subjectKey":"e1","predicate":"created-in","value":"e2","confidence":0.7},{"subjectKey":"e1","predicate":"bad-reference","value":"e9","confidence":0.7}]}"""),
                 SourceAiEvent.Completed(request.runId, "stop"),
             )
         }
@@ -83,6 +83,9 @@ class SilverDeviceTest {
         assertEquals(setOf(entityId("project", "Source"), entityId("place", "Berlin")), extracted.entities.map { it.id }.toSet())
         assertEquals("Source is based in Berlin", extracted.claims.first().evidenceExcerpt)
         assertEquals(null, extracted.claims.last().evidenceExcerpt)
+        assertEquals(3, extracted.claims.size)
+        assertEquals(entityId("place", "Berlin"), extracted.claims[2].objectEntityId)
+        assertEquals(null, extracted.claims[2].value)
     }
 
     @Test

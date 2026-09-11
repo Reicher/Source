@@ -23,7 +23,7 @@ func TestLlamaStreamsOnlyVisibleContent(t *testing.T) {
 			t.Error(e)
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hidden\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"!\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hidden\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"!\"},\"finish_reason\":\"stop\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n"))
 	}))
 	defer server.Close()
 	client := New(config.Config{AIBackendURL: server.URL, AIModel: "source-model", AIParameterCount: 123, AIMaximumOutputTokens: 2048, AITimeout: time.Second})
@@ -39,7 +39,7 @@ func TestLlamaStreamsOnlyVisibleContent(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if len(events) != 3 || events[0].Text != "Hello" || events[1].Text != "!" || events[2].Type != "completed" || events[2].FinishReason != "stop" {
+	if len(events) != 3 || events[0].Text != "Hello" || events[1].Text != "!" || events[2].Type != "completed" || events[2].FinishReason != "stop" || events[2].InputTokens != 12 || events[2].OutputTokens != 3 || events[2].ReasoningBytes != 6 {
 		t.Fatalf("unexpected events: %#v", events)
 	}
 	if _, ok := request["system"]; ok {
@@ -47,6 +47,10 @@ func TestLlamaStreamsOnlyVisibleContent(t *testing.T) {
 	}
 	if request["stream"] != true {
 		t.Fatal("streaming was not requested")
+	}
+	streamOptions, ok := request["stream_options"].(map[string]any)
+	if !ok || streamOptions["include_usage"] != true {
+		t.Fatal("streaming token usage was not requested")
 	}
 }
 

@@ -1,11 +1,14 @@
 package com.source.client.ui
 
+import android.os.SystemClock
+import android.util.Log
 import com.source.client.ai.AiRuntimeRouter
 import com.source.client.ai.LOCAL_AI_MODEL
 import com.source.client.knowledge.BronzeTextSource
 import com.source.client.knowledge.extractSilver
 import com.source.client.model.AiModelMetadata
 import com.source.client.model.ConnectedNode
+import com.source.client.protocol.SourceApiException
 import com.source.client.security.VaultSession
 import com.source.client.storage.SilverData
 import com.source.client.storage.SilverDataset
@@ -109,6 +112,10 @@ internal class SilverController(
         val activeSession = session() ?: return
         val connected = connectedNode() ?: return
         val affected = state.pendingSync
+        val syncStartedAt = SystemClock.elapsedRealtime()
+        if (affected.isNotEmpty()) {
+            Log.i(SILVER_LOG_TAG, "Silver sync started items=${affected.size}")
+        }
         if (affected.isNotEmpty()) {
             state = state.copy(syncing = affected, syncFailed = state.syncFailed - affected)
             publish()
@@ -121,6 +128,18 @@ internal class SilverController(
             state.copy(pendingSync = emptySet(), syncing = emptySet(), syncFailed = emptySet())
         } else {
             state.copy(syncing = emptySet(), syncFailed = state.syncFailed + affected)
+        }
+        if (affected.isNotEmpty()) {
+            val error = sync.lastError
+            if (sync.isBackedUp) {
+                Log.i(SILVER_LOG_TAG, "Silver sync finished durationMs=${SystemClock.elapsedRealtime() - syncStartedAt}")
+            } else {
+                Log.w(
+                    SILVER_LOG_TAG,
+                    "Silver sync failed durationMs=${SystemClock.elapsedRealtime() - syncStartedAt} " +
+                        "error=${syncErrorSummary(error)}",
+                )
+            }
         }
         publish()
         refresh()
@@ -179,6 +198,11 @@ internal class SilverController(
                     processing = state.processing + (source.id to SilverProcessingState.PROCESSING),
                 )
                 publish()
+                Log.i(
+                    SILVER_LOG_TAG,
+                    "refinement candidate started sourceType=${source.sourceType} " +
+                        "bytes=${source.text.toByteArray(Charsets.UTF_8).size}",
+                )
                 val extracted = extractSilver(aiRuntime, source)
                 val currentSource = bronzeSources().firstOrNull { it.id == source.id }
                 if (currentSource?.contentSha256 != source.contentSha256) {
@@ -204,7 +228,11 @@ internal class SilverController(
             }
         } catch (error: CancellationException) {
             throw error
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            Log.w(
+                SILVER_LOG_TAG,
+                "refinement failed error=${syncErrorSummary(error)}; retryMs=$RETRY_DELAY_MILLIS",
+            )
             state = state.copy(
                 processing = state.processing.mapValues { (_, value) ->
                     if (value == SilverProcessingState.PROCESSING) SilverProcessingState.QUEUED else value
@@ -219,6 +247,7 @@ internal class SilverController(
 
     private suspend fun commit(result: SilverResult) {
         val activeSession = session() ?: return
+        val storeStartedAt = SystemClock.elapsedRealtime()
         val now = nextModifiedAt()
         state = state.copy(
             dataset = state.dataset.copy(
@@ -231,6 +260,11 @@ internal class SilverController(
         )
         sync.changed()
         sync.persist(activeSession, state.dataset)
+        Log.i(
+            SILVER_LOG_TAG,
+            "Silver stored durationMs=${SystemClock.elapsedRealtime() - storeStartedAt} " +
+                "entities=${result.entities.size} claims=${result.claims.size}",
+        )
         publish()
         synchronize()
     }
@@ -267,9 +301,16 @@ internal class SilverController(
     }
 
     companion object {
-        const val PROCESSOR_VERSION = 1
+        const val PROCESSOR_VERSION = 2
         private const val RETRY_DELAY_MILLIS = 30_000L
+        private const val SILVER_LOG_TAG = "SourceSilver"
     }
+}
+
+private fun syncErrorSummary(error: Exception?): String = when (error) {
+    is SourceApiException -> "SourceApiException:${error.code}"
+    null -> "unknown"
+    else -> error.javaClass.simpleName
 }
 
 internal fun needsSilverRefinement(

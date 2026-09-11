@@ -59,6 +59,7 @@ data class LibraryUiItem(
     val canDeleteFromSource: Boolean,
     val previewKind: LibraryPreviewKind?,
     val silverProcessing: SilverProcessingState? = null,
+    val silverSyncState: LibrarySyncState? = null,
 )
 
 data class LibraryUiState(
@@ -412,11 +413,15 @@ internal fun withConversationLibraryItems(
 internal fun withSilverState(library: LibraryUiState, silver: SilverUiState): LibraryUiState = library.copy(
     items = library.items.map { item ->
         item.copy(
-            syncState = when (item.id) {
+            silverSyncState = when (item.id) {
                 in silver.syncing -> LibrarySyncState.SYNCING
                 in silver.syncFailed -> LibrarySyncState.FAILED
                 in silver.pendingSync -> LibrarySyncState.LOCAL_ONLY
-                else -> item.syncState
+                else -> if (silver.dataset.results.any { it.bronzeSourceId == item.id }) {
+                    LibrarySyncState.LOCAL_AND_SYNCED
+                } else {
+                    null
+                }
             },
             silverProcessing = silver.processing[item.id],
         )

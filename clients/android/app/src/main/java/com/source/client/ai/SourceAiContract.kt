@@ -49,6 +49,7 @@ sealed interface SourceAiEvent {
         val finishReason: String,
         val inputTokens: Int? = null,
         val outputTokens: Int? = null,
+        val reasoningBytes: Int? = null,
     ) : SourceAiEvent
     data class Failed(override val runId: String, val code: String, val retryable: Boolean) : SourceAiEvent
 }

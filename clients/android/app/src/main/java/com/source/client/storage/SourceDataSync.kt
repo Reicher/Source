@@ -24,6 +24,10 @@ class SourceDataSync<T>(
     var recoveryRestorePending = false
         private set
 
+    @Volatile
+    var lastError: Exception? = null
+        private set
+
     val isBackedUp: Boolean
         get() = !backupDirty
 
@@ -31,6 +35,7 @@ class SourceDataSync<T>(
         backupDirty = true
         recoveryRestorePending = false
         localRevision = 0L
+        lastError = null
     }
 
     fun changed() {
@@ -64,6 +69,7 @@ class SourceDataSync<T>(
         applyRemote: (T) -> Unit,
     ) = mutex.withLock {
         if (session == null || connected == null) return@withLock
+        lastError = null
         val revisionBeforeDownload = localRevision
         try {
             val remoteSnapshot = nodeApi.latestSnapshot(
@@ -121,7 +127,8 @@ class SourceDataSync<T>(
             }
         } catch (error: CancellationException) {
             throw error
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            lastError = error
             backupDirty = true
         }
     }
@@ -168,10 +175,12 @@ class SourceDataSync<T>(
                 UUID.randomUUID().toString(),
                 snapshot,
             )
+            lastError = null
             if (localRevision == uploadedRevision) backupDirty = false
         } catch (error: CancellationException) {
             throw error
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            lastError = error
             backupDirty = true
         } finally {
             if (encryptionKey !== session.key) encryptionKey.fill(0)

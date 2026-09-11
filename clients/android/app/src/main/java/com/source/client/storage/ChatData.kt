@@ -49,9 +49,10 @@ object ChatData : SourceData<ChatConversations> {
         .digest(encodeConversation(conversation).toString().toByteArray(Charsets.UTF_8))
         .joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
 
-    fun refinementText(conversation: ChatConversation): String = conversation.messages.joinToString("\n\n") { message ->
-        "${message.role.apiValue.replaceFirstChar(Char::uppercaseChar)}: ${message.content}"
-    }
+    /** User-authored statements are Bronze knowledge; generated assistant replies are not re-ingested as facts. */
+    fun refinementText(conversation: ChatConversation): String = conversation.messages
+        .filter { it.role == ChatRole.USER }
+        .joinToString("\n\n") { "User: ${it.content}" }
 
     override fun decode(value: ByteArray): ChatConversations {
         val root = JSONObject(value.toString(Charsets.UTF_8))

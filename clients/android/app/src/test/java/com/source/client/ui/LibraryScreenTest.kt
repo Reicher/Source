@@ -84,4 +84,30 @@ class LibraryScreenTest {
         assertEquals(null, previewKind("image/jpeg", "photo.jpg"))
         assertEquals(null, previewKind("application/pdf", "document.pdf"))
     }
+
+    @Test
+    fun `Silver backup failure does not replace successful Bronze sync state`() {
+        val item = LibraryUiItem(
+            id = "source-1",
+            filename = "notes.txt",
+            sourceType = "file",
+            mimeType = "text/plain",
+            byteCount = 100,
+            createdAtMillis = 100,
+            syncState = LibrarySyncState.LOCAL_AND_SYNCED,
+            localAvailable = true,
+            nodeAvailable = true,
+            canRemoveFromDevice = true,
+            canDeleteFromSource = true,
+            previewKind = LibraryPreviewKind.TEXT,
+        )
+
+        val presented = withSilverState(
+            LibraryUiState(listOf(item)),
+            SilverUiState(syncFailed = setOf(item.id)),
+        ).items.single()
+
+        assertEquals(LibrarySyncState.LOCAL_AND_SYNCED, presented.syncState)
+        assertEquals(LibrarySyncState.FAILED, presented.silverSyncState)
+    }
 }

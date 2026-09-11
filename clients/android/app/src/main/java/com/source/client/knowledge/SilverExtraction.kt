@@ -1,5 +1,7 @@
 package com.source.client.knowledge
 
+import android.os.SystemClock
+import android.util.Log
 import com.source.client.ai.SourceAiContent
 import com.source.client.ai.SourceAiEvent
 import com.source.client.ai.SourceAiMessage
@@ -36,10 +38,20 @@ internal suspend fun extractSilver(
     runtime: SourceAiRuntime,
     source: BronzeTextSource,
 ): ExtractedSilver {
+    val refinementStartedAt = SystemClock.elapsedRealtime()
     val entities = linkedMapOf<String, SilverEntity>()
     val claims = linkedMapOf<String, SilverClaim>()
     var usedModel: AiModelMetadata? = null
-    deterministicTextChunks(source.text).forEachIndexed { index, chunk ->
+    val chunks = deterministicTextChunks(source.text)
+    Log.i(
+        SILVER_LOG_TAG,
+        "refinement started sourceType=${source.sourceType} bytes=${source.text.toByteArray().size} chunks=${chunks.size}",
+    )
+    chunks.forEachIndexed { index, chunk ->
+        Log.i(
+            SILVER_LOG_TAG,
+            "AI request started chunk=${index + 1}/${chunks.size} bytes=${chunk.toByteArray().size}",
+        )
         val response = collectExtractionResponse(
             runtime,
             SourceAiRequest(
@@ -53,13 +65,41 @@ internal suspend fun extractSilver(
                 workload = SourceAiWorkload.BACKGROUND,
             ),
         )
+        Log.i(
+            SILVER_LOG_TAG,
+            "AI response received chunk=${index + 1}/${chunks.size} durationMs=${response.durationMillis} " +
+                "firstTokenMs=${response.firstTokenMillis ?: -1} inputTokens=${response.inputTokens ?: -1} " +
+                "outputTokens=${response.outputTokens ?: -1} outputChars=${response.text.length} " +
+                "reasoningBytes=${response.reasoningBytes ?: -1} finishReason=${response.finishReason}",
+        )
         val model = response.model ?: error("The AI runtime did not identify the model used")
         check(usedModel == null || usedModel == model) { "The AI runtime changed while refining one Bronze item" }
         usedModel = model
-        val parsed = parseExtraction(response.text, chunk, source.id)
+        val parseStartedAt = SystemClock.elapsedRealtime()
+        val parsed = try {
+            parseExtraction(response.text, chunk, source.id)
+        } catch (error: Exception) {
+            Log.w(
+                SILVER_LOG_TAG,
+                "response parse failed chunk=${index + 1}/${chunks.size} durationMs=${SystemClock.elapsedRealtime() - parseStartedAt} " +
+                    "outputChars=${response.text.length} error=${error.javaClass.simpleName}",
+            )
+            throw error
+        }
+        Log.i(
+            SILVER_LOG_TAG,
+            "response parsed chunk=${index + 1}/${chunks.size} durationMs=${SystemClock.elapsedRealtime() - parseStartedAt} " +
+                "rawEntities=${parsed.rawEntityCount} entities=${parsed.entities.size} " +
+                "rawClaims=${parsed.rawClaimCount} claims=${parsed.claims.size}",
+        )
         parsed.entities.forEach { entities.putIfAbsent(it.id, it) }
         parsed.claims.forEach { claim -> claims.putIfAbsent(claimIdentity(claim), claim) }
     }
+    Log.i(
+        SILVER_LOG_TAG,
+        "refinement finished durationMs=${SystemClock.elapsedRealtime() - refinementStartedAt} " +
+            "entities=${entities.size} claims=${claims.size}",
+    )
     return ExtractedSilver(entities.values.toList(), claims.values.toList(), checkNotNull(usedModel))
 }
 
@@ -105,31 +145,66 @@ internal fun sha256Hex(value: String): String = MessageDigest.getInstance("SHA-2
     .digest(value.toByteArray(Charsets.UTF_8))
     .joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
 
-private data class ExtractionResponse(val text: String, val model: AiModelMetadata?)
+private data class ExtractionResponse(
+    val text: String,
+    val model: AiModelMetadata?,
+    val inputTokens: Int?,
+    val outputTokens: Int?,
+    val reasoningBytes: Int?,
+    val finishReason: String,
+    val durationMillis: Long,
+    val firstTokenMillis: Long?,
+)
 
 private suspend fun collectExtractionResponse(
     runtime: SourceAiRuntime,
     request: SourceAiRequest,
 ): ExtractionResponse {
+    val requestStartedAt = SystemClock.elapsedRealtime()
     val output = StringBuilder()
     var completed = false
     var model: AiModelMetadata? = null
+    var inputTokens: Int? = null
+    var outputTokens: Int? = null
+    var reasoningBytes: Int? = null
+    var finishReason = "unknown"
+    var firstTokenAt: Long? = null
     runtime.stream(request).collect { event ->
         check(event.runId == request.runId) { "The AI runtime returned the wrong run identifier" }
         when (event) {
             is SourceAiEvent.Started -> model = event.model
-            is SourceAiEvent.Delta -> output.append(event.text)
-            is SourceAiEvent.Completed -> completed = true
+            is SourceAiEvent.Delta -> {
+                if (firstTokenAt == null) firstTokenAt = SystemClock.elapsedRealtime()
+                output.append(event.text)
+            }
+            is SourceAiEvent.Completed -> {
+                completed = true
+                inputTokens = event.inputTokens
+                outputTokens = event.outputTokens
+                reasoningBytes = event.reasoningBytes
+                finishReason = event.finishReason
+            }
             is SourceAiEvent.Failed -> error("Silver extraction failed: ${event.code}")
         }
     }
     check(completed && output.isNotBlank()) { "The AI runtime returned an incomplete Silver extraction" }
-    return ExtractionResponse(output.toString().trim(), model)
+    return ExtractionResponse(
+        text = output.toString().trim(),
+        model = model,
+        inputTokens = inputTokens,
+        outputTokens = outputTokens,
+        reasoningBytes = reasoningBytes,
+        finishReason = finishReason,
+        durationMillis = SystemClock.elapsedRealtime() - requestStartedAt,
+        firstTokenMillis = firstTokenAt?.minus(requestStartedAt),
+    )
 }
 
 private data class ParsedExtraction(
     val entities: List<SilverEntity>,
     val claims: List<SilverClaim>,
+    val rawEntityCount: Int,
+    val rawClaimCount: Int,
 )
 
 private fun parseExtraction(raw: String, bronzeChunk: String, bronzeSourceId: String): ParsedExtraction {
@@ -153,9 +228,16 @@ private fun parseExtraction(raw: String, bronzeChunk: String, bronzeSourceId: St
         val subject = entitiesByKey[value.optString("subjectKey")] ?: return@repeat
         val predicate = cleanInline(value.optString("predicate"), 100)
         if (predicate.isEmpty()) return@repeat
-        val objectEntity = value.optString("objectKey").takeIf(String::isNotBlank)?.let(entitiesByKey::get)
-        val scalar = if (objectEntity == null && value.has("value") && !value.isNull("value")) {
-            parseScalar(value.opt("value"))
+        val rawScalar = value.opt("value").takeUnless { it == null || it == JSONObject.NULL }
+        val scalarEntityKey = (rawScalar as? String)?.trim()?.takeIf(entitiesByKey::containsKey)
+        val requestedObjectKey = value.optString("objectKey").trim().takeIf(String::isNotEmpty)
+        val objectEntity = (requestedObjectKey ?: scalarEntityKey)?.let(entitiesByKey::get)
+        if (requestedObjectKey != null && objectEntity == null) return@repeat
+        if (objectEntity == null && rawScalar is String && LOCAL_ENTITY_KEY_PATTERN.matches(rawScalar.trim())) {
+            return@repeat
+        }
+        val scalar = if (objectEntity == null) {
+            parseScalar(rawScalar)
         } else {
             null
         }
@@ -181,6 +263,8 @@ private fun parseExtraction(raw: String, bronzeChunk: String, bronzeSourceId: St
     return ParsedExtraction(
         entities = entitiesByKey.values.filter { it.id in referencedIds }.distinctBy(SilverEntity::id),
         claims = claims,
+        rawEntityCount = rawEntities.length(),
+        rawClaimCount = rawClaims.length(),
     )
 }
 
@@ -192,9 +276,10 @@ private fun parseScalar(value: Any?): SilverScalarValue? = when (value) {
 }
 
 private fun extractionPrompt(chunk: String): String = """
-    Extract entities and factual claims from the Bronze text below. Return JSON only, with this shape:
-    {"entities":[{"key":"e1","name":"Source","type":"project"}],"claims":[{"subjectKey":"e1","predicate":"uses","objectKey":"e2","confidence":0.9,"evidenceExcerpt":"exact short excerpt"},{"subjectKey":"e1","predicate":"status","value":"active","confidence":0.8,"evidenceExcerpt":"exact short excerpt"}]}
-    Entity keys are local to this response. Every claim must use exactly one of objectKey or value. Values may be strings, numbers, or booleans. Types and predicates should be short lowercase labels. Extract only claims supported by the text. Keep evidence excerpts verbatim and under 240 characters. If nothing useful exists, return empty arrays.
+    Extract entities and factual claims from the Bronze text below. Return compact JSON only, with this shape:
+    {"entities":[{"key":"e1","name":"Robin","type":"person"},{"key":"e2","name":"Source","type":"project"}],"claims":[{"subjectKey":"e1","predicate":"created","objectKey":"e2","confidence":0.95,"evidenceExcerpt":"Robin created Source"},{"subjectKey":"e2","predicate":"status","value":"active","confidence":0.8,"evidenceExcerpt":"Source is active"}]}
+    Entity keys are local references, never literal claim values. Every subjectKey and objectKey must match an entity declared in the same response. Use objectKey for relationships between named people, places, organizations, projects, technologies, and other entities. Use value only for actual scalar text, numbers, or booleans, never for strings like "e1" or "e2". Every claim must have exactly one of objectKey or value.
+    Capture each useful explicit fact and relationship once; do not stop after only a few claims when the text contains more. Include explicit family, location, work, education/background, interests, ownership/creation, and project-purpose relationships when present. Do not infer unstated facts or turn suggestions, questions, possibilities, or general observations into facts. Types and predicates should be short lowercase labels. Keep evidence excerpts verbatim, short, and under 240 characters when practical. If nothing useful exists, return empty arrays.
 
     Bronze text:
     $chunk
@@ -225,3 +310,5 @@ private fun claimIdentity(claim: SilverClaim): String = listOf(
 ).joinToString("\u0000")
 
 private const val MAXIMUM_CHUNK_UTF8_BYTES = 2_400
+private const val SILVER_LOG_TAG = "SourceSilver"
+private val LOCAL_ENTITY_KEY_PATTERN = Regex("(?i)^e\\d{1,4}$")

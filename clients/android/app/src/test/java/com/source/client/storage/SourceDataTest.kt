@@ -75,6 +75,24 @@ class SourceDataTest {
         )
     }
 
+    @Test
+    fun `Silver refinement uses user authored conversation text only`() {
+        val conversation = ChatConversation(
+            id = "conversation",
+            createdAtMillis = 100,
+            messages = listOf(
+                ChatMessage("user-1", ChatRole.USER, "Robin lives in Stockholm.", 101),
+                ChatMessage("assistant-1", ChatRole.ASSISTANT, "Perhaps Source should use Ollama.", 102),
+                ChatMessage("user-2", ChatRole.USER, "Robin created Source.", 103),
+            ),
+        )
+
+        assertEquals(
+            "User: Robin lives in Stockholm.\n\nUser: Robin created Source.",
+            ChatData.refinementText(conversation),
+        )
+    }
+
     private fun conversations(content: String, createdAtMillis: Long): ChatConversations {
         val conversation = ChatConversation(
             id = "conversation-$content",

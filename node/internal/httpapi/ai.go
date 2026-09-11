@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	localai "source.local/node/internal/ai"
 	"source.local/node/internal/apperror"
@@ -67,13 +68,28 @@ func (h *Handler) streamAI(w http.ResponseWriter, r *http.Request, session *auth
 		"modelId": capabilities["modelId"], "parameterCount": capabilities["parameterCount"],
 	})
 	sequence := 0
+	startedAt := time.Now()
+	inputBytes := 0
+	for _, message := range messages {
+		inputBytes += len(message.Content)
+	}
+	inputTokens := 0
+	outputTokens := 0
+	reasoningBytes := 0
 	err = h.ai.StreamChat(r.Context(), messages, func(event localai.Event) error {
 		if event.Type == "delta" {
 			defer func() { sequence++ }()
 			return emit(map[string]any{"type": "delta", "runId": body.RunID, "sequence": sequence, "text": event.Text})
 		}
 		if event.Type == "completed" {
-			return emit(map[string]any{"type": "completed", "runId": body.RunID, "finishReason": event.FinishReason})
+			inputTokens = event.InputTokens
+			outputTokens = event.OutputTokens
+			reasoningBytes = event.ReasoningBytes
+			completed := map[string]any{
+				"type": "completed", "runId": body.RunID, "finishReason": event.FinishReason,
+				"inputTokens": inputTokens, "outputTokens": outputTokens, "reasoningBytes": reasoningBytes,
+			}
+			return emit(completed)
 		}
 		return nil
 	})
@@ -81,6 +97,10 @@ func (h *Handler) streamAI(w http.ResponseWriter, r *http.Request, session *auth
 		h.logger.Printf("streaming local model request failed: %v", err)
 		_ = emit(map[string]any{"type": "failed", "runId": body.RunID, "code": "model_unavailable", "retryable": true})
 	}
+	h.logger.Printf(
+		"AI request finished workload=%s duration=%s inputBytes=%d inputTokens=%d outputTokens=%d reasoningBytes=%d error=%t",
+		body.Workload, time.Since(startedAt).Round(time.Millisecond), inputBytes, inputTokens, outputTokens, reasoningBytes, err != nil,
+	)
 }
 
 func validateAI(body aiRequest) ([]localai.Message, error) {

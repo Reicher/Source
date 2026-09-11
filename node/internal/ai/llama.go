@@ -18,7 +18,10 @@ type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
-type Event struct{ Type, Text, FinishReason string }
+type Event struct {
+	Type, Text, FinishReason                  string
+	InputTokens, OutputTokens, ReasoningBytes int
+}
 type Backend interface {
 	Status(context.Context) bool
 	Capabilities() map[string]any
@@ -66,7 +69,11 @@ func (c *Client) StreamChat(ctx context.Context, messages []Message, yield func(
 	defer cancel()
 	timeout := time.AfterFunc(c.timeout, cancel)
 	defer timeout.Stop()
-	body, e := json.Marshal(map[string]any{"model": c.model, "messages": messages, "stream": true, "temperature": 0.6, "top_p": 0.9, "max_tokens": c.maximumOutputTokens})
+	body, e := json.Marshal(map[string]any{
+		"model": c.model, "messages": messages, "stream": true,
+		"stream_options": map[string]any{"include_usage": true},
+		"temperature":    0.6, "top_p": 0.9, "max_tokens": c.maximumOutputTokens,
+	})
 	if e != nil {
 		return e
 	}
@@ -87,7 +94,10 @@ func (c *Client) StreamChat(ctx context.Context, messages []Message, yield func(
 	scanner := bufio.NewScanner(res.Body)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
 	visible := 0
+	reasoningBytes := 0
 	finish := "stop"
+	inputTokens := 0
+	outputTokens := 0
 	for scanner.Scan() {
 		timeout.Reset(c.timeout)
 		line := scanner.Text()
@@ -99,9 +109,14 @@ func (c *Client) StreamChat(ctx context.Context, messages []Message, yield func(
 			continue
 		}
 		var payload struct {
+			Usage struct {
+				PromptTokens     int `json:"prompt_tokens"`
+				CompletionTokens int `json:"completion_tokens"`
+			} `json:"usage"`
 			Choices []struct {
 				Delta struct {
-					Content any `json:"content"`
+					Content          any `json:"content"`
+					ReasoningContent any `json:"reasoning_content"`
 				} `json:"delta"`
 				FinishReason any `json:"finish_reason"`
 			} `json:"choices"`
@@ -109,10 +124,19 @@ func (c *Client) StreamChat(ctx context.Context, messages []Message, yield func(
 		if e = json.Unmarshal([]byte(data), &payload); e != nil {
 			return e
 		}
+		if payload.Usage.PromptTokens > 0 {
+			inputTokens = payload.Usage.PromptTokens
+		}
+		if payload.Usage.CompletionTokens > 0 {
+			outputTokens = payload.Usage.CompletionTokens
+		}
 		if len(payload.Choices) == 0 {
 			continue
 		}
 		choice := payload.Choices[0]
+		if reasoning, ok := choice.Delta.ReasoningContent.(string); ok {
+			reasoningBytes += len(reasoning)
+		}
 		if text, ok := choice.Delta.Content.(string); ok && text != "" {
 			visible += len(text)
 			if e = yield(Event{Type: "delta", Text: text}); e != nil {
@@ -129,5 +153,8 @@ func (c *Client) StreamChat(ctx context.Context, messages []Message, yield func(
 	if visible == 0 {
 		return errors.New("Model returned an empty response")
 	}
-	return yield(Event{Type: "completed", FinishReason: finish})
+	return yield(Event{
+		Type: "completed", FinishReason: finish, InputTokens: inputTokens,
+		OutputTokens: outputTokens, ReasoningBytes: reasoningBytes,
+	})
 }

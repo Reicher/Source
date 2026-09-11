@@ -273,6 +273,9 @@ class SourceNodeApi {
                             "completed" -> SourceAiEvent.Completed(
                                 eventRunId,
                                 event.requiredString("finishReason"),
+                                inputTokens = event.optInt("inputTokens").takeIf { event.has("inputTokens") },
+                                outputTokens = event.optInt("outputTokens").takeIf { event.has("outputTokens") },
+                                reasoningBytes = event.optInt("reasoningBytes").takeIf { event.has("reasoningBytes") },
                             )
                             "failed" -> SourceAiEvent.Failed(
                                 eventRunId,

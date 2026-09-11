@@ -221,6 +221,14 @@ private fun LibraryItemRow(
             if (item.silverProcessing == SilverProcessingState.PROCESSING) {
                 CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp, color = Moss.copy(alpha = .68f))
                 Spacer(Modifier.width(7.dp))
+            } else if (item.silverSyncState == LibrarySyncState.FAILED) {
+                Icon(
+                    Icons.Outlined.SyncProblem,
+                    contentDescription = stringResource(R.string.knowledge_sync_failed),
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.error,
+                )
+                Spacer(Modifier.width(7.dp))
             }
             StatusIcon(item.syncState)
         }
@@ -231,6 +239,9 @@ private fun LibraryItemRow(
                 DetailLine(stringResource(R.string.library_stored), storageLabel(item))
                 if (item.syncState == LibrarySyncState.SYNCING || item.syncState == LibrarySyncState.FAILED) {
                     DetailLine(stringResource(R.string.library_sync_status), syncLabel(item.syncState))
+                }
+                item.silverSyncState?.let { silverSync ->
+                    DetailLine(stringResource(R.string.knowledge_sync_status), syncLabel(silverSync))
                 }
                 Row(
                     Modifier.fillMaxWidth(),
