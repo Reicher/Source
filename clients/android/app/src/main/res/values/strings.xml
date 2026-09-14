@@ -65,6 +65,9 @@
     <string name="done">Done</string>
     <string name="show_recovery_key">Show recovery key</string>
     <string name="sign_out">Sign out</string>
+    <string name="delete_user">Delete user</string>
+    <string name="delete_user_confirmation_title">Delete %1$s?</string>
+    <string name="delete_user_confirmation_message">This permanently deletes this user and all of their data from this phone only. Data on a paired Node is not deleted. This cannot be undone.</string>
     <string name="this_device">This device</string>
     <string name="node">Node</string>
     <string name="connect">Connect</string>
@@ -83,6 +86,7 @@
     <string name="error_password_required">Enter a password.</string>
     <string name="error_passwords_mismatch">The passwords do not match.</string>
     <string name="error_user_creation_failed">The user could not be created on this device.</string>
+    <string name="error_user_deletion_failed">The user and their local data could not be completely deleted. Try again.</string>
     <string name="error_enter_password">Enter your password.</string>
     <string name="error_incorrect_password">Incorrect password.</string>
     <string name="error_source_data_unreadable">Source data could not be read on this device.</string>

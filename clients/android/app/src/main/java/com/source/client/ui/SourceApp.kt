@@ -27,7 +27,12 @@ fun SourceApp(screen: AppScreen, viewModel: SourceViewModel) {
             when (screen) {
                 is AppScreen.Accounts -> AccountsScreen(screen, viewModel::selectProfile, viewModel::showCreateIdentity)
                 is AppScreen.Setup -> SetupScreen(screen, viewModel::createIdentity, viewModel::showAccounts)
-                is AppScreen.Locked -> UnlockScreen(screen, viewModel::unlock, viewModel::showAccounts)
+                is AppScreen.Locked -> UnlockScreen(
+                    screen,
+                    viewModel::unlock,
+                    viewModel::showAccounts,
+                    viewModel::deleteLockedUser,
+                )
                 is AppScreen.Main -> MainScreen(
                     screen,
                     viewModel::scan,
@@ -36,6 +41,7 @@ fun SourceApp(screen: AppScreen, viewModel: SourceViewModel) {
                     viewModel::newConversation,
                     viewModel::cancelInference,
                     viewModel::logout,
+                    viewModel::deleteCurrentUser,
                     viewModel::selectDestination,
                     viewModel::importFile,
                     viewModel::removeLibraryItemFromDevice,

@@ -272,7 +272,43 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun logout() {
+        clearSession()
+        _screen.value = AppScreen.Accounts(app.secureVault.profiles)
+    }
+
+    fun deleteCurrentUser() {
+        val profileId = session?.profileId ?: return
+        val profile = app.secureVault.profiles.firstOrNull { it.id == profileId } ?: return
+        clearSession()
+        deleteLocalProfile(profile)
+    }
+
+    fun deleteLockedUser() {
+        val locked = _screen.value as? AppScreen.Locked ?: return
+        _screen.value = locked.copy(error = null, busy = true)
+        deleteLocalProfile(locked.profile)
+    }
+
+    private fun deleteLocalProfile(profile: VaultProfile) {
+        viewModelScope.launch {
+            val result = runCatching {
+                withContext(Dispatchers.IO) { app.secureVault.deleteProfile(profile.id) }
+            }
+            if (result.isFailure) {
+                _screen.value = AppScreen.Locked(
+                    app.secureVault.profiles.firstOrNull { it.id == profile.id } ?: profile,
+                    error = message(R.string.error_user_deletion_failed),
+                )
+                return@launch
+            }
+            val remainingProfiles = app.secureVault.profiles
+            _screen.value = if (remainingProfiles.isEmpty()) AppScreen.Setup() else AppScreen.Accounts(remainingProfiles)
+        }
+    }
+
+    private fun clearSession() {
         pairingJob?.cancel()
+        pairingJob = null
         chatController.reset()
         silverController.pauseForInteraction()
         nodeConnection.clear()
@@ -284,7 +320,6 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             libraryController.reset()
             silverController.reset()
         }
-        _screen.value = AppScreen.Accounts(app.secureVault.profiles)
     }
 
     fun selectAi(selection: AiSelection) = chatController.selectAi(selection)
