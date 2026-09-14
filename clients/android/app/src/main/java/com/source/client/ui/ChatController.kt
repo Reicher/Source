@@ -11,6 +11,7 @@ import com.source.client.storage.ChatData
 import com.source.client.storage.SourceDataSync
 import com.source.client.model.ConnectedNode
 import com.source.client.model.AiSelection
+import com.source.client.model.ChatConversation
 import com.source.client.model.ChatConversations
 import com.source.client.model.ChatMessage
 import com.source.client.model.ChatRole
@@ -36,8 +37,10 @@ internal class ChatController(
 ) {
     private var inferenceJob: Job? = null
     private var activeRunId: String? = null
-    var conversations = ChatData.emptyValue
-        private set
+    private val conversationState = ChatConversationState()
+
+    val conversations: ChatConversations
+        get() = conversationState.conversations
 
     var state = ChatUiState()
         private set
@@ -50,12 +53,7 @@ internal class ChatController(
         inferenceJob?.cancel()
         inferenceJob = null
         aiRuntime.select(AiSelection.AUTO)
-        conversations = if (startFreshConversation || loaded.activeConversation == null) {
-            loaded.withFreshConversation()
-        } else {
-            loaded
-        }
-        val active = checkNotNull(conversations.activeConversation)
+        val active = conversationState.reset(loaded, startFreshConversation)
         update(
             ChatUiState(
                 conversationId = active.id,
@@ -68,9 +66,8 @@ internal class ChatController(
 
     fun newConversation() {
         if (state.busy) return
-        val activeSession = session() ?: return
-        conversations = conversations.withFreshConversation()
-        val active = checkNotNull(conversations.activeConversation)
+        session() ?: return
+        val active = conversationState.startDraft()
         update(
             state.copy(
                 conversationId = active.id,
@@ -80,31 +77,13 @@ internal class ChatController(
                 error = null,
             ),
         )
-        conversationSync.changed()
-        scope.launch {
-            conversationSync.persist(activeSession, conversations)
-            conversationSync.backupIfNeeded(session(), connectedNode(), conversations)
-            onStateChanged(state)
-        }
     }
 
     fun deleteConversation(conversationId: String) {
         if (state.busy || conversations.conversations.none { it.id == conversationId }) return
         val activeSession = session() ?: return
         val now = System.currentTimeMillis().coerceAtLeast(1)
-        val remaining = conversations.conversations.filterNot { it.id == conversationId }
-        conversations = conversations.copy(
-            conversations = remaining,
-            activeConversationId = when {
-                conversations.activeConversationId != conversationId -> conversations.activeConversationId
-                remaining.isNotEmpty() -> remaining.maxByOrNull { it.createdAtMillis }?.id
-                else -> null
-            },
-            tombstones = conversations.tombstones.filterNot { it.conversationId == conversationId } +
-                ChatConversationTombstone(conversationId, now),
-        )
-        if (conversations.activeConversation == null) conversations = conversations.withFreshConversation()
-        val active = checkNotNull(conversations.activeConversation)
+        val active = checkNotNull(conversationState.delete(conversationId, now))
         conversationSync.changed()
         update(
             state.copy(
@@ -204,7 +183,7 @@ internal class ChatController(
     }
 
     fun applySynchronizedConversations(data: ChatConversations) {
-        applyConversations(data, busy = state.busy)
+        applyConversations(data, busy = state.busy, preserveDraft = true)
     }
 
     fun beginRecoveryRestore() {
@@ -215,7 +194,7 @@ internal class ChatController(
         if (data == null) {
             update(state.copy(busy = false, error = null))
         } else {
-            applyConversations(data, busy = false)
+            applyConversations(data, busy = false, preserveDraft = false)
         }
     }
 
@@ -260,14 +239,12 @@ internal class ChatController(
     }
 
     private fun updateMessages(messages: List<ChatMessage>, next: ChatUiState) {
-        val active = checkNotNull(conversations.activeConversation).copy(messages = messages)
-        conversations = conversations.replaceActive(active)
+        conversationState.updateMessages(messages)
         update(next.copy(messages = messages))
     }
 
-    private fun applyConversations(data: ChatConversations, busy: Boolean) {
-        conversations = if (data.activeConversation == null) data.withFreshConversation() else data
-        val active = checkNotNull(conversations.activeConversation)
+    private fun applyConversations(data: ChatConversations, busy: Boolean, preserveDraft: Boolean) {
+        val active = conversationState.apply(data, preserveDraft)
         update(
             state.copy(
                 conversationId = active.id,
@@ -282,5 +259,79 @@ internal class ChatController(
 
     private companion object {
         const val MAX_MESSAGE_CHARACTERS = 4_000
+    }
+}
+
+/** Keeps an empty UI conversation out of the persisted Bronze dataset until its first message. */
+internal class ChatConversationState {
+    var conversations: ChatConversations = ChatData.emptyValue
+        private set
+
+    var active: ChatConversation = ChatConversation()
+        private set
+
+    private var activeIsDraft = true
+
+    fun reset(loaded: ChatConversations, startFreshConversation: Boolean): ChatConversation {
+        conversations = loaded
+        val stored = loaded.activeConversation.takeUnless { startFreshConversation }
+        active = stored ?: ChatConversation()
+        activeIsDraft = stored == null
+        return active
+    }
+
+    fun startDraft(): ChatConversation {
+        active = ChatConversation()
+        activeIsDraft = true
+        return active
+    }
+
+    fun updateMessages(messages: List<ChatMessage>): ChatConversation {
+        active = active.copy(messages = messages)
+        conversations = if (activeIsDraft) {
+            conversations.copy(
+                conversations = conversations.conversations + active,
+                activeConversationId = active.id,
+            )
+        } else {
+            conversations.copy(
+                conversations = conversations.conversations.map { conversation ->
+                    if (conversation.id == active.id) active else conversation
+                },
+                activeConversationId = active.id,
+            )
+        }
+        activeIsDraft = false
+        return active
+    }
+
+    fun delete(conversationId: String, deletedAtMillis: Long): ChatConversation? {
+        if (conversations.conversations.none { it.id == conversationId }) return null
+        val deletedActiveConversation = !activeIsDraft && active.id == conversationId
+        val remaining = conversations.conversations.filterNot { it.id == conversationId }
+        conversations = conversations.copy(
+            conversations = remaining,
+            activeConversationId = when {
+                conversations.activeConversationId != conversationId -> conversations.activeConversationId
+                else -> remaining.maxByOrNull { it.createdAtMillis }?.id
+            },
+            tombstones = conversations.tombstones.filterNot { it.conversationId == conversationId } +
+                ChatConversationTombstone(conversationId, deletedAtMillis),
+        )
+        if (deletedActiveConversation) {
+            val stored = conversations.activeConversation
+            active = stored ?: ChatConversation()
+            activeIsDraft = stored == null
+        }
+        return active
+    }
+
+    fun apply(data: ChatConversations, preserveDraft: Boolean): ChatConversation {
+        conversations = data
+        if (preserveDraft && activeIsDraft) return active
+        val stored = data.activeConversation
+        active = stored ?: ChatConversation()
+        activeIsDraft = stored == null
+        return active
     }
 }
