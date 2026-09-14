@@ -1,13 +1,11 @@
-# Silver v1 data model
+# Silver data model
 
 Silver is Source's derived, revisable knowledge layer. Bronze remains the
 canonical source material; Silver records what processors observed and what
 Source currently believes about those observations.
 
-This document is the normative model for Silver v1. The existing Android
-`SilverResult` format is a prototype and will migrate toward this model through
-the Silver implementation issues. This document defines data semantics, not a
-storage schema or API wire format.
+This document is the normative model for Silver. It defines data semantics, not
+a storage schema, processing protocol, or API wire format.
 
 ## Boundary
 
@@ -40,8 +38,8 @@ debugging but are not shown by default.
   Missing confidence means unknown, not `1`.
 - Processor identifiers, observation kinds, predicates, and entity types are
   open strings. Silver has no global domain-type or predicate enum.
-- Silver v1 scalar values are text, finite number, and boolean. More specialized
-  values can be added later without changing entity identity.
+- Claim scalar values are normalized JSON strings, finite numbers, or booleans.
+  JSON objects, arrays, and `null` are not claim scalars.
 
 The common producer value is:
 
@@ -83,8 +81,8 @@ serializer is not sufficient.
    itself does not perform Unicode normalization.
 6. Compute `SHA-256(UTF8(prefix) || 0x00 || jcsBytes)` and encode the digest as
    64 lowercase hexadecimal characters. The prefixes are
-   `source-silver-evidence-v1`, `source-silver-observation-v1`, and
-   `source-silver-claim-v1`.
+   `source-silver-evidence`, `source-silver-observation`, and
+   `source-silver-claim`.
 
 All UUID fields use lowercase hyphenated UUID text. All SHA-256 fields use 64
 lowercase hexadecimal characters. Inputs that do not satisfy these forms are
@@ -143,8 +141,9 @@ The Claim identity object has exactly these properties:
 }
 ```
 
-For a scalar object, `object` is instead exactly
-`{"scalar":{"type":"text|number|boolean","value":<value>}}`.
+For a scalar object, `object` is instead exactly `{"scalar":<value>}`. The JSON
+primitive already carries its string, number, or boolean type, so Silver does
+not duplicate that information in another scalar wrapper.
 `createdAtMillis`, `id`, `state`, and storage metadata are excluded.
 `supportingObservationIds` is a set-valued field.
 
@@ -213,6 +212,25 @@ rerun does not.
 An observation may remain unresolved indefinitely. Uncertainty is preferable
 to forcing a false entity match.
 
+## Initial entity resolution
+
+Android's initial resolver is intentionally conservative. It consumes candidate
+Observations and the current Silver Entity and Claim state through the
+`SilverObservationResolver` interface.
+
+- A mention reuses an Entity only when its normalized name and type match one
+  existing Entity uniquely.
+- A mention with a name not present in current Silver state creates a new opaque
+  Entity UUID.
+- A same-name type conflict or multiple exact matches remains unresolved.
+- Resolution never copies Observation confidence into Claim confidence.
+
+The resolver creates Entities and Claims directly. A Claim identifies the
+resolver in `producer` and references the candidate Observation that led to the
+decision. An unresolved candidate produces no Entity or final Claim. If audit
+requirements later need the decision itself as a first-class record, Silver can
+add an explicit `ResolutionDecision` type instead of overloading Observation.
+
 ## Entity
 
 An entity is one stable Source-local identity for something Source currently
@@ -220,19 +238,18 @@ treats as one thing.
 
 ```text
 Entity
-  id                    random opaque UUID
-  originObservationIds  observations that caused the entity to be created
-  createdBy             resolving Producer
-  createdAtMillis
+  id  random opaque UUID
 ```
 
 An entity's name, type, external identifiers, and other properties are claims,
 not identity fields. A Gold projection may cache a preferred display label and
 type, but changing either does not create a new entity.
 
-Entity IDs are never reused. Future merge and split operations may relate or
-supersede entities while retaining the old IDs and their provenance; Silver v1
-does not define the merge/split algorithm.
+An Entity deliberately does not own creation provenance. Its evidence-backed
+meaning is established by Claims, whose supporting Observations lead to Bronze.
+An Entity without any Claim reference is invalid and can be discarded. Entity
+IDs are never reused. Future merge and split operations may relate or supersede
+entities while retaining old IDs; Silver does not define that algorithm.
 
 ## Claim
 
@@ -267,30 +284,37 @@ retained for now. Ordinary Gold views consume active claims only.
 Lifecycle state is metadata on the stable claim identity; changing it does not
 create a different assertion or discard the previous interpretation.
 
+## Development inspector
+
+Each Android Library item links to a read-only, source-specific Silver
+inspector. A developer can open it beside the normal file preview and follow
+the complete trace through Evidence, Observations, Entities, and Claims.
+Every record exposes its stable ID. Evidence exposes the Bronze content hash
+and fragment selector, while Observations and Claims expose their processor,
+model, and version metadata. Entities have no independent producer metadata.
+
+Candidate Observations are labelled resolved, partially resolved, or
+unresolved from the Claims that reference them: the intended Claim means
+resolved, only mention metadata means partial, and no Claims means unresolved.
+Multiple active Claims for the same subject and predicate are labelled competing when
+their values differ. The inspector does not resolve conflicts, edit Silver, or
+select a preferred Gold interpretation.
+
 ## Reprocessing and history
 
-The following rules make later reprocessing safe without defining job
-execution in Silver:
+Reprocessing changes records through the domain semantics above; it does not
+add jobs, checkpoints, generations, or commit receipts to the Silver model.
+Equal canonical inputs retain the same deterministic Evidence, Observation, and
+Claim IDs. New interpretations may coexist, while replaced interpretations are
+marked `superseded` and rejected ones `retracted`. Lifecycle merges are
+monotonic, so an active replica cannot resurrect a superseded or retracted
+Claim. Current knowledge remains a projection over active Claims rather than a
+wall-clock winner.
 
-1. Equal Evidence identity fields produce the same Evidence ID.
-2. Equal normalized Observation identity fields produce the same Observation
-   ID, independent of map property order or identifier-list order.
-3. Equal normalized Claim identity fields, including equal resolved Entity
-   UUIDs, produce the same Claim ID. A Bronze revision alone does not determine
-   Claim identity.
-4. New Bronze content or a new processor/model version produces new immutable
-   observations and claims.
-5. New records do not delete old records. Old claims may change lifecycle state,
-   but their assertion, evidence, producer, and creation metadata remain
-   available.
-6. Current knowledge is a projection over active claims, not the latest record
-   chosen by wall-clock time or model size.
-7. Retention or compaction may be added later. Until then, Source retains old
-   interpretations.
-
-The exact activation, replacement, and stale-generation policy belongs to the
-Silver reprocessing issue. These fields ensure that policy can be implemented
-without changing the four core concepts.
+Removing a Bronze source removes its Evidence, dependent Observations, and
+Claims. An Entity is retained whenever another surviving Claim still references
+it; otherwise it is discarded. Retention and compaction beyond this rule may be
+added later.
 
 ## End-to-end examples
 
@@ -340,12 +364,12 @@ Gothenburg`.
 
 ## Implementation consequences
 
-Android Silver snapshot format v2 implements the Evidence and Observation
-portion of this contract. Snapshot v1 data is discarded on read rather than
-migrated because it contains prematurely resolved prototype entities and
-claims. The first subsequent write replaces both local and synchronized v1
-Silver state with v2 records; Bronze, Library, and conversation data are not
-affected.
+The Android Silver snapshot persists Evidence, Observation, Entity, and Claim
+as first-class records. There is one Silver shape and no compatibility or
+migration path for older prototypes. Existing local or synchronized Silver
+snapshots must be deleted and rebuilt from Bronze. Bronze, Library, and
+conversation data are not affected. Local in-progress refinement checkpoints
+likewise have one supported shape.
 
 The Android `source.android.silver-extraction` processor version `3` emits one
 `attribute-candidate` or `relationship-candidate` Observation for each valid
@@ -373,14 +397,14 @@ Observation with an empty payload. It is a durable, deterministic processing
 receipt, including when the processor found no candidates, and prevents an
 unchanged source and producer version from being processed repeatedly.
 
-The remaining prototype consequences are handled by subsequent issues:
+Android assembles and validates one complete extraction result in memory before
+atomically replacing the stored snapshot. Interrupted batch work remains in a
+separate checkpoint store and is never exposed as Silver. These are Android
+processing and storage guarantees, not additional Silver record types.
 
-- opaque stable Entity identities must be introduced without reviving the old
-  name-derived identity scheme;
-- Entities and Claims must be added as retained first-class records linked
-  to these Observations;
-- candidate excerpts may later be promoted into fragment-level Evidence while
-  remaining optional display metadata.
-
-Those migrations belong to the implementation issues following this model
-definition. Existing Bronze data remains canonical throughout the migration.
+Entity resolution remains deliberately separate: candidate Observations do not
+create global Entities by themselves. A resolution step may now create opaque
+Entity UUIDs and evidence-backed Claims in this storage model. Candidate
+excerpts may later be promoted into fragment-level Evidence while remaining
+optional display metadata. Existing Bronze data remains canonical throughout
+processing.

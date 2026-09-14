@@ -67,7 +67,7 @@ sealed interface LibraryPreviewUiState {
     ) : LibraryPreviewUiState
 }
 
-enum class MainDestination { CHAT, LIBRARY, KNOWLEDGE }
+enum class MainDestination { CHAT, LIBRARY }
 
 sealed interface AppScreen {
     data class Accounts(val profiles: List<VaultProfile>) : AppScreen
@@ -81,6 +81,7 @@ sealed interface AppScreen {
         val knowledge: KnowledgeUiState = KnowledgeUiState(),
         val destination: MainDestination = MainDestination.CHAT,
         val libraryPreview: LibraryPreviewUiState? = null,
+        val knowledgeSourceId: String? = null,
     ) : AppScreen
     data class Scanner(val node: DiscoveredNode, val error: String? = null) : AppScreen
     data class Recovery(
@@ -371,9 +372,14 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
 
     fun openKnowledgeSource(itemId: String) {
         val main = _screen.value as? AppScreen.Main ?: return
+        if (main.knowledge.sources.none { it.id == itemId }) return
         mainDestination = MainDestination.LIBRARY
-        _screen.value = main.copy(destination = MainDestination.LIBRARY)
-        openLibraryItem(itemId)
+        _screen.value = main.copy(destination = MainDestination.LIBRARY, knowledgeSourceId = itemId)
+    }
+
+    fun closeKnowledgeSource() {
+        val main = _screen.value as? AppScreen.Main ?: return
+        _screen.value = main.copy(knowledgeSourceId = null)
     }
 
     fun clearLibraryFeedback() = libraryController.clearFeedback()

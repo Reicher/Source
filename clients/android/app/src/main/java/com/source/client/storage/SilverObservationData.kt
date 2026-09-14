@@ -7,10 +7,10 @@ data class SilverProducer(
     val modelRevision: String? = null,
 ) {
     init {
-        requireValidOpenIdentifier(processorId, "processor identifier")
-        requireValidOpenIdentifier(processorVersion, "processor version")
-        modelId?.let { requireValidOpenIdentifier(it, "model identifier") }
-        modelRevision?.let { requireValidOpenIdentifier(it, "model revision") }
+        requireValidSilverOpenIdentifier(processorId, "processor identifier")
+        requireValidSilverOpenIdentifier(processorVersion, "processor version")
+        modelId?.let { requireValidSilverOpenIdentifier(it, "model identifier") }
+        modelRevision?.let { requireValidSilverOpenIdentifier(it, "model revision") }
         require(processorId == normalizeSilverText(processorId)) { "Silver processor identifier must use NFC" }
         require(processorVersion == normalizeSilverText(processorVersion)) { "Silver processor version must use NFC" }
         require(modelId == null || modelId == normalizeSilverText(modelId)) { "Silver model identifier must use NFC" }
@@ -92,7 +92,7 @@ data class SilverObservation(
 ) {
     init {
         require(SILVER_RECORD_ID_PATTERN.matches(id)) { "Invalid Silver Observation identifier" }
-        requireValidOpenIdentifier(kind, "observation kind")
+        requireValidSilverOpenIdentifier(kind, "observation kind")
         require(kind == normalizeSilverText(kind)) { "Silver Observation kind must use NFC" }
         require(payload == normalizeSilverJson(payload)) { "Silver Observation payload must be normalized" }
         require(evidenceIds.isNotEmpty()) { "A Silver Observation must reference Evidence" }
@@ -175,7 +175,7 @@ internal fun producerIdentity(producer: SilverProducer) = SilverJsonObject(mapOf
     "processorVersion" to SilverJsonString(producer.processorVersion),
 ))
 
-private fun requireValidOpenIdentifier(value: String, description: String) {
+internal fun requireValidSilverOpenIdentifier(value: String, description: String) {
     require(value.isNotBlank() && value.length <= 200 && value.none(Char::isISOControl)) {
         "Invalid Silver $description"
     }
@@ -187,7 +187,7 @@ private fun requireValidSourceId(value: String) {
     }
 }
 
-internal const val SILVER_EVIDENCE_ID_PREFIX = "source-silver-evidence-v1"
-internal const val SILVER_OBSERVATION_ID_PREFIX = "source-silver-observation-v1"
-internal const val SILVER_CLAIM_ID_PREFIX = "source-silver-claim-v1"
+internal const val SILVER_EVIDENCE_ID_PREFIX = "source-silver-evidence"
+internal const val SILVER_OBSERVATION_ID_PREFIX = "source-silver-observation"
+internal const val SILVER_CLAIM_ID_PREFIX = "source-silver-claim"
 internal val SILVER_RECORD_ID_PATTERN = Regex("^[0-9a-f]{64}$")

@@ -9,10 +9,13 @@ import com.source.client.knowledge.ExtractedSilver
 import com.source.client.knowledge.combineSilverBatches
 import com.source.client.knowledge.deterministicTextChunks
 import com.source.client.knowledge.extractSilverBatch
+import com.source.client.knowledge.replaceSilverGeneration
 import com.source.client.knowledge.sha256Hex
 import com.source.client.knowledge.SILVER_EXTRACTION_PROCESSOR_ID
 import com.source.client.knowledge.SILVER_EXTRACTION_PROCESSOR_VERSION
 import com.source.client.knowledge.SILVER_EXTRACTION_COMPLETE_KIND
+import com.source.client.knowledge.ConservativeSilverResolver
+import com.source.client.knowledge.SilverObservationResolver
 import com.source.client.model.AiModelMetadata
 import com.source.client.model.ConnectedNode
 import com.source.client.protocol.SourceApiException
@@ -69,6 +72,7 @@ internal class SilverController(
     private val bronzeSources: suspend () -> List<BronzeTextSource>,
     private val onStateChanged: (SilverUiState) -> Unit,
     private val clock: () -> Long = System::currentTimeMillis,
+    private val resolver: SilverObservationResolver = ConservativeSilverResolver(),
 ) {
     private val sync = SourceDataSync(SilverData, localStore, nodeApi)
     private var worker: Job? = null
@@ -212,15 +216,16 @@ internal class SilverController(
         val activeSession = session() ?: return
         if (state.dataset.evidence.none { it.bronzeSourceId == sourceId } && sourceId in state.dataset.removedSourceIds) return
         val now = nextModifiedAt()
+        val affectedSourceIds = setOf(sourceId)
         state = state.copy(
-            dataset = removeSilverSources(state.dataset, setOf(sourceId), now),
-            processing = state.processing - sourceId,
-            progress = state.progress - sourceId,
-            pendingSync = state.pendingSync + sourceId,
-            syncFailed = state.syncFailed - sourceId,
+            dataset = removeSilverSources(state.dataset, affectedSourceIds, now),
+            processing = state.processing - affectedSourceIds,
+            progress = state.progress - affectedSourceIds,
+            pendingSync = state.pendingSync + affectedSourceIds,
+            syncFailed = state.syncFailed - affectedSourceIds,
         )
         checkpoints = checkpoints.copy(checkpoints = checkpoints.checkpoints.filterNot {
-            it.bronzeSourceId == sourceId
+            it.bronzeSourceId in affectedSourceIds
         })
         sync.changed()
         publish()
@@ -228,6 +233,7 @@ internal class SilverController(
             sync.persist(activeSession, state.dataset)
             persistCheckpoints(activeSession)
             synchronize()
+            refresh()
         }
     }
 
@@ -303,7 +309,7 @@ internal class SilverController(
                     publish()
                     continue
                 }
-                commit(source.id, extracted)
+                commit(source, extracted)
                 removeCheckpoint(source.id)
                 persistCheckpoints()
                 state = state.copy(
@@ -392,28 +398,28 @@ internal class SilverController(
         }
     }
 
-    private suspend fun commit(sourceId: String, extracted: ExtractedSilver) {
+    private suspend fun commit(source: BronzeTextSource, extracted: ExtractedSilver) {
         val activeSession = session() ?: return
         val storeStartedAt = SystemClock.elapsedRealtime()
         val now = nextModifiedAt()
-        val evidence = (extracted.evidence + state.dataset.evidence).associateBy { it.id }.values.toList()
-        val observations = (extracted.observations + state.dataset.observations).associateBy { it.id }.values.toList()
-        state = state.copy(
-            dataset = state.dataset.copy(
-                evidence = evidence,
-                observations = observations,
-                modifiedAtMillis = now,
-                removedSourceIds = state.dataset.removedSourceIds - sourceId,
-            ),
-            pendingSync = state.pendingSync + sourceId,
-            syncFailed = state.syncFailed - sourceId,
+        val committed = replaceSilverGeneration(state.dataset, source, extracted, resolver, now)
+        if (committed.dataset === state.dataset) {
+            Log.i(SILVER_LOG_TAG, "Silver generation already committed; no snapshot or sync change")
+            return
+        }
+        val committedState = state.copy(
+            dataset = committed.dataset,
+            pendingSync = state.pendingSync + source.id,
+            syncFailed = state.syncFailed - source.id,
         )
+        sync.persist(activeSession, committed.dataset)
         sync.changed()
-        sync.persist(activeSession, state.dataset)
+        state = committedState
         Log.i(
             SILVER_LOG_TAG,
             "Silver stored durationMs=${SystemClock.elapsedRealtime() - storeStartedAt} " +
-                "evidence=${extracted.evidence.size} observations=${extracted.observations.size}",
+                "evidence=${extracted.evidence.size} observations=${extracted.observations.size} " +
+                "supersededClaims=${committed.supersededClaimIds.size}",
         )
         publish()
         synchronize()
@@ -433,12 +439,17 @@ internal class SilverController(
         }
         if (removed.isEmpty()) return
         val now = nextModifiedAt()
+        val affectedSourceIds = removed
         state = state.copy(
-            dataset = removeSilverSources(state.dataset, removed, now),
-            processing = state.processing - removed,
-            progress = state.progress - removed,
-            pendingSync = state.pendingSync + removed,
+            dataset = removeSilverSources(state.dataset, affectedSourceIds, now),
+            processing = state.processing - affectedSourceIds,
+            progress = state.progress - affectedSourceIds,
+            pendingSync = state.pendingSync + affectedSourceIds,
         )
+        checkpoints = checkpoints.copy(checkpoints = checkpoints.checkpoints.filterNot {
+            it.bronzeSourceId in affectedSourceIds
+        })
+        persistCheckpoints(activeSession)
         sync.changed()
         sync.persist(activeSession, state.dataset)
         publish()
@@ -541,19 +552,30 @@ internal fun removeSilverSources(
 ): SilverDataset {
     require(sourceIds.isNotEmpty())
     require(removedAtMillis > 0)
-    val removedEvidenceIds = dataset.evidence.filter { it.bronzeSourceId in sourceIds }
-        .mapTo(mutableSetOf()) { it.id }
+    val removedEvidenceIds = dataset.evidence.filter { it.bronzeSourceId in sourceIds }.mapTo(mutableSetOf()) { it.id }
     val observations = dataset.observations.filterNot { observation ->
         observation.evidenceIds.any(removedEvidenceIds::contains)
     }
+    val observationIds = observations.mapTo(mutableSetOf()) { it.id }
+    val claims = dataset.claims.filter { claim ->
+        observationIds.containsAll(claim.supportingObservationIds)
+    }
+    val referencedEntityIds = claims.flatMapTo(mutableSetOf()) { claim ->
+        listOfNotNull(claim.subjectEntityId, claim.objectEntityId)
+    }
+    val entities = dataset.entities.filter { it.id in referencedEntityIds }
     val referencedEvidenceIds = observations.flatMapTo(mutableSetOf(), SilverObservation::evidenceIds)
     return dataset.copy(
         evidence = dataset.evidence.filter { evidence ->
             evidence.bronzeSourceId !in sourceIds && evidence.id in referencedEvidenceIds
         },
         observations = observations,
+        entities = entities,
+        claims = claims,
         modifiedAtMillis = removedAtMillis,
-        removedSourceIds = dataset.removedSourceIds + sourceIds.associateWith { removedAtMillis },
+        removedSourceIds = dataset.removedSourceIds + sourceIds.associateWith { sourceId ->
+            maxOf(dataset.removedSourceIds[sourceId] ?: 0, removedAtMillis)
+        },
     )
 }
 

@@ -92,9 +92,8 @@ object SilverCheckpointData : SourceData<SilverCheckpointDataset> {
         id = "silver-checkpoints",
         remoteAppId = "source-silver-checkpoints",
         snapshotFormat = "source-silver-checkpoints",
-        formatVersion = 2,
+        formatVersion = 1,
     )
-    override val supportedFormatVersions = setOf(1, descriptor.formatVersion)
     override val emptyValue = SilverCheckpointDataset()
 
     override fun encode(value: SilverCheckpointDataset): ByteArray = JSONObject().apply {
@@ -124,11 +123,6 @@ object SilverCheckpointData : SourceData<SilverCheckpointDataset> {
     override fun decode(value: ByteArray): SilverCheckpointDataset {
         val root = JSONObject(value.toString(Charsets.UTF_8))
         val version = root.getInt("version")
-        if (version == 1) {
-            return SilverCheckpointDataset(
-                refinementPaused = root.optBoolean("refinementPaused", false),
-            )
-        }
         require(version == descriptor.formatVersion) { "Unsupported Silver checkpoint version" }
         val checkpoints = root.getJSONArray("checkpoints")
         return SilverCheckpointDataset(
@@ -150,7 +144,7 @@ object SilverCheckpointData : SourceData<SilverCheckpointDataset> {
                     },
                 )
             },
-            refinementPaused = root.optBoolean("refinementPaused", false),
+            refinementPaused = root.getBoolean("refinementPaused"),
         )
     }
 

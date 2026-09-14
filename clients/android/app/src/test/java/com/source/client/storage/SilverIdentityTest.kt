@@ -32,8 +32,8 @@ class SilverIdentityTest {
         val evidence = testEvidence()
         val observation = testObservation(evidence)
 
-        assertEquals("d0c03ad63473f67347ada7d4272bb1f3c7653f3d091cef9db1d135903019efc8", evidence.id)
-        assertEquals("ce1af424ebe3775da4e4081340d3c84cf2addd6c103edfd4efb0d5fa3b738117", observation.id)
+        assertEquals("1002b34a04fa56b0f2eb4da494a67006165ac901045fe9aeb183603c348f28ef", evidence.id)
+        assertEquals("6ab9dcd554dd8a3a54597903197a027ff8b17a8c983415d0da8eede21f04b4ed", observation.id)
     }
 
     @Test
@@ -55,7 +55,7 @@ class SilverIdentityTest {
         ))
 
         assertEquals(
-            "bf0ba2f719f966455d34939402f51d36221360856136f7d01aa5f98d45a70bf7",
+            "093133d5734db6faa20b22e2208f23f6f2f0ef47fa4ef2b62e883e635653b827",
             silverRecordId(SILVER_CLAIM_ID_PREFIX, identity),
         )
     }
