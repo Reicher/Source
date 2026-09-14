@@ -31,11 +31,9 @@ debugging but are not shown by default.
 - Bronze is never changed or deleted as a side effect of Silver processing.
 - Entity identifiers are opaque Source-local UUIDs. They are never derived from
   a name, label, type, property, or external identifier.
-- Evidence, observation, and claim identifiers are deterministic SHA-256
-  identities over their canonical semantic content and provenance, prefixed by
-  the record type and model version. Creation time and claim lifecycle state are
-  excluded. Repeating identical work therefore produces the same records
-  instead of duplicates.
+- Evidence, observation, and claim identifiers use the deterministic SHA-256
+  procedure and exact identity fields defined below. Creation time and claim
+  lifecycle state are excluded.
 - Wall-clock timestamps are descriptive metadata, never the sole basis for
   conflict resolution or identity.
 - Confidence is optional and, when present, is a finite number from `0` to `1`.
@@ -57,6 +55,110 @@ Producer
 
 Model size or parameter count is diagnostic metadata. It does not determine
 which interpretation wins.
+
+## Canonical record identities
+
+Clients and Nodes MUST use the following algorithm. A runtime's ordinary JSON
+serializer is not sufficient.
+
+1. Build the record-specific identity object defined below. Optional identity
+   fields MUST be present as JSON `null`; omission is not an alternative
+   encoding.
+2. Recursively normalize every JSON property name and string value to Unicode
+   Normalization Form C (NFC). Reject invalid Unicode and property names that
+   become duplicates after normalization.
+3. Require I-JSON values: objects have no duplicate names, numbers are finite
+   IEEE 754 binary64 values, and integers requiring more than 53 bits of exact
+   precision are represented by a processor-defined string format.
+4. For the explicitly set-valued identifier fields below, remove duplicates
+   and sort the lowercase ASCII identifiers in ascending byte order. All other
+   JSON arrays are ordered and retain their order. If a processor payload
+   defines an array as a set, that processor's versioned payload schema MUST
+   sort its elements by their RFC 8785 byte representation before this step.
+5. Serialize the normalized identity object with the
+   [JSON Canonicalization Scheme (RFC 8785)](https://www.rfc-editor.org/rfc/rfc8785.html).
+   This recursively sorts object properties, uses ECMAScript's canonical JSON
+   representation for binary64 numbers, emits no insignificant whitespace, and
+   produces UTF-8 bytes. NFC normalization is Source's preprocessing step; JCS
+   itself does not perform Unicode normalization.
+6. Compute `SHA-256(UTF8(prefix) || 0x00 || jcsBytes)` and encode the digest as
+   64 lowercase hexadecimal characters. The prefixes are
+   `source-silver-evidence-v1`, `source-silver-observation-v1`, and
+   `source-silver-claim-v1`.
+
+All UUID fields use lowercase hyphenated UUID text. All SHA-256 fields use 64
+lowercase hexadecimal characters. Inputs that do not satisfy these forms are
+rejected rather than normalized silently.
+
+The Evidence identity object has exactly these properties:
+
+```json
+{
+  "bronzeContentSha256": "<lowercase SHA-256>",
+  "bronzeSourceId": "<NFC Source-local identifier>",
+  "selector": null
+}
+```
+
+When present, `selector` replaces `null` with its normalized structured JSON.
+`excerpt`, `id`, and storage metadata are excluded. The selector's array order
+is significant unless its versioned selector schema explicitly defines and
+sorts a set as described above.
+
+The Observation identity object has exactly these properties:
+
+```json
+{
+  "confidence": null,
+  "evidenceIds": ["<sorted unique Evidence IDs>"],
+  "kind": "<NFC observation kind>",
+  "payload": "<normalized structured JSON value>",
+  "producer": {
+    "modelId": null,
+    "modelRevision": null,
+    "processorId": "<NFC processor identifier>",
+    "processorVersion": "<NFC exact version>"
+  }
+}
+```
+
+An available confidence or model field replaces its `null`. `createdAtMillis`,
+`id`, and storage metadata are excluded. `evidenceIds` is a set-valued field.
+
+The Claim identity object has exactly these properties:
+
+```json
+{
+  "confidence": null,
+  "object": {"entityId": "<Entity UUID>"},
+  "predicate": "<NFC predicate>",
+  "producer": {
+    "modelId": null,
+    "modelRevision": null,
+    "processorId": "<NFC processor identifier>",
+    "processorVersion": "<NFC exact version>"
+  },
+  "subjectEntityId": "<Entity UUID>",
+  "supportingObservationIds": ["<sorted unique Observation IDs>"]
+}
+```
+
+For a scalar object, `object` is instead exactly
+`{"scalar":{"type":"text|number|boolean","value":<value>}}`.
+`createdAtMillis`, `id`, `state`, and storage metadata are excluded.
+`supportingObservationIds` is a set-valued field.
+
+Evidence and Observation identities can converge across a Client and Node from
+the same canonical inputs without entity resolution. Claim identity additionally
+depends on the resolved subject and object Entity UUIDs. Claims therefore
+converge only when both processors use the same synchronized entity identities;
+independent resolution to different entities intentionally produces different
+Claim IDs and must be reconciled by entity resolution.
+
+Implementations MUST share cross-runtime conformance vectors before persisting
+these IDs. The fixtures must cover property order, `1` versus `1.0`, composed
+versus decomposed Unicode, duplicate identifiers, reversed set-valued lists,
+ordered payload arrays, null optionals, and all three record types.
 
 ## Evidence
 
@@ -170,16 +272,20 @@ create a different assertion or discard the previous interpretation.
 The following rules make later reprocessing safe without defining job
 execution in Silver:
 
-1. The same Bronze revision and producer version produce the same evidence,
-   observation, and claim identities when their canonical content is equal.
-2. New Bronze content or a new processor/model version produces new immutable
+1. Equal Evidence identity fields produce the same Evidence ID.
+2. Equal normalized Observation identity fields produce the same Observation
+   ID, independent of map property order or identifier-list order.
+3. Equal normalized Claim identity fields, including equal resolved Entity
+   UUIDs, produce the same Claim ID. A Bronze revision alone does not determine
+   Claim identity.
+4. New Bronze content or a new processor/model version produces new immutable
    observations and claims.
-3. New records do not delete old records. Old claims may change lifecycle state,
+5. New records do not delete old records. Old claims may change lifecycle state,
    but their assertion, evidence, producer, and creation metadata remain
    available.
-4. Current knowledge is a projection over active claims, not the latest record
+6. Current knowledge is a projection over active claims, not the latest record
    chosen by wall-clock time or model size.
-5. Retention or compaction may be added later. Until then, Source retains old
+7. Retention or compaction may be added later. Until then, Source retains old
    interpretations.
 
 The exact activation, replacement, and stale-generation policy belongs to the
