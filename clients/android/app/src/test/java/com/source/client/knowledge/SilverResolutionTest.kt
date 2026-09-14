@@ -10,7 +10,6 @@ import com.source.client.storage.SilverJsonObject
 import com.source.client.storage.SilverJsonString
 import com.source.client.storage.SilverObservation
 import com.source.client.storage.SilverProducer
-import com.source.client.storage.SilverScalar
 import com.source.client.storage.testEvidence
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -29,17 +28,12 @@ class SilverResolutionTest {
         val resolved = dataset.with(result)
 
         assertEquals(2, result.entities.size)
-        assertEquals(2, result.observations.size)
         assertEquals(5, result.claims.size)
-        assertTrue(result.entities.all { entity ->
-            entity.createdBy == resolver.producer &&
-                entity.originObservationIds.single() in result.observations.map(SilverObservation::id)
-        })
         val relationship = result.claims.single { it.predicate == "based-in" }
         assertTrue(relationship.objectEntityId != null)
         assertEquals(resolver.producer, relationship.producer)
         assertTrue(relationship.supportingObservationIds.contains(observation.id))
-        assertEquals(3, relationship.supportingObservationIds.size)
+        assertEquals(listOf(observation.id), relationship.supportingObservationIds)
         assertNull(relationship.confidence)
         SilverData.version(resolved)
     }
@@ -57,8 +51,7 @@ class SilverResolutionTest {
 
         assertTrue(result.entities.isEmpty())
         assertEquals(initial.entities.single().id, result.claims.single { it.predicate == "purpose" }.subjectEntityId)
-        assertEquals("resolved", result.observations.single().payload.string("outcome"))
-        assertEquals(initial.entities.single().id, result.observations.single().payload.string("entityId"))
+        assertTrue(result.claims.all { it.supportingObservationIds == listOf(second.id) })
     }
 
     @Test
@@ -73,9 +66,6 @@ class SilverResolutionTest {
 
         assertTrue(result.entities.isEmpty())
         assertTrue(result.claims.isEmpty())
-        assertEquals("unresolved", result.observations.single().payload.string("outcome"))
-        assertEquals(uncertain.id, result.observations.single().payload.string("inputObservationId"))
-        assertEquals(resolver.producer, result.observations.single().producer)
     }
 
     @Test
@@ -83,8 +73,8 @@ class SilverResolutionTest {
         val inputObservation = attributeObservation("status", SilverJsonString("active"))
         val producer = resolver.producer
         val entities = listOf(
-            existingEntity("00000000-0000-4000-8000-000000000001", inputObservation, producer),
-            existingEntity("00000000-0000-4000-8000-000000000002", inputObservation, producer),
+            existingEntity("00000000-0000-4000-8000-000000000001"),
+            existingEntity("00000000-0000-4000-8000-000000000002"),
         )
         val claims = entities.flatMap { entity -> metadataClaims(entity, inputObservation, producer) }
         val dataset = dataset(inputObservation).copy(entities = entities, claims = claims)
@@ -93,7 +83,6 @@ class SilverResolutionTest {
 
         assertTrue(result.entities.isEmpty())
         assertTrue(result.claims.isEmpty())
-        assertEquals("unresolved", result.observations.single().payload.string("outcome"))
     }
 
     @Test
@@ -106,7 +95,6 @@ class SilverResolutionTest {
         val repeated = resolver.resolve(stored, listOf(observation), 300)
 
         assertTrue(repeated.entities.isEmpty())
-        assertEquals(first.observations.map(SilverObservation::id), repeated.observations.map(SilverObservation::id))
         assertEquals(first.claims.map(SilverClaim::id).toSet(), repeated.claims.map(SilverClaim::id).toSet())
     }
 
@@ -136,12 +124,11 @@ class SilverResolutionTest {
         assertEquals(1, corrected.entities.size)
         assertTrue(corrected.entities.single().id != initial.entities.single().id)
         assertTrue(combined.entities.contains(initial.entities.single()))
-        assertTrue(combined.observations.containsAll(initial.observations))
-        assertEquals("2", corrected.observations.single().producer.processorVersion)
+        assertTrue(corrected.claims.all { it.producer.processorVersion == "2" })
     }
 
     @Test
-    fun `malformed candidate records a traceable unresolved decision`() {
+    fun `malformed candidate produces no resolved knowledge`() {
         val evidence = testEvidence()
         val observation = SilverObservation.create(
             kind = SILVER_ATTRIBUTE_CANDIDATE_KIND,
@@ -155,8 +142,6 @@ class SilverResolutionTest {
 
         assertTrue(result.entities.isEmpty())
         assertTrue(result.claims.isEmpty())
-        assertEquals("candidate", result.observations.single().payload.string("mentionRole"))
-        assertEquals("unresolved", result.observations.single().payload.string("outcome"))
     }
 
     @Test(expected = IllegalArgumentException::class)
@@ -170,7 +155,6 @@ class SilverResolutionTest {
     }
 
     private fun SilverDataset.with(result: SilverResolutionResult) = copy(
-        observations = (observations + result.observations).associateBy(SilverObservation::id).values.toList(),
         entities = (entities + result.entities).associateBy(SilverEntity::id).values.toList(),
         claims = (claims + result.claims).associateBy(SilverClaim::id).values.toList(),
         modifiedAtMillis = modifiedAtMillis + 1,
@@ -212,12 +196,7 @@ class SilverResolutionTest {
         )
     }
 
-    private fun existingEntity(id: String, observation: SilverObservation, producer: SilverProducer) = SilverEntity(
-        id = id,
-        originObservationIds = listOf(observation.id),
-        createdBy = producer,
-        createdAtMillis = 100,
-    )
+    private fun existingEntity(id: String) = SilverEntity(id)
 
     private fun metadataClaims(
         entity: SilverEntity,
@@ -227,7 +206,7 @@ class SilverResolutionTest {
         SilverClaim.create(
             entity.id,
             SILVER_NAME_PREDICATE,
-            value = SilverScalar.text("Source"),
+            value = SilverJsonString("Source"),
             supportingObservationIds = listOf(observation.id),
             producer = producer,
             createdAtMillis = 100,
@@ -235,7 +214,7 @@ class SilverResolutionTest {
         SilverClaim.create(
             entity.id,
             SILVER_ENTITY_TYPE_PREDICATE,
-            value = SilverScalar.text("project"),
+            value = SilverJsonString("project"),
             supportingObservationIds = listOf(observation.id),
             producer = producer,
             createdAtMillis = 100,
@@ -246,9 +225,6 @@ class SilverResolutionTest {
         "name" to SilverJsonString(name),
         "type" to SilverJsonString(type),
     ))
-
-    private fun com.source.client.storage.SilverJsonValue.string(name: String): String? =
-        ((this as SilverJsonObject).properties[name] as? SilverJsonString)?.value
 
     private companion object {
         val extractionProducer = SilverProducer.create(SILVER_EXTRACTION_PROCESSOR_ID, "3", "model-4b")

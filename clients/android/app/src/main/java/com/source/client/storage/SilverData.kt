@@ -100,15 +100,17 @@ object SilverData : SourceData<SilverDataset> {
             }
         }
         val observationIds = observations.mapTo(mutableSetOf(), SilverObservation::id)
-        val entities = mergeEntities(local.entities, remote.entities).filter { entity ->
-            observationIds.containsAll(entity.originObservationIds)
-        }
-        val entityIds = entities.mapTo(mutableSetOf(), SilverEntity::id)
+        val mergedEntities = mergeEntities(local.entities, remote.entities)
+        val entityIds = mergedEntities.mapTo(mutableSetOf(), SilverEntity::id)
         val claims = mergeClaims(local.claims, remote.claims).filter { claim ->
             observationIds.containsAll(claim.supportingObservationIds) &&
                 claim.subjectEntityId in entityIds &&
                 (claim.objectEntityId == null || claim.objectEntityId in entityIds)
         }
+        val referencedEntityIds = claims.flatMapTo(mutableSetOf()) { claim ->
+            listOfNotNull(claim.subjectEntityId, claim.objectEntityId)
+        }
+        val entities = mergedEntities.filter { it.id in referencedEntityIds }
         val activeEvidenceIds = observations.flatMapTo(mutableSetOf(), SilverObservation::evidenceIds)
         val activeEvidence = evidence.filter { it.id in activeEvidenceIds }
         activeEvidence.map(SilverEvidence::bronzeSourceId).toSet().forEach { activeSourceId ->
@@ -175,29 +177,16 @@ object SilverData : SourceData<SilverDataset> {
         )
     }
 
-    internal fun encodeEntity(entity: SilverEntity) = JSONObject().apply {
-        put("id", entity.id)
-        put("originObservationIds", JSONArray(entity.originObservationIds))
-        put("createdBy", encodeProducer(entity.createdBy))
-        put("createdAtMillis", entity.createdAtMillis)
-    }
+    internal fun encodeEntity(entity: SilverEntity) = JSONObject().put("id", entity.id)
 
-    internal fun decodeEntity(value: JSONObject): SilverEntity {
-        val originObservationIds = value.getJSONArray("originObservationIds")
-        return SilverEntity(
-            id = value.getString("id"),
-            originObservationIds = List(originObservationIds.length()) { originObservationIds.getString(it) },
-            createdBy = decodeProducer(value.getJSONObject("createdBy")),
-            createdAtMillis = value.getLong("createdAtMillis"),
-        )
-    }
+    internal fun decodeEntity(value: JSONObject) = SilverEntity(value.getString("id"))
 
     internal fun encodeClaim(claim: SilverClaim) = JSONObject().apply {
         put("id", claim.id)
         put("subjectEntityId", claim.subjectEntityId)
         put("predicate", claim.predicate)
         put("objectEntityId", claim.objectEntityId ?: JSONObject.NULL)
-        put("value", claim.value?.let(::encodeScalar) ?: JSONObject.NULL)
+        put("value", claim.value?.let(::encodeSilverJson) ?: JSONObject.NULL)
         put("supportingObservationIds", JSONArray(claim.supportingObservationIds))
         put("confidence", claim.confidence ?: JSONObject.NULL)
         put("producer", encodeProducer(claim.producer))
@@ -212,8 +201,7 @@ object SilverData : SourceData<SilverDataset> {
             subjectEntityId = value.getString("subjectEntityId"),
             predicate = value.getString("predicate"),
             objectEntityId = value.get("objectEntityId").takeUnless { it == JSONObject.NULL } as? String,
-            value = value.get("value").takeUnless { it == JSONObject.NULL }
-                ?.let { decodeScalar(it as JSONObject) },
+            value = value.get("value").takeUnless { it == JSONObject.NULL }?.let(::decodeSilverJson),
             supportingObservationIds = List(supportingObservationIds.length()) {
                 supportingObservationIds.getString(it)
             },
@@ -224,16 +212,6 @@ object SilverData : SourceData<SilverDataset> {
             createdAtMillis = value.getLong("createdAtMillis"),
         )
     }
-
-    private fun encodeScalar(scalar: SilverScalar) = JSONObject().apply {
-        put("type", scalar.type.storageValue)
-        put("value", encodeSilverJson(scalar.value))
-    }
-
-    private fun decodeScalar(value: JSONObject) = SilverScalar(
-        type = SilverScalarType.fromStorageValue(value.getString("type")),
-        value = decodeSilverJson(value.get("value")),
-    )
 
     private fun encodeProducer(producer: SilverProducer) = JSONObject().apply {
         put("processorId", producer.processorId)
@@ -270,15 +248,16 @@ object SilverData : SourceData<SilverDataset> {
         val referencedEvidenceIds = value.observations.flatMapTo(mutableSetOf(), SilverObservation::evidenceIds)
         require(referencedEvidenceIds == evidenceIds) { "Silver Evidence must support an Observation" }
         val observationIds = value.observations.mapTo(mutableSetOf(), SilverObservation::id)
-        require(value.entities.all { observationIds.containsAll(it.originObservationIds) }) {
-            "Silver Entities must reference stored origin Observations"
-        }
         val entityIds = value.entities.mapTo(mutableSetOf(), SilverEntity::id)
         require(value.claims.all { claim ->
             observationIds.containsAll(claim.supportingObservationIds) &&
                 claim.subjectEntityId in entityIds &&
                 (claim.objectEntityId == null || claim.objectEntityId in entityIds)
         }) { "Silver Claims must reference stored Entities and supporting Observations" }
+        val referencedEntityIds = value.claims.flatMapTo(mutableSetOf()) { claim ->
+            listOfNotNull(claim.subjectEntityId, claim.objectEntityId)
+        }
+        require(referencedEntityIds == entityIds) { "Every Silver Entity must be referenced by a Claim" }
         require(value.removedSourceIds.keys.none { removed ->
             value.evidence.any { it.bronzeSourceId == removed }
         }) { "A Silver source cannot be both active and removed" }
@@ -391,12 +370,7 @@ object SilverData : SourceData<SilverDataset> {
         )),
     ).toString(Charsets.UTF_8)
 
-    private fun entityContent(entity: SilverEntity): String = canonicalSilverJson(SilverJsonObject(mapOf(
-        "createdAtMillis" to SilverJsonString(entity.createdAtMillis.toString()),
-        "createdBy" to producerIdentity(entity.createdBy),
-        "id" to SilverJsonString(entity.id),
-        "originObservationIds" to SilverJsonArray(entity.originObservationIds.map(::SilverJsonString)),
-    ))).toString(Charsets.UTF_8)
+    private fun entityContent(entity: SilverEntity): String = entity.id
 
     private fun claimContent(claim: SilverClaim): String = canonicalSilverJson(SilverJsonObject(mapOf(
         "confidence" to (claim.confidence?.let(::SilverJsonNumber) ?: SilverJsonNull),

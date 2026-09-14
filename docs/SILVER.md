@@ -4,17 +4,15 @@ Silver is Source's derived, revisable knowledge layer. Bronze remains the
 canonical source material; Silver records what processors observed and what
 Source currently believes about those observations.
 
-This document is the normative model for Silver. The existing Android
-`SilverResult` format is a prototype and will migrate toward this model through
-the Silver implementation issues. This document defines data semantics, not a
-storage schema or API wire format.
+This document is the normative model for Silver. It defines data semantics, not
+a storage schema, processing protocol, or API wire format.
 
 ## Boundary
 
 The Silver flow is:
 
 ```text
-Bronze reference -> Evidence -> Observation -> Resolution observation -> Entity + Claim -> Gold views
+Bronze reference -> Evidence -> Observation -> Entity + Claim -> Gold views
 ```
 
 Silver owns evidence references, processor observations, stable entity
@@ -40,8 +38,8 @@ debugging but are not shown by default.
   Missing confidence means unknown, not `1`.
 - Processor identifiers, observation kinds, predicates, and entity types are
   open strings. Silver has no global domain-type or predicate enum.
-- Silver scalar values are text, finite number, and boolean. More specialized
-  values can be added later without changing entity identity.
+- Claim scalar values are normalized JSON strings, finite numbers, or booleans.
+  JSON objects, arrays, and `null` are not claim scalars.
 
 The common producer value is:
 
@@ -143,8 +141,9 @@ The Claim identity object has exactly these properties:
 }
 ```
 
-For a scalar object, `object` is instead exactly
-`{"scalar":{"type":"text|number|boolean","value":<value>}}`.
+For a scalar object, `object` is instead exactly `{"scalar":<value>}`. The JSON
+primitive already carries its string, number, or boolean type, so Silver does
+not duplicate that information in another scalar wrapper.
 `createdAtMillis`, `id`, `state`, and storage metadata are excluded.
 `supportingObservationIds` is a set-valued field.
 
@@ -226,14 +225,11 @@ Observations and the current Silver Entity and Claim state through the
 - A same-name type conflict or multiple exact matches remains unresolved.
 - Resolution never copies Observation confidence into Claim confidence.
 
-Every attempted mention produces an immutable `entity-resolution` Observation.
-Its payload records the input Observation ID, mention role, mention name/type,
-outcome, and resolved Entity ID when available. It carries the resolver's
-processor/version metadata and references the same Evidence as its input.
-Created Entities use that decision as origin provenance, while Claims reference
-both the candidate and resolution Observations. Repeating the same decision is
-therefore deterministic; a future resolver version or correction can add a new
-decision without deleting the old Observation or its Bronze evidence.
+The resolver creates Entities and Claims directly. A Claim identifies the
+resolver in `producer` and references the candidate Observation that led to the
+decision. An unresolved candidate produces no Entity or final Claim. If audit
+requirements later need the decision itself as a first-class record, Silver can
+add an explicit `ResolutionDecision` type instead of overloading Observation.
 
 ## Entity
 
@@ -242,19 +238,18 @@ treats as one thing.
 
 ```text
 Entity
-  id                    random opaque UUID
-  originObservationIds  observations that caused the entity to be created
-  createdBy             resolving Producer
-  createdAtMillis
+  id  random opaque UUID
 ```
 
 An entity's name, type, external identifiers, and other properties are claims,
 not identity fields. A Gold projection may cache a preferred display label and
 type, but changing either does not create a new entity.
 
-Entity IDs are never reused. Future merge and split operations may relate or
-supersede entities while retaining the old IDs and their provenance; Silver
-does not define the merge/split algorithm.
+An Entity deliberately does not own creation provenance. Its evidence-backed
+meaning is established by Claims, whose supporting Observations lead to Bronze.
+An Entity without any Claim reference is invalid and can be discarded. Entity
+IDs are never reused. Future merge and split operations may relate or supersede
+entities while retaining old IDs; Silver does not define that algorithm.
 
 ## Claim
 
@@ -294,61 +289,32 @@ create a different assertion or discard the previous interpretation.
 Each Android Library item links to a read-only, source-specific Silver
 inspector. A developer can open it beside the normal file preview and follow
 the complete trace through Evidence, Observations, Entities, and Claims.
-Every record exposes its stable ID and the processor, model, and version
-metadata that produced it; Evidence also exposes the Bronze content hash and
-fragment selector when present.
+Every record exposes its stable ID. Evidence exposes the Bronze content hash
+and fragment selector, while Observations and Claims expose their processor,
+model, and version metadata. Entities have no independent producer metadata.
 
 Candidate Observations are labelled resolved, partially resolved, or
-unresolved from their immutable `entity-resolution` observations. Multiple
-active Claims for the same subject and predicate are labelled competing when
+unresolved from the Claims that reference them: the intended Claim means
+resolved, only mention metadata means partial, and no Claims means unresolved.
+Multiple active Claims for the same subject and predicate are labelled competing when
 their values differ. The inspector does not resolve conflicts, edit Silver, or
 select a preferred Gold interpretation.
 
 ## Reprocessing and history
 
-One completed extraction generation is identified by its Bronze source and
-content hash plus its extraction processor, processor version, and model. The
-Android commit boundary accepts a generation only when all Evidence belongs to
-that exact Bronze revision, every Observation belongs to one producer/model,
-all references are internally complete, and a
-`knowledge-extraction-complete` receipt is present.
+Reprocessing changes records through the domain semantics above; it does not
+add jobs, checkpoints, generations, or commit receipts to the Silver model.
+Equal canonical inputs retain the same deterministic Evidence, Observation, and
+Claim IDs. New interpretations may coexist, while replaced interpretations are
+marked `superseded` and rejected ones `retracted`. Lifecycle merges are
+monotonic, so an active replica cannot resurrect a superseded or retracted
+Claim. Current knowledge remains a projection over active Claims rather than a
+wall-clock winner.
 
-The following rules make reprocessing safe without making checkpoints or jobs
-part of Silver:
-
-1. Equal Evidence identity fields produce the same Evidence ID.
-2. Equal normalized Observation identity fields produce the same Observation
-   ID, independent of map property order or identifier-list order.
-3. Equal normalized Claim identity fields, including equal resolved Entity
-   UUIDs, produce the same Claim ID. A Bronze revision alone does not determine
-   Claim identity.
-4. The complete generation is resolved and validated in memory before the
-   stored snapshot is replaced. An interrupted or invalid generation therefore
-   leaves the previous valid snapshot current; local batch checkpoints are not
-   exposed as Silver.
-5. A later generation from the same extraction `processorId` supersedes active
-   Claims derived from that source which it no longer produces. This applies to
-   a new processor version, model, or Bronze revision, including a completed
-   generation with no findings.
-6. A different extraction `processorId`, or a derivation from another Bronze
-   source, remains active and may compete with the new Claims. Silver does not
-   silently choose between independent interpretations.
-7. New records do not delete old records. Superseded Claims retain their
-   assertion and supporting Observation IDs; the old Observations and Evidence
-   remain available through the exact old Bronze content hash.
-8. Claim lifecycle merges are monotonic: `active` cannot resurrect a
-   `superseded` or `retracted` Claim from another replica.
-9. Current knowledge is a projection over active claims, not the latest record
-   chosen by wall-clock time, processor version text, or model size.
-10. Retention or compaction may be added later. Until then, Source retains old
-    interpretations.
-
-Removing a Bronze source may also remove the sole origin Observation for an
-Entity reused by another source. Android detects those transitive dependencies,
-invalidates their current Silver generations with synchronized source
-tombstones, and marks the retained Bronze sources for reprocessing. This
-prevents both silent collateral Claim loss and resurrection of their stale
-completion receipts from another replica.
+Removing a Bronze source removes its Evidence, dependent Observations, and
+Claims. An Entity is retained whenever another surviving Claim still references
+it; otherwise it is discarded. Retention and compaction beyond this rule may be
+added later.
 
 ## End-to-end examples
 
@@ -431,9 +397,14 @@ Observation with an empty payload. It is a durable, deterministic processing
 receipt, including when the processor found no candidates, and prevents an
 unchanged source and producer version from being processed repeatedly.
 
+Android assembles and validates one complete extraction result in memory before
+atomically replacing the stored snapshot. Interrupted batch work remains in a
+separate checkpoint store and is never exposed as Silver. These are Android
+processing and storage guarantees, not additional Silver record types.
+
 Entity resolution remains deliberately separate: candidate Observations do not
 create global Entities by themselves. A resolution step may now create opaque
 Entity UUIDs and evidence-backed Claims in this storage model. Candidate
 excerpts may later be promoted into fragment-level Evidence while remaining
 optional display metadata. Existing Bronze data remains canonical throughout
-the migration.
+processing.

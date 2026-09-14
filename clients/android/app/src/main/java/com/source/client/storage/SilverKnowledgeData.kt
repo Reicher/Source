@@ -4,67 +4,13 @@ import java.util.UUID
 
 data class SilverEntity(
     val id: String,
-    val originObservationIds: List<String>,
-    val createdBy: SilverProducer,
-    val createdAtMillis: Long,
 ) {
     init {
         require(SILVER_ENTITY_ID_PATTERN.matches(id)) { "Invalid Silver Entity identifier" }
-        require(originObservationIds.isNotEmpty()) { "A Silver Entity must reference its origin Observations" }
-        require(originObservationIds.all(SILVER_RECORD_ID_PATTERN::matches)) {
-            "Invalid Silver Entity origin Observation reference"
-        }
-        require(originObservationIds == originObservationIds.distinct().sorted()) {
-            "Silver Entity origin Observation references must be sorted and unique"
-        }
-        require(createdAtMillis > 0) { "Invalid Silver Entity creation time" }
     }
 
     companion object {
-        fun create(
-            originObservationIds: Collection<String>,
-            createdBy: SilverProducer,
-            createdAtMillis: Long,
-        ): SilverEntity = SilverEntity(
-            id = UUID.randomUUID().toString(),
-            originObservationIds = originObservationIds.distinct().sorted(),
-            createdBy = createdBy,
-            createdAtMillis = createdAtMillis,
-        )
-    }
-}
-
-enum class SilverScalarType(val storageValue: String) {
-    TEXT("text"),
-    NUMBER("number"),
-    BOOLEAN("boolean");
-
-    companion object {
-        fun fromStorageValue(value: String): SilverScalarType = entries.firstOrNull { it.storageValue == value }
-            ?: throw IllegalArgumentException("Unsupported Silver scalar type")
-    }
-}
-
-data class SilverScalar(
-    val type: SilverScalarType,
-    val value: SilverJsonValue,
-) {
-    init {
-        require(value == normalizeSilverJson(value)) { "Silver scalar value must be normalized" }
-        require(
-            (type == SilverScalarType.TEXT && value is SilverJsonString) ||
-                (type == SilverScalarType.NUMBER && value is SilverJsonNumber) ||
-                (type == SilverScalarType.BOOLEAN && value is SilverJsonBoolean),
-        ) { "Silver scalar type does not match its value" }
-    }
-
-    companion object {
-        fun text(value: String) = SilverScalar(SilverScalarType.TEXT, SilverJsonString(normalizeSilverText(value)))
-        fun number(value: Double) = SilverScalar(
-            SilverScalarType.NUMBER,
-            SilverJsonNumber(if (value == 0.0) 0.0 else value),
-        )
-        fun boolean(value: Boolean) = SilverScalar(SilverScalarType.BOOLEAN, SilverJsonBoolean(value))
+        fun create(): SilverEntity = SilverEntity(UUID.randomUUID().toString())
     }
 }
 
@@ -84,7 +30,7 @@ data class SilverClaim(
     val subjectEntityId: String,
     val predicate: String,
     val objectEntityId: String? = null,
-    val value: SilverScalar? = null,
+    val value: SilverJsonValue? = null,
     val supportingObservationIds: List<String>,
     val confidence: Double? = null,
     val producer: SilverProducer,
@@ -101,6 +47,12 @@ data class SilverClaim(
         }
         objectEntityId?.let {
             require(SILVER_ENTITY_ID_PATTERN.matches(it)) { "Invalid Silver Claim object Entity reference" }
+        }
+        value?.let {
+            require(it is SilverJsonString || it is SilverJsonNumber || it is SilverJsonBoolean) {
+                "A Silver Claim scalar must be text, number, or boolean"
+            }
+            require(it == normalizeSilverJson(it)) { "Silver Claim scalar must be normalized" }
         }
         require(supportingObservationIds.isNotEmpty()) { "A Silver Claim must reference supporting Observations" }
         require(supportingObservationIds.all(SILVER_RECORD_ID_PATTERN::matches)) {
@@ -134,7 +86,7 @@ data class SilverClaim(
             subjectEntityId: String,
             predicate: String,
             objectEntityId: String? = null,
-            value: SilverScalar? = null,
+            value: SilverJsonValue? = null,
             supportingObservationIds: Collection<String>,
             confidence: Double? = null,
             producer: SilverProducer,
@@ -144,12 +96,13 @@ data class SilverClaim(
             val normalizedPredicate = normalizeSilverText(predicate)
             val normalizedObservationIds = supportingObservationIds.distinct().sorted()
             val normalizedConfidence = if (confidence == 0.0) 0.0 else confidence
+            val normalizedValue = value?.let(::normalizeSilverJson)
             return SilverClaim(
                 id = claimId(
                     subjectEntityId,
                     normalizedPredicate,
                     objectEntityId,
-                    value,
+                    normalizedValue,
                     normalizedObservationIds,
                     normalizedConfidence,
                     producer,
@@ -157,7 +110,7 @@ data class SilverClaim(
                 subjectEntityId = subjectEntityId,
                 predicate = normalizedPredicate,
                 objectEntityId = objectEntityId,
-                value = value,
+                value = normalizedValue,
                 supportingObservationIds = normalizedObservationIds,
                 confidence = normalizedConfidence,
                 producer = producer,
@@ -172,7 +125,7 @@ internal fun claimId(
     subjectEntityId: String,
     predicate: String,
     objectEntityId: String?,
-    value: SilverScalar?,
+    value: SilverJsonValue?,
     supportingObservationIds: Collection<String>,
     confidence: Double?,
     producer: SilverProducer,
@@ -190,16 +143,11 @@ internal fun claimId(
     )),
 )
 
-internal fun claimObjectIdentity(objectEntityId: String?, value: SilverScalar?): SilverJsonObject = when {
+internal fun claimObjectIdentity(objectEntityId: String?, value: SilverJsonValue?): SilverJsonObject = when {
     objectEntityId != null && value == null -> SilverJsonObject(mapOf(
         "entityId" to SilverJsonString(objectEntityId),
     ))
-    objectEntityId == null && value != null -> SilverJsonObject(mapOf(
-        "scalar" to SilverJsonObject(mapOf(
-            "type" to SilverJsonString(value.type.storageValue),
-            "value" to value.value,
-        )),
-    ))
+    objectEntityId == null && value != null -> SilverJsonObject(mapOf("scalar" to value))
     else -> throw IllegalArgumentException("A Silver Claim must contain exactly one Entity object or scalar value")
 }
 

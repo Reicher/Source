@@ -28,7 +28,6 @@ import com.source.client.knowledge.SILVER_ATTRIBUTE_CANDIDATE_KIND
 import com.source.client.knowledge.SILVER_ENTITY_TYPE_PREDICATE
 import com.source.client.knowledge.SILVER_NAME_PREDICATE
 import com.source.client.knowledge.SILVER_RELATIONSHIP_CANDIDATE_KIND
-import com.source.client.knowledge.SILVER_RESOLUTION_KIND
 import com.source.client.storage.SilverClaim
 import com.source.client.storage.SilverClaimState
 import com.source.client.storage.SilverDataset
@@ -43,7 +42,6 @@ import com.source.client.storage.SilverJsonString
 import com.source.client.storage.SilverJsonValue
 import com.source.client.storage.SilverObservation
 import com.source.client.storage.SilverProducer
-import com.source.client.storage.SilverScalar
 
 data class SilverInspectorProducerUi(
     val processorId: String,
@@ -75,8 +73,6 @@ data class SilverInspectorEntityUi(
     val id: String,
     val name: String,
     val type: String,
-    val originObservationIds: List<String>,
-    val producer: SilverInspectorProducerUi,
 )
 
 data class SilverInspectorClaimUi(
@@ -126,9 +122,9 @@ internal fun buildKnowledgeUiState(
         entity.id to preferredClaimText(silver.claims, entity.id, SILVER_ENTITY_TYPE_PREDICATE, "unknown")
     }
     val competingClaimIds = competingClaimIds(activeClaims)
-    val resolutionByInput = silver.observations.filter { it.kind == SILVER_RESOLUTION_KIND }
-        .mapNotNull { decision -> decision.inputObservationId()?.let { it to decision } }
-        .groupBy({ it.first }, { it.second })
+    val claimsByObservationId = silver.claims.flatMap { claim ->
+        claim.supportingObservationIds.map { observationId -> observationId to claim }
+    }.groupBy({ it.first }, { it.second })
 
     return KnowledgeUiState(sourceIds.map { sourceId ->
         val libraryItem = libraryById[sourceId]
@@ -146,10 +142,6 @@ internal fun buildKnowledgeUiState(
                 add(claim.subjectEntityId)
                 claim.objectEntityId?.let(::add)
             }
-            silver.entities.filter { entity -> entity.originObservationIds.any(observationIds::contains) }
-                .mapTo(this, SilverEntity::id)
-            observations.filter { it.kind == SILVER_RESOLUTION_KIND }
-                .mapNotNullTo(this) { it.resolvedEntityId() }
         }
         SilverInspectorSourceUi(
             id = sourceId,
@@ -157,14 +149,14 @@ internal fun buildKnowledgeUiState(
             sourceType = libraryItem?.sourceType ?: "unknown",
             canOpenSource = libraryItem?.previewKind != null,
             evidence = evidence.map(::evidenceUi),
-            observations = observations.map { observation -> observationUi(observation, resolutionByInput) },
+            observations = observations.map { observation ->
+                observationUi(observation, claimsByObservationId[observation.id].orEmpty())
+            },
             entities = entityIds.mapNotNull(entitiesById::get).sortedBy(SilverEntity::id).map { entity ->
                 SilverInspectorEntityUi(
                     id = entity.id,
                     name = checkNotNull(entityNames[entity.id]),
                     type = checkNotNull(entityTypes[entity.id]),
-                    originObservationIds = entity.originObservationIds,
-                    producer = entity.createdBy.toUi(),
                 )
             },
             claims = claims.map { claim ->
@@ -173,7 +165,7 @@ internal fun buildKnowledgeUiState(
                     subjectName = entityNames[claim.subjectEntityId] ?: shortId(claim.subjectEntityId),
                     predicate = claim.predicate,
                     objectDisplay = claim.objectEntityId?.let { entityNames[it] ?: shortId(it) }
-                        ?: checkNotNull(claim.value).display(),
+                        ?: checkNotNull(claim.value).displayScalar(),
                     state = claim.state.storageValue,
                     confidence = claim.confidence,
                     competing = claim.id in competingClaimIds,
@@ -231,8 +223,6 @@ internal fun KnowledgeScreen(
             items(source.entities, key = SilverInspectorEntityUi::id) { entity ->
                 InspectorCard("${entity.name} · ${entity.type}") {
                     InspectorMetadata("id", entity.id)
-                    InspectorProducer(entity.producer)
-                    InspectorMetadata("origin", entity.originObservationIds.joinToString(transform = ::shortId))
                 }
             }
             item { InspectorSectionTitle("Claims · ${source.claims.size}") }
@@ -297,11 +287,11 @@ private fun InspectorProducer(producer: SilverInspectorProducerUi) {
 
 private fun observationUi(
     observation: SilverObservation,
-    resolutionByInput: Map<String, List<SilverObservation>>,
+    claims: List<SilverClaim>,
 ) = SilverInspectorObservationUi(
     id = observation.id,
     kind = observation.kind,
-    status = observation.status(resolutionByInput),
+    status = observation.status(claims),
     payload = observation.payload.displayJson(),
     confidence = observation.confidence,
     evidenceIds = observation.evidenceIds,
@@ -309,20 +299,13 @@ private fun observationUi(
 )
 
 private fun SilverObservation.status(
-    resolutionByInput: Map<String, List<SilverObservation>>,
+    claims: List<SilverClaim>,
 ): SilverInspectorObservationStatus {
-    if (kind == SILVER_RESOLUTION_KIND) {
-        return if (resolutionOutcome() == "resolved") {
-            SilverInspectorObservationStatus.RESOLVED
-        } else {
-            SilverInspectorObservationStatus.UNRESOLVED
-        }
-    }
     if (kind !in CANDIDATE_KINDS) return SilverInspectorObservationStatus.TRACE
-    val outcomes = resolutionByInput[id].orEmpty().mapNotNull(SilverObservation::resolutionOutcome).toSet()
+    val predicate = payload.propertyString("predicate")
     return when {
-        "resolved" in outcomes && "unresolved" in outcomes -> SilverInspectorObservationStatus.PARTIAL
-        "resolved" in outcomes -> SilverInspectorObservationStatus.RESOLVED
+        predicate != null && claims.any { it.predicate == predicate } -> SilverInspectorObservationStatus.RESOLVED
+        claims.isNotEmpty() -> SilverInspectorObservationStatus.PARTIAL
         else -> SilverInspectorObservationStatus.UNRESOLVED
     }
 }
@@ -342,7 +325,7 @@ private fun preferredClaimText(
 ): String = claims.asSequence()
     .filter { it.subjectEntityId == entityId && it.predicate == predicate }
     .sortedWith(compareBy<SilverClaim>({ if (it.state == SilverClaimState.ACTIVE) 0 else 1 }, SilverClaim::id))
-    .mapNotNull { (it.value?.value as? SilverJsonString)?.value }
+    .mapNotNull { (it.value as? SilverJsonString)?.value }
     .firstOrNull() ?: fallback
 
 private fun competingClaimIds(activeClaims: List<SilverClaim>): Set<String> = activeClaims
@@ -353,13 +336,13 @@ private fun competingClaimIds(activeClaims: List<SilverClaim>): Set<String> = ac
     .mapTo(mutableSetOf(), SilverClaim::id)
 
 private fun SilverClaim.objectIdentity(): String = objectEntityId?.let { "entity:$it" }
-    ?: "scalar:${checkNotNull(value).type.storageValue}:${checkNotNull(value).value.displayJson()}"
+    ?: "scalar:${checkNotNull(value).displayJson()}"
 
-private fun SilverScalar.display(): String = when (val scalar = value) {
-    is SilverJsonString -> "“${scalar.value}”"
-    is SilverJsonNumber -> scalar.value.toString()
-    is SilverJsonBoolean -> scalar.value.toString()
-    else -> scalar.displayJson()
+private fun SilverJsonValue.displayScalar(): String = when (this) {
+    is SilverJsonString -> "“$value”"
+    is SilverJsonNumber -> value.toString()
+    is SilverJsonBoolean -> value.toString()
+    else -> displayJson()
 }
 
 private fun SilverJsonValue.displayJson(): String = when (this) {
@@ -394,10 +377,6 @@ private fun String.quotedJson(): String = buildString(length + 2) {
     }
     append('"')
 }
-
-private fun SilverObservation.inputObservationId(): String? = payload.propertyString("inputObservationId")
-private fun SilverObservation.resolvedEntityId(): String? = payload.propertyString("entityId")
-private fun SilverObservation.resolutionOutcome(): String? = payload.propertyString("outcome")
 
 private fun SilverJsonValue.propertyString(name: String): String? =
     ((this as? SilverJsonObject)?.properties?.get(name) as? SilverJsonString)?.value

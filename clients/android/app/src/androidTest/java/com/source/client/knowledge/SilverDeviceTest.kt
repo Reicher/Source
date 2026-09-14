@@ -25,7 +25,6 @@ import com.source.client.storage.SilverJsonString
 import com.source.client.storage.SilverObservation
 import com.source.client.storage.SilverProducer
 import com.source.client.storage.SilverRefinementCheckpoint
-import com.source.client.storage.SilverScalar
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
@@ -94,23 +93,13 @@ class SilverDeviceTest {
             excerpt = "Source is in Berlin",
         )
         val observation = observation(evidence, 100)
-        val subject = SilverEntity(
-            "00000000-0000-4000-8000-000000000001",
-            listOf(observation.id),
-            observation.producer,
-            101,
-        )
-        val related = SilverEntity(
-            "00000000-0000-4000-8000-000000000002",
-            listOf(observation.id),
-            observation.producer,
-            101,
-        )
+        val subject = SilverEntity("00000000-0000-4000-8000-000000000001")
+        val related = SilverEntity("00000000-0000-4000-8000-000000000002")
         val claims = listOf(
             SilverClaim.create(
                 subject.id,
                 "status",
-                value = SilverScalar.text("active"),
+                value = SilverJsonString("active"),
                 supportingObservationIds = listOf(observation.id),
                 producer = observation.producer,
                 createdAtMillis = 102,

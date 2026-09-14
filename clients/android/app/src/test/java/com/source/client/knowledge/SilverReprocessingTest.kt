@@ -233,7 +233,7 @@ class SilverReprocessingTest {
 
     private fun SilverDataset.statusClaims() = claims.filter { it.predicate == "status" }
 
-    private fun SilverClaim.textValue(): String = ((value?.value as SilverJsonString).value)
+    private fun SilverClaim.textValue(): String = (value as SilverJsonString).value
 
     private companion object {
         const val MODEL_ID = "model-4b"

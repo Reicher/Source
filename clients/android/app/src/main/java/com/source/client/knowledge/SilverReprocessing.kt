@@ -40,7 +40,6 @@ internal fun replaceSilverGeneration(
         removedSourceIds = dataset.removedSourceIds - source.id,
     )
     val resolved = resolver.resolve(unresolved, extracted.observations, committedAtMillis)
-    val allObservations = mergeObservations(observations, resolved.observations)
     val freshClaimIds = resolved.claims.mapTo(mutableSetOf(), SilverClaim::id)
     val oldObservationsById = dataset.observations.associateBy(SilverObservation::id)
     val oldEvidenceById = dataset.evidence.associateBy(SilverEvidence::id)
@@ -54,7 +53,6 @@ internal fun replaceSilverGeneration(
         if (claim.id in supersededClaimIds) claim.copy(state = SilverClaimState.SUPERSEDED) else claim
     }
     val candidate = unresolved.copy(
-        observations = allObservations,
         entities = mergeEntities(dataset.entities, resolved.entities),
         claims = mergeClaims(historicalClaims, resolved.claims),
     )

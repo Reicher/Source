@@ -2,7 +2,6 @@ package com.source.client.ui
 
 import com.source.client.knowledge.ConservativeSilverResolver
 import com.source.client.knowledge.SILVER_ATTRIBUTE_CANDIDATE_KIND
-import com.source.client.knowledge.SILVER_RESOLUTION_KIND
 import com.source.client.storage.SilverClaim
 import com.source.client.storage.SilverDataset
 import com.source.client.storage.SilverEntity
@@ -47,22 +46,19 @@ class KnowledgeScreenTest {
 
         assertTrue(source.canOpenSource)
         assertEquals(testEvidence().bronzeContentSha256, source.evidence.single().contentSha256)
-        assertEquals(2, source.observations.size)
+        assertEquals(1, source.observations.size)
         assertEquals(
             SilverInspectorObservationStatus.RESOLVED,
             source.observations.single { it.kind == SILVER_ATTRIBUTE_CANDIDATE_KIND }.status,
         )
-        val decision = source.observations.single { it.kind == SILVER_RESOLUTION_KIND }
-        assertEquals("source.android.silver-resolution", decision.producer.processorId)
-        assertEquals("1", decision.producer.processorVersion)
         assertEquals(1, source.entities.size)
         assertEquals("Source", source.entities.single().name)
         assertEquals("project", source.entities.single().type)
         val status = source.claims.single { it.predicate == "status" }
         assertEquals("Source", status.subjectName)
         assertEquals("“active”", status.objectDisplay)
-        assertTrue(status.supportingObservationIds.contains(observation.id))
-        assertTrue(status.supportingObservationIds.contains(decision.id))
+        assertEquals(listOf(observation.id), status.supportingObservationIds)
+        assertEquals("source.android.silver-resolution", status.producer.processorId)
     }
 
     @Test
@@ -113,7 +109,6 @@ class KnowledgeScreenTest {
     )
 
     private fun SilverDataset.with(resolution: com.source.client.knowledge.SilverResolutionResult) = copy(
-        observations = (observations + resolution.observations).associateBy(SilverObservation::id).values.toList(),
         entities = (entities + resolution.entities).associateBy(SilverEntity::id).values.toList(),
         claims = (claims + resolution.claims).associateBy(SilverClaim::id).values.toList(),
         modifiedAtMillis = modifiedAtMillis + 1,
