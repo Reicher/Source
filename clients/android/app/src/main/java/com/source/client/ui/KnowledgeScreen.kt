@@ -211,6 +211,7 @@ internal fun KnowledgeScreen(
             item { InspectorSectionTitle("Evidence · ${source.evidence.size}") }
             items(source.evidence, key = SilverInspectorEvidenceUi::id) { evidence ->
                 InspectorCard("Evidence ${shortId(evidence.id)}") {
+                    InspectorMetadata("id", evidence.id)
                     InspectorMetadata("content", evidence.contentSha256)
                     evidence.selector?.let { InspectorMetadata("selector", it) }
                     evidence.excerpt?.let { Text("“$it”", style = MaterialTheme.typography.bodySmall) }

@@ -71,7 +71,7 @@ class SilverQualityTest {
     }
 
     @Test
-    fun `removing a source prunes Evidence orphaned by cross-source Observations`() {
+    fun `removing a source invalidates every source in a cross-source Observation`() {
         val removedEvidence = testEvidence("removed-source", "a".repeat(64))
         val otherEvidence = testEvidence("other-source", "b".repeat(64))
         val crossSourceObservation = SilverObservation.create(
@@ -103,13 +103,68 @@ class SilverQualityTest {
             modifiedAtMillis = 100,
         )
 
-        val updated = removeSilverSources(dataset, setOf("removed-source"), 101)
+        val removal = removeSilverSources(dataset, setOf("removed-source"), 101)
+        val updated = removal.dataset
 
         assertTrue(updated.evidence.isEmpty())
         assertTrue(updated.observations.isEmpty())
         assertTrue(updated.entities.isEmpty())
         assertTrue(updated.claims.isEmpty())
-        assertEquals(mapOf("removed-source" to 101L), updated.removedSourceIds)
+        assertEquals(mapOf("removed-source" to 101L, "other-source" to 101L), updated.removedSourceIds)
+        assertEquals(setOf("other-source"), removal.reprocessSourceIds)
         SilverData.version(updated)
+    }
+
+    @Test
+    fun `removing an Entity origin invalidates retained sources that reused it`() {
+        val originEvidence = testEvidence("source-a", "a".repeat(64))
+        val retainedEvidence = testEvidence("source-b", "b".repeat(64))
+        val originObservation = testObservation(originEvidence, createdAtMillis = 100)
+        val retainedObservation = testObservation(retainedEvidence, createdAtMillis = 110)
+        val retainedComplete = testObservation(
+            retainedEvidence,
+            createdAtMillis = 110,
+            kind = SILVER_EXTRACTION_COMPLETE_KIND,
+        )
+        val entity = SilverEntity(
+            id = "00000000-0000-4000-8000-000000000001",
+            originObservationIds = listOf(originObservation.id),
+            createdBy = originObservation.producer,
+            createdAtMillis = 100,
+        )
+        val retainedClaim = SilverClaim.create(
+            subjectEntityId = entity.id,
+            predicate = "status",
+            value = SilverScalar.text("active"),
+            supportingObservationIds = listOf(retainedObservation.id),
+            producer = retainedObservation.producer,
+            createdAtMillis = 110,
+        )
+        val dataset = SilverDataset(
+            evidence = listOf(originEvidence, retainedEvidence),
+            observations = listOf(originObservation, retainedObservation, retainedComplete),
+            entities = listOf(entity),
+            claims = listOf(retainedClaim),
+            modifiedAtMillis = 110,
+        )
+
+        val removal = removeSilverSources(dataset, setOf("source-a"), 120)
+
+        assertEquals(setOf("source-b"), removal.reprocessSourceIds)
+        assertEquals(mapOf("source-a" to 120L, "source-b" to 120L), removal.dataset.removedSourceIds)
+        assertTrue(removal.dataset.evidence.isEmpty())
+        assertTrue(removal.dataset.observations.isEmpty())
+        assertTrue(removal.dataset.entities.isEmpty())
+        assertTrue(removal.dataset.claims.isEmpty())
+        assertEquals(removal.dataset, SilverData.merge(removal.dataset, dataset))
+        assertTrue(
+            needsSilverRefinement(
+                removal.dataset,
+                BronzeTextSource("source-b", "retained.txt", "file", "b".repeat(64), "retained"),
+                AiModelMetadata("model-4b", 4_000_000_000),
+                "2",
+            ),
+        )
+        SilverData.version(removal.dataset)
     }
 }

@@ -343,6 +343,13 @@ part of Silver:
 10. Retention or compaction may be added later. Until then, Source retains old
     interpretations.
 
+Removing a Bronze source may also remove the sole origin Observation for an
+Entity reused by another source. Android detects those transitive dependencies,
+invalidates their current Silver generations with synchronized source
+tombstones, and marks the retained Bronze sources for reprocessing. This
+prevents both silent collateral Claim loss and resurrection of their stale
+completion receipts from another replica.
+
 ## End-to-end examples
 
 ### Contact row
