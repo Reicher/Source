@@ -44,6 +44,16 @@ class SilverDeviceTest {
     }
 
     @Test
+    fun LegacySilverCheckpointsDiscardWorkButPreservePausedPreference() {
+        val legacy = """{"version":1,"refinementPaused":true,"checkpoints":[{"legacy":"work"}]}"""
+
+        assertEquals(
+            SilverCheckpointDataset(refinementPaused = true),
+            SilverCheckpointData.decode(legacy.toByteArray()),
+        )
+    }
+
+    @Test
     fun SilverCheckpointDataRoundTripsCompletedObservationBatches() {
         val sourceId = "source-1"
         val sourceHash = "a".repeat(64)

@@ -124,7 +124,11 @@ object SilverCheckpointData : SourceData<SilverCheckpointDataset> {
     override fun decode(value: ByteArray): SilverCheckpointDataset {
         val root = JSONObject(value.toString(Charsets.UTF_8))
         val version = root.getInt("version")
-        if (version == 1) return emptyValue
+        if (version == 1) {
+            return SilverCheckpointDataset(
+                refinementPaused = root.optBoolean("refinementPaused", false),
+            )
+        }
         require(version == descriptor.formatVersion) { "Unsupported Silver checkpoint version" }
         val checkpoints = root.getJSONArray("checkpoints")
         return SilverCheckpointDataset(

@@ -5,7 +5,11 @@ import com.source.client.knowledge.SILVER_EXTRACTION_COMPLETE_KIND
 import com.source.client.knowledge.sha256Hex
 import com.source.client.model.AiModelMetadata
 import com.source.client.storage.SilverBatchCheckpoint
+import com.source.client.storage.SilverData
 import com.source.client.storage.SilverDataset
+import com.source.client.storage.SilverJsonObject
+import com.source.client.storage.SilverObservation
+import com.source.client.storage.SilverProducer
 import com.source.client.storage.SilverRefinementCheckpoint
 import com.source.client.storage.testBatchResult
 import com.source.client.storage.testEvidence
@@ -61,5 +65,30 @@ class SilverQualityTest {
     fun `resume selects the first unfinished batch`() {
         assertEquals(1, firstUnfinishedBatch(5, setOf(0, 2, 3)))
         assertEquals(null, firstUnfinishedBatch(3, setOf(0, 1, 2)))
+    }
+
+    @Test
+    fun `removing a source prunes Evidence orphaned by cross-source Observations`() {
+        val removedEvidence = testEvidence("removed-source", "a".repeat(64))
+        val otherEvidence = testEvidence("other-source", "b".repeat(64))
+        val crossSourceObservation = SilverObservation.create(
+            kind = "relationship-candidate",
+            payload = SilverJsonObject(emptyMap()),
+            evidenceIds = listOf(removedEvidence.id, otherEvidence.id),
+            producer = SilverProducer.create("processor", "1"),
+            createdAtMillis = 100,
+        )
+        val dataset = SilverDataset(
+            evidence = listOf(removedEvidence, otherEvidence),
+            observations = listOf(crossSourceObservation),
+            modifiedAtMillis = 100,
+        )
+
+        val updated = removeSilverSources(dataset, setOf("removed-source"), 101)
+
+        assertTrue(updated.evidence.isEmpty())
+        assertTrue(updated.observations.isEmpty())
+        assertEquals(mapOf("removed-source" to 101L), updated.removedSourceIds)
+        SilverData.version(updated)
     }
 }
