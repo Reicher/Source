@@ -44,6 +44,7 @@ fun SourceApp(screen: AppScreen, viewModel: SourceViewModel) {
                     viewModel::closeLibraryPreview,
                     viewModel::clearLibraryFeedback,
                     viewModel::openKnowledgeSource,
+                    viewModel::closeKnowledgeSource,
                     viewModel::pauseSilverRefinement,
                     viewModel::resumeSilverRefinement,
                 )

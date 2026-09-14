@@ -26,7 +26,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Folder
-import androidx.compose.material.icons.outlined.Hub
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -85,12 +84,24 @@ internal fun MainScreen(
     closeLibraryPreview: () -> Unit,
     clearLibraryFeedback: () -> Unit,
     openKnowledgeSource: (String) -> Unit,
+    closeKnowledgeSource: () -> Unit,
     pauseSilverRefinement: () -> Unit,
     resumeSilverRefinement: () -> Unit,
 ) {
     state.libraryPreview?.let { preview ->
         LibraryPreviewScreen(preview, closeLibraryPreview)
         return
+    }
+    state.knowledgeSourceId?.let { sourceId ->
+        state.knowledge.sources.firstOrNull { it.id == sourceId }?.let { source ->
+            KnowledgeScreen(
+                source = source,
+                onBack = closeKnowledgeSource,
+                modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp),
+            )
+            return
+        }
+        LaunchedEffect(sourceId) { closeKnowledgeSource() }
     }
     var draft by rememberSaveable(state.chat.conversationId) { mutableStateOf("") }
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
@@ -109,12 +120,6 @@ internal fun MainScreen(
                     onClick = { selectDestination(MainDestination.LIBRARY) },
                     icon = { Icon(Icons.Outlined.Folder, null) },
                     label = { Text(stringResource(R.string.library)) },
-                )
-                NavigationBarItem(
-                    selected = state.destination == MainDestination.KNOWLEDGE,
-                    onClick = { selectDestination(MainDestination.KNOWLEDGE) },
-                    icon = { Icon(Icons.Outlined.Hub, null) },
-                    label = { Text(stringResource(R.string.knowledge)) },
                 )
             }
         },
@@ -135,7 +140,6 @@ internal fun MainScreen(
                         when (state.destination) {
                             MainDestination.CHAT -> R.string.app_name
                             MainDestination.LIBRARY -> R.string.library
-                            MainDestination.KNOWLEDGE -> R.string.knowledge
                         },
                     ),
                     style = MaterialTheme.typography.headlineMedium,
@@ -201,14 +205,10 @@ internal fun MainScreen(
                     onRemoveFromDevice = removeLibraryItemFromDevice,
                     onDeleteFromSource = deleteLibraryItemFromSource,
                     onOpen = openLibraryItem,
+                    onOpenKnowledge = openKnowledgeSource,
                     onFeedbackShown = clearLibraryFeedback,
                     onPauseRefinement = pauseSilverRefinement,
                     onResumeRefinement = resumeSilverRefinement,
-                    modifier = Modifier.fillMaxWidth().weight(1f),
-                )
-                MainDestination.KNOWLEDGE -> KnowledgeScreen(
-                    state = state.knowledge,
-                    onOpenSource = openKnowledgeSource,
                     modifier = Modifier.fillMaxWidth().weight(1f),
                 )
             }

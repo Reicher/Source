@@ -75,6 +75,7 @@ internal fun LibraryScreen(
     onRemoveFromDevice: (String) -> Unit,
     onDeleteFromSource: (String) -> Unit,
     onOpen: (String) -> Unit,
+    onOpenKnowledge: (String) -> Unit,
     onFeedbackShown: () -> Unit,
     onPauseRefinement: () -> Unit,
     onResumeRefinement: () -> Unit,
@@ -162,6 +163,7 @@ internal fun LibraryScreen(
                         expanded = expandedId == item.id,
                         onToggle = { expandedId = if (expandedId == item.id) null else item.id },
                         onOpen = { onOpen(item.id) },
+                        onOpenKnowledge = { onOpenKnowledge(item.id) },
                         onRemoveFromDevice = { onRemoveFromDevice(item.id) },
                         onDeleteFromSource = { deleting = item },
                     )
@@ -226,6 +228,7 @@ private fun LibraryItemRow(
     expanded: Boolean,
     onToggle: () -> Unit,
     onOpen: () -> Unit,
+    onOpenKnowledge: () -> Unit,
     onRemoveFromDevice: () -> Unit,
     onDeleteFromSource: () -> Unit,
 ) {
@@ -308,9 +311,11 @@ private fun LibraryItemRow(
                 ) {
                     if (item.previewKind != null && item.localAvailable) {
                         Button(onClick = onOpen) { Text(stringResource(R.string.library_view)) }
+                        Spacer(Modifier.width(8.dp))
                     }
+                    TextButton(onClick = onOpenKnowledge) { Text(stringResource(R.string.knowledge)) }
                     if (item.canDeleteFromSource) {
-                        if (item.previewKind != null && item.localAvailable) Spacer(Modifier.width(8.dp))
+                        Spacer(Modifier.width(8.dp))
                         OutlinedButton(onClick = onDeleteFromSource) {
                             Text(stringResource(R.string.delete), color = MaterialTheme.colorScheme.error)
                         }

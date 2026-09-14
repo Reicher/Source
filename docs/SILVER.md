@@ -289,6 +289,21 @@ retained for now. Ordinary Gold views consume active claims only.
 Lifecycle state is metadata on the stable claim identity; changing it does not
 create a different assertion or discard the previous interpretation.
 
+## Development inspector
+
+Each Android Library item links to a read-only, source-specific Silver
+inspector. A developer can open it beside the normal file preview and follow
+the complete trace through Evidence, Observations, Entities, and Claims.
+Every record exposes its stable ID and the processor, model, and version
+metadata that produced it; Evidence also exposes the Bronze content hash and
+fragment selector when present.
+
+Candidate Observations are labelled resolved, partially resolved, or
+unresolved from their immutable `entity-resolution` observations. Multiple
+active Claims for the same subject and predicate are labelled competing when
+their values differ. The inspector does not resolve conflicts, edit Silver, or
+select a preferred Gold interpretation.
+
 ## Reprocessing and history
 
 The following rules make later reprocessing safe without defining job
