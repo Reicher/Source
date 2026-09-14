@@ -11,21 +11,24 @@ import com.source.client.ai.SourceAiEvent
 import com.source.client.ai.SourceAiRequest
 import com.source.client.ai.SourceAiRuntime
 import com.source.client.model.AiModelMetadata
-import com.source.client.storage.SilverClaim
 import com.source.client.storage.SilverBatchCheckpoint
+import com.source.client.storage.SilverBatchResult
 import com.source.client.storage.SilverCheckpointData
 import com.source.client.storage.SilverCheckpointDataset
 import com.source.client.storage.SilverData
 import com.source.client.storage.SilverDataset
-import com.source.client.storage.SilverEntity
+import com.source.client.storage.SilverEvidence
+import com.source.client.storage.SilverJsonObject
+import com.source.client.storage.SilverJsonString
+import com.source.client.storage.SilverObservation
+import com.source.client.storage.SilverProducer
 import com.source.client.storage.SilverRefinementCheckpoint
-import com.source.client.storage.SilverResult
-import com.source.client.storage.SilverScalarValue
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -34,28 +37,33 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class SilverDeviceTest {
     @Test
-    fun SilverCheckpointDataRoundTripsCompletedBatches() {
+    fun LegacySilverDataIsDiscardedInsteadOfMigrated() {
+        val legacy = """{"version":1,"modifiedAtMillis":100,"results":[],"removedSources":[]}"""
+
+        assertEquals(SilverDataset(), SilverData.decode(legacy.toByteArray()))
+    }
+
+    @Test
+    fun SilverCheckpointDataRoundTripsCompletedObservationBatches() {
         val sourceId = "source-1"
         val sourceHash = "a".repeat(64)
-        fun batchResult(processedAt: Long) = SilverResult(
-            bronzeSourceId = sourceId,
-            bronzeContentSha256 = sourceHash,
-            entities = emptyList(),
-            claims = emptyList(),
-            modelId = "model-4b",
-            parameterCount = 4_000_000_000,
-            processorVersion = 2,
-            processedAtMillis = processedAt,
+        val evidence = SilverEvidence.create(sourceId, sourceHash)
+        val observation = observation(evidence, 100)
+        val result = SilverBatchResult(
+            listOf(evidence),
+            listOf(observation),
+            "model-4b",
+            4_000_000_000,
         )
         val dataset = SilverCheckpointDataset(
             checkpoints = listOf(SilverRefinementCheckpoint(
                 bronzeSourceId = sourceId,
                 bronzeContentSha256 = sourceHash,
-                processorVersion = 2,
+                processorVersion = "2",
                 totalBatches = 3,
                 completedBatches = listOf(
-                    SilverBatchCheckpoint(0, "b".repeat(64), batchResult(100)),
-                    SilverBatchCheckpoint(1, "c".repeat(64), batchResult(101)),
+                    SilverBatchCheckpoint(0, "b".repeat(64), result),
+                    SilverBatchCheckpoint(1, "c".repeat(64), result),
                 ),
             )),
             refinementPaused = true,
@@ -65,38 +73,24 @@ class SilverDeviceTest {
     }
 
     @Test
-    fun SilverDataRoundTripsTaggedClaimsAndProcessingMetadata() {
-        val source = "source-1"
-        val berlin = SilverEntity(entityId("place", "Berlin"), "Berlin", "place")
-        val sourceProject = SilverEntity(entityId("project", "Source"), "Source", "project")
-        val result = SilverResult(
-            bronzeSourceId = source,
-            bronzeContentSha256 = "a".repeat(64),
-            entities = listOf(berlin, sourceProject),
-            claims = listOf(
-                SilverClaim(sourceProject.id, "located-in", objectEntityId = berlin.id, confidence = .9,
-                    bronzeSourceId = source, evidenceExcerpt = "Source is in Berlin"),
-                SilverClaim(sourceProject.id, "active", value = SilverScalarValue.BooleanValue(true), confidence = .8,
-                    bronzeSourceId = source),
-                SilverClaim(sourceProject.id, "members", value = SilverScalarValue.Number(4.0), confidence = .7,
-                    bronzeSourceId = source),
-            ),
-            modelId = "model-9b",
-            parameterCount = 9_000_000_000,
-            processorVersion = 1,
-            processedAtMillis = 100,
+    fun SilverDataRoundTripsEvidenceObservationsAndProducerMetadata() {
+        val evidence = SilverEvidence.create(
+            "source-1",
+            "a".repeat(64),
+            selector = SilverJsonObject(mapOf(
+                "kind" to SilverJsonString("page"),
+                "number" to com.source.client.storage.SilverJsonNumber(2.0),
+            )),
+            excerpt = "Source is in Berlin",
         )
-        val dataset = SilverDataset(
-            listOf(result),
-            modifiedAtMillis = 101,
-            removedSourceIds = mapOf("removed-source" to 99),
-        )
+        val observation = observation(evidence, 100)
+        val dataset = SilverDataset(listOf(evidence), listOf(observation), 101)
 
         assertEquals(dataset, SilverData.decode(SilverData.encode(dataset)))
     }
 
     @Test
-    fun ExtractionAssignsAppIdsAndKeepsOnlyVerifiedEvidence() = runBlocking {
+    fun ExtractionStoresLocalCandidatesWithoutCreatingGlobalEntities() = runBlocking {
         val model = AiModelMetadata("test-model", 9_000_000_000)
         val runtime = object : SourceAiRuntime {
             override val capabilities = SourceAiCapabilities(
@@ -115,16 +109,34 @@ class SilverDeviceTest {
         )
 
         assertEquals(model, extracted.model)
-        assertEquals(setOf(entityId("project", "Source"), entityId("place", "Berlin")), extracted.entities.map { it.id }.toSet())
-        assertEquals("Source is based in Berlin", extracted.claims.first().evidenceExcerpt)
-        assertEquals(null, extracted.claims.last().evidenceExcerpt)
-        assertEquals(3, extracted.claims.size)
-        assertEquals(entityId("place", "Berlin"), extracted.claims[2].objectEntityId)
-        assertEquals(null, extracted.claims[2].value)
+        assertEquals(1, extracted.evidence.size)
+        assertEquals(4, extracted.observations.size)
+        val completion = extracted.observations.single { it.kind == SILVER_EXTRACTION_COMPLETE_KIND }
+        assertEquals(SILVER_EXTRACTION_PROCESSOR_ID, completion.producer.processorId)
+        assertEquals(model.modelId, completion.producer.modelId)
+        assertNull(completion.confidence)
+        val candidates = extracted.observations.filterNot { it.kind == SILVER_EXTRACTION_COMPLETE_KIND }
+        assertEquals(3, candidates.size)
+        val first = candidates[0]
+        val second = candidates[1]
+        val third = candidates[2]
+        assertEquals(SILVER_RELATIONSHIP_CANDIDATE_KIND, first.kind)
+        assertEquals(.9, first.confidence ?: 0.0, 0.0)
+        assertEquals(
+            SilverJsonString("Source is based in Berlin"),
+            (first.payload as SilverJsonObject).properties["evidenceExcerpt"],
+        )
+        assertEquals(SILVER_ATTRIBUTE_CANDIDATE_KIND, second.kind)
+        assertNull((second.payload as SilverJsonObject).properties["evidenceExcerpt"])
+        val thirdPayload = third.payload as SilverJsonObject
+        assertEquals(SILVER_RELATIONSHIP_CANDIDATE_KIND, third.kind)
+        assertEquals(SilverJsonString("Berlin"),
+            ((thirdPayload.properties["object"] as SilverJsonObject).properties["name"]))
+        assertNull(thirdPayload.properties["value"])
     }
 
     @Test
-    fun LocalModelProducesUsableSilverExtraction() = runBlocking {
+    fun LocalModelProducesUsableSilverObservations() = runBlocking {
         assumeTrue(InstrumentationRegistry.getArguments().getString("sourceQwenRuntime") == "true")
         val runtime = LocalAiRuntime(ApplicationProvider.getApplicationContext<Context>())
         val extracted = withTimeout(180_000) {
@@ -140,8 +152,15 @@ class SilverDeviceTest {
             )
         }
         assertEquals(4_000_000_000L, extracted.model.parameterCount)
-        assertTrue("Expected entities from local extraction: $extracted", extracted.entities.isNotEmpty())
-        assertTrue("Expected claims from local extraction: $extracted", extracted.claims.isNotEmpty())
+        assertTrue("Expected observations from local extraction: $extracted", extracted.observations.isNotEmpty())
         runtime.releaseMemory()
     }
+
+    private fun observation(evidence: SilverEvidence, createdAtMillis: Long) = SilverObservation.create(
+        kind = SILVER_EXTRACTION_COMPLETE_KIND,
+        payload = SilverJsonObject(emptyMap()),
+        evidenceIds = listOf(evidence.id),
+        producer = SilverProducer.create(SILVER_EXTRACTION_PROCESSOR_ID, "2", "model-4b"),
+        createdAtMillis = createdAtMillis,
+    )
 }

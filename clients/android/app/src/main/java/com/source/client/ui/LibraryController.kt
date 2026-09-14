@@ -420,7 +420,7 @@ internal fun withSilverState(library: LibraryUiState, silver: SilverUiState): Li
                 in silver.syncing -> LibrarySyncState.SYNCING
                 in silver.syncFailed -> LibrarySyncState.FAILED
                 in silver.pendingSync -> LibrarySyncState.LOCAL_ONLY
-                else -> if (silver.dataset.results.any { it.bronzeSourceId == item.id }) {
+                else -> if (silver.dataset.evidence.any { it.bronzeSourceId == item.id }) {
                     LibrarySyncState.LOCAL_AND_SYNCED
                 } else {
                     null
