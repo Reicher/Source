@@ -235,6 +235,27 @@ class SecureVaultDeviceTest {
     }
 
     @Test
+    fun failedLocalFileDeletionRetainsProfileSoDeletionCanBeRetried() {
+        val vault = SecureVault(context, preferencesName, alias)
+        val password = "known password".toCharArray()
+        val created = vault.create("Retryable", password)
+        val profileId = created.profileId
+        created.close()
+
+        val failure = runCatching {
+            vault.deleteProfile(profileId) { throw IllegalStateException("Simulated filesystem failure") }
+        }
+
+        assertTrue(failure.isFailure)
+        assertEquals(listOf(profileId), vault.profiles.map { it.id })
+        vault.unlock(profileId, password)!!.close()
+
+        vault.deleteProfile(profileId)
+        assertTrue(vault.profiles.isEmpty())
+        password.fill('\u0000')
+    }
+
+    @Test
     fun legacySingleUserVaultMigratesWithoutLosingItsIdentity() {
         val vault = SecureVault(context, preferencesName, alias)
         val password = "old password".toCharArray()

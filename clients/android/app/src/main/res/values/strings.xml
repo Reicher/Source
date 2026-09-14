@@ -86,6 +86,7 @@
     <string name="error_password_required">Enter a password.</string>
     <string name="error_passwords_mismatch">The passwords do not match.</string>
     <string name="error_user_creation_failed">The user could not be created on this device.</string>
+    <string name="error_user_deletion_failed">The user and their local data could not be completely deleted. Try again.</string>
     <string name="error_enter_password">Enter your password.</string>
     <string name="error_incorrect_password">Incorrect password.</string>
     <string name="error_source_data_unreadable">Source data could not be read on this device.</string>

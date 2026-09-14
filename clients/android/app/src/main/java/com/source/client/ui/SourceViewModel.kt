@@ -278,23 +278,31 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
 
     fun deleteCurrentUser() {
         val profileId = session?.profileId ?: return
+        val profile = app.secureVault.profiles.firstOrNull { it.id == profileId } ?: return
         clearSession()
-        deleteLocalProfile(profileId)
+        deleteLocalProfile(profile)
     }
 
     fun deleteLockedUser() {
         val locked = _screen.value as? AppScreen.Locked ?: return
         _screen.value = locked.copy(error = null, busy = true)
-        deleteLocalProfile(locked.profile.id)
+        deleteLocalProfile(locked.profile)
     }
 
-    private fun deleteLocalProfile(profileId: String) {
+    private fun deleteLocalProfile(profile: VaultProfile) {
         viewModelScope.launch {
-            runCatching {
-                withContext(Dispatchers.IO) { app.secureVault.deleteProfile(profileId) }
+            val result = runCatching {
+                withContext(Dispatchers.IO) { app.secureVault.deleteProfile(profile.id) }
             }
-            val profiles = app.secureVault.profiles
-            _screen.value = if (profiles.isEmpty()) AppScreen.Setup() else AppScreen.Accounts(profiles)
+            if (result.isFailure) {
+                _screen.value = AppScreen.Locked(
+                    app.secureVault.profiles.firstOrNull { it.id == profile.id } ?: profile,
+                    error = message(R.string.error_user_deletion_failed),
+                )
+                return@launch
+            }
+            val remainingProfiles = app.secureVault.profiles
+            _screen.value = if (remainingProfiles.isEmpty()) AppScreen.Setup() else AppScreen.Accounts(remainingProfiles)
         }
     }
 
