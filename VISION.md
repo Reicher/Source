@@ -160,4 +160,5 @@ trusted devices on the local network.
 - [`README.md`](README.md) — implemented scope and development entry point
 - [`docs/operations.md`](docs/operations.md) — deployment and security boundaries
 - [`docs/pairing.md`](docs/pairing.md) — current administration and pairing protocol
+- [`docs/SILVER.md`](docs/SILVER.md) — normative Silver v1 knowledge model
 - [`contracts/`](contracts/README.md) — versioned Source API and AI contracts
