@@ -65,6 +65,9 @@
     <string name="done">Done</string>
     <string name="show_recovery_key">Show recovery key</string>
     <string name="sign_out">Sign out</string>
+    <string name="delete_user">Delete user</string>
+    <string name="delete_user_confirmation_title">Delete %1$s?</string>
+    <string name="delete_user_confirmation_message">This permanently deletes this user and all of their data from this phone only. Data on a paired Node is not deleted. This cannot be undone.</string>
     <string name="this_device">This device</string>
     <string name="node">Node</string>
     <string name="connect">Connect</string>

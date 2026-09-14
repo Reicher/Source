@@ -272,7 +272,35 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun logout() {
+        clearSession()
+        _screen.value = AppScreen.Accounts(app.secureVault.profiles)
+    }
+
+    fun deleteCurrentUser() {
+        val profileId = session?.profileId ?: return
+        clearSession()
+        deleteLocalProfile(profileId)
+    }
+
+    fun deleteLockedUser() {
+        val locked = _screen.value as? AppScreen.Locked ?: return
+        _screen.value = locked.copy(error = null, busy = true)
+        deleteLocalProfile(locked.profile.id)
+    }
+
+    private fun deleteLocalProfile(profileId: String) {
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) { app.secureVault.deleteProfile(profileId) }
+            }
+            val profiles = app.secureVault.profiles
+            _screen.value = if (profiles.isEmpty()) AppScreen.Setup() else AppScreen.Accounts(profiles)
+        }
+    }
+
+    private fun clearSession() {
         pairingJob?.cancel()
+        pairingJob = null
         chatController.reset()
         silverController.pauseForInteraction()
         nodeConnection.clear()
@@ -284,7 +312,6 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             libraryController.reset()
             silverController.reset()
         }
-        _screen.value = AppScreen.Accounts(app.secureVault.profiles)
     }
 
     fun selectAi(selection: AiSelection) = chatController.selectAi(selection)

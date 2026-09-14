@@ -4,7 +4,8 @@ This directory is an independently buildable Android application inside the
 Source monorepo. It intentionally implements only the first vertical slices:
 
 1. create multiple password-protected local Source users, switch between them,
-   and log out without deleting their separate encrypted data;
+   log out, and explicitly delete a user and their encrypted data from this
+   client only after confirmation;
 2. discover `_source._tcp` Nodes on the LAN;
 3. scan and validate the Node's protocol-v1 invitation QR;
 4. complete the existing mutual Ed25519 pairing handshake;

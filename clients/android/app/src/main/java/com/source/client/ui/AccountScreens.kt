@@ -132,8 +132,10 @@ internal fun UnlockScreen(
     state: AppScreen.Locked,
     submit: (String) -> Unit,
     switchUser: () -> Unit,
+    deleteUser: () -> Unit,
 ) {
     var password by rememberSaveable { mutableStateOf("") }
+    var confirmDelete by rememberSaveable { mutableStateOf(false) }
     SourceColumn {
         Wordmark()
         Spacer(Modifier.height(56.dp))
@@ -166,5 +168,18 @@ internal fun UnlockScreen(
         TextButton(onClick = switchUser, enabled = !state.busy) {
             Text(stringResource(R.string.switch_user))
         }
+        TextButton(onClick = { confirmDelete = true }, enabled = !state.busy) {
+            Text(stringResource(R.string.delete_user), color = MaterialTheme.colorScheme.error)
+        }
+    }
+    if (confirmDelete) {
+        DeleteUserDialog(
+            userDisplayName = state.profile.displayName,
+            onConfirm = {
+                confirmDelete = false
+                deleteUser()
+            },
+            onDismiss = { confirmDelete = false },
+        )
     }
 }
