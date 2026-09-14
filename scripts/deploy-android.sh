@@ -12,6 +12,7 @@ bundletool_dir="$repo_root/.deps/bundletool"
 bundletool_jar="$bundletool_dir/bundletool-all-$bundletool_version.jar"
 bundletool_download="$bundletool_jar.download"
 debug_apk="$android_dir/app/build/outputs/apk/debug/app-debug.apk"
+debug_metadata="$android_dir/app/build/outputs/apk/debug/output-metadata.json"
 debug_bundle="$android_dir/app/build/outputs/bundle/debug/app-debug.aab"
 device_apks="$android_dir/app/build/outputs/apks/debug/source-client-debug.apks"
 
@@ -133,6 +134,11 @@ model_is_current() {
     done
 }
 
+installed_version_code() {
+    package_dump=$(adb_device shell dumpsys package "$package_name" 2>/dev/null | tr -d '\r') || return 1
+    printf '%s\n' "$package_dump" | sed -n 's/.*versionCode=\([0-9][0-9]*\).*/\1/p' | sed -n '1p'
+}
+
 write_model_stamp() {
     adb_device shell run-as "$package_name" mkdir -p files >/dev/null || \
         fail "the app was installed, but its private files directory is unavailable."
@@ -143,14 +149,36 @@ write_model_stamp() {
 
 printf 'Deploying Source Client to %s (%s, API %s).\n' "$device_model" "$serial" "$device_api"
 printf 'Expected model: %s (%s).\n' "$model_label" "$model_sha256"
+printf '%s\n' "Building the debug Client APK."
+if ! (cd "$android_dir" && ./gradlew :app:assembleDebug); then
+    fail "the Android debug build failed."
+fi
+[ -f "$debug_apk" ] || fail "Gradle succeeded but did not produce $debug_apk."
+[ -f "$debug_metadata" ] || fail "Gradle succeeded but did not produce $debug_metadata."
+built_version=$(python3 - "$debug_metadata" <<'PY'
+import json
+import sys
 
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as source:
+        elements = json.load(source)["elements"]
+    if len(elements) != 1 or not isinstance(elements[0]["versionCode"], int):
+        raise ValueError("expected exactly one APK with an integer versionCode")
+except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+    print(f"Invalid Android APK metadata {path}: {error}", file=sys.stderr)
+    raise SystemExit(1)
+print(elements[0]["versionCode"])
+PY
+) || fail "could not read the built Client version code."
+installed_version=$(installed_version_code || true)
+model_current=0
 if model_is_current; then
+    model_current=1
+fi
+
+if [ "$model_current" -eq 1 ] && [ "$installed_version" = "$built_version" ]; then
     printf '%s\n' "The correct model and all three asset packs are already installed; the 3 GB model will not be transferred."
-    printf '%s\n' "Building the debug Client APK."
-    if ! (cd "$android_dir" && ./gradlew :app:assembleDebug); then
-        fail "the Android debug build failed."
-    fi
-    [ -f "$debug_apk" ] || fail "Gradle succeeded but did not produce $debug_apk."
     printf '%s\n' "Updating the Client while retaining the installed model asset packs."
     if ! adb_device install-multiple -r -p "$package_name" "$debug_apk"; then
         fail "the base APK update failed; the installed app may have a newer version code or a different signing key."
@@ -158,8 +186,18 @@ if model_is_current; then
     if ! model_is_current; then
         fail "the base APK was updated, but Android did not retain the model asset packs; rerun to reprovision them."
     fi
+    [ "$(installed_version_code || true)" = "$built_version" ] || \
+        fail "the base APK was installed, but its version code does not match the build."
 else
-    printf '%s\n' "The model is missing or does not match the manifest; provisioning the complete install."
+    if [ "$model_current" -eq 0 ]; then
+        printf '%s\n' "The model is missing or does not match the manifest."
+    elif [ -z "$installed_version" ]; then
+        printf '%s\n' "The installed Client version could not be determined; a complete install is required."
+    else
+        printf 'Client version is changing from %s to %s; Android requires matching asset-pack versions.\n' \
+            "$installed_version" "$built_version"
+    fi
+    printf '%s\n' "Provisioning the complete install while preserving app data."
     "$repo_root/scripts/provision-client-model.sh"
 
     mkdir -p "$bundletool_dir"
@@ -203,6 +241,8 @@ else
     fi
     write_model_stamp
     model_is_current || fail "installation completed, but the expected model asset packs were not found on the device."
+    [ "$(installed_version_code || true)" = "$built_version" ] || \
+        fail "installation completed, but the installed version code does not match the build."
 fi
 
 printf 'Source Client deployment completed on %s; app data was preserved.\n' "$device_model"

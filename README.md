@@ -94,8 +94,10 @@ external service at runtime.
 To build and deploy Source Client to one authorized USB-connected Android
 device, run `./scripts/deploy-android.sh` from the repository root. Once the
 model recorded in `models/source-ai-models.json` is installed, subsequent runs
-retain it and update only the Client APK. See the
-[Android Client README](clients/android/README.md) for details and device tests.
+with the same Android `versionCode` retain it and update only the Client APK.
+Version changes reinstall the complete split APK set without clearing app data.
+See the [Android Client README](clients/android/README.md) for details and device
+tests.
 
 ## License
 
