@@ -1,10 +1,10 @@
-# Silver v1 data model
+# Silver data model
 
 Silver is Source's derived, revisable knowledge layer. Bronze remains the
 canonical source material; Silver records what processors observed and what
 Source currently believes about those observations.
 
-This document is the normative model for Silver v1. The existing Android
+This document is the normative model for Silver. The existing Android
 `SilverResult` format is a prototype and will migrate toward this model through
 the Silver implementation issues. This document defines data semantics, not a
 storage schema or API wire format.
@@ -40,7 +40,7 @@ debugging but are not shown by default.
   Missing confidence means unknown, not `1`.
 - Processor identifiers, observation kinds, predicates, and entity types are
   open strings. Silver has no global domain-type or predicate enum.
-- Silver v1 scalar values are text, finite number, and boolean. More specialized
+- Silver scalar values are text, finite number, and boolean. More specialized
   values can be added later without changing entity identity.
 
 The common producer value is:
@@ -83,8 +83,8 @@ serializer is not sufficient.
    itself does not perform Unicode normalization.
 6. Compute `SHA-256(UTF8(prefix) || 0x00 || jcsBytes)` and encode the digest as
    64 lowercase hexadecimal characters. The prefixes are
-   `source-silver-evidence-v1`, `source-silver-observation-v1`, and
-   `source-silver-claim-v1`.
+   `source-silver-evidence`, `source-silver-observation`, and
+   `source-silver-claim`.
 
 All UUID fields use lowercase hyphenated UUID text. All SHA-256 fields use 64
 lowercase hexadecimal characters. Inputs that do not satisfy these forms are
@@ -231,7 +231,7 @@ not identity fields. A Gold projection may cache a preferred display label and
 type, but changing either does not create a new entity.
 
 Entity IDs are never reused. Future merge and split operations may relate or
-supersede entities while retaining the old IDs and their provenance; Silver v1
+supersede entities while retaining the old IDs and their provenance; Silver
 does not define the merge/split algorithm.
 
 ## Claim
@@ -340,12 +340,12 @@ Gothenburg`.
 
 ## Implementation consequences
 
-Android Silver snapshot format v2 implements the Evidence and Observation
-portion of this contract. Snapshot v1 data is discarded on read rather than
-migrated because it contains prematurely resolved prototype entities and
-claims. The first subsequent write replaces both local and synchronized v1
-Silver state with v2 records; Bronze, Library, and conversation data are not
-affected.
+The Android Silver snapshot persists Evidence, Observation, Entity, and Claim
+as first-class records. There is one Silver shape and no compatibility or
+migration path for older prototypes. Existing local or synchronized Silver
+snapshots must be deleted and rebuilt from Bronze. Bronze, Library, and
+conversation data are not affected. Local in-progress refinement checkpoints
+likewise have one supported shape.
 
 The Android `source.android.silver-extraction` processor version `3` emits one
 `attribute-candidate` or `relationship-candidate` Observation for each valid
@@ -373,14 +373,9 @@ Observation with an empty payload. It is a durable, deterministic processing
 receipt, including when the processor found no candidates, and prevents an
 unchanged source and producer version from being processed repeatedly.
 
-The remaining prototype consequences are handled by subsequent issues:
-
-- opaque stable Entity identities must be introduced without reviving the old
-  name-derived identity scheme;
-- Entities and Claims must be added as retained first-class records linked
-  to these Observations;
-- candidate excerpts may later be promoted into fragment-level Evidence while
-  remaining optional display metadata.
-
-Those migrations belong to the implementation issues following this model
-definition. Existing Bronze data remains canonical throughout the migration.
+Entity resolution remains deliberately separate: candidate Observations do not
+create global Entities by themselves. A resolution step may now create opaque
+Entity UUIDs and evidence-backed Claims in this storage model. Candidate
+excerpts may later be promoted into fragment-level Evidence while remaining
+optional display metadata. Existing Bronze data remains canonical throughout
+the migration.

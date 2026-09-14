@@ -15,14 +15,17 @@ import com.source.client.storage.SilverBatchCheckpoint
 import com.source.client.storage.SilverBatchResult
 import com.source.client.storage.SilverCheckpointData
 import com.source.client.storage.SilverCheckpointDataset
+import com.source.client.storage.SilverClaim
 import com.source.client.storage.SilverData
 import com.source.client.storage.SilverDataset
+import com.source.client.storage.SilverEntity
 import com.source.client.storage.SilverEvidence
 import com.source.client.storage.SilverJsonObject
 import com.source.client.storage.SilverJsonString
 import com.source.client.storage.SilverObservation
 import com.source.client.storage.SilverProducer
 import com.source.client.storage.SilverRefinementCheckpoint
+import com.source.client.storage.SilverScalar
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
@@ -36,21 +39,18 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class SilverDeviceTest {
-    @Test
-    fun LegacySilverDataIsDiscardedInsteadOfMigrated() {
+    @Test(expected = RuntimeException::class)
+    fun OldSilverShapeIsRejectedRatherThanMigrated() {
         val legacy = """{"version":1,"modifiedAtMillis":100,"results":[],"removedSources":[]}"""
 
-        assertEquals(SilverDataset(), SilverData.decode(legacy.toByteArray()))
+        SilverData.decode(legacy.toByteArray())
     }
 
-    @Test
-    fun LegacySilverCheckpointsDiscardWorkButPreservePausedPreference() {
+    @Test(expected = RuntimeException::class)
+    fun OldSilverCheckpointShapeIsRejectedRatherThanMigrated() {
         val legacy = """{"version":1,"refinementPaused":true,"checkpoints":[{"legacy":"work"}]}"""
 
-        assertEquals(
-            SilverCheckpointDataset(refinementPaused = true),
-            SilverCheckpointData.decode(legacy.toByteArray()),
-        )
+        SilverCheckpointData.decode(legacy.toByteArray())
     }
 
     @Test
@@ -83,7 +83,7 @@ class SilverDeviceTest {
     }
 
     @Test
-    fun SilverDataRoundTripsEvidenceObservationsAndProducerMetadata() {
+    fun SilverDataRoundTripsEvidenceObservationsEntitiesClaimsAndProducerMetadata() {
         val evidence = SilverEvidence.create(
             "source-1",
             "a".repeat(64),
@@ -94,7 +94,44 @@ class SilverDeviceTest {
             excerpt = "Source is in Berlin",
         )
         val observation = observation(evidence, 100)
-        val dataset = SilverDataset(listOf(evidence), listOf(observation), 101)
+        val subject = SilverEntity(
+            "00000000-0000-4000-8000-000000000001",
+            listOf(observation.id),
+            observation.producer,
+            101,
+        )
+        val related = SilverEntity(
+            "00000000-0000-4000-8000-000000000002",
+            listOf(observation.id),
+            observation.producer,
+            101,
+        )
+        val claims = listOf(
+            SilverClaim.create(
+                subject.id,
+                "status",
+                value = SilverScalar.text("active"),
+                supportingObservationIds = listOf(observation.id),
+                producer = observation.producer,
+                createdAtMillis = 102,
+            ),
+            SilverClaim.create(
+                subject.id,
+                "based-in",
+                objectEntityId = related.id,
+                supportingObservationIds = listOf(observation.id),
+                confidence = .9,
+                producer = observation.producer,
+                createdAtMillis = 102,
+            ),
+        )
+        val dataset = SilverDataset(
+            evidence = listOf(evidence),
+            observations = listOf(observation),
+            modifiedAtMillis = 103,
+            entities = listOf(subject, related),
+            claims = claims,
+        )
 
         assertEquals(dataset, SilverData.decode(SilverData.encode(dataset)))
     }

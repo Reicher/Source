@@ -546,12 +546,24 @@ internal fun removeSilverSources(
     val observations = dataset.observations.filterNot { observation ->
         observation.evidenceIds.any(removedEvidenceIds::contains)
     }
+    val observationIds = observations.mapTo(mutableSetOf()) { it.id }
+    val entities = dataset.entities.filter { entity ->
+        observationIds.containsAll(entity.originObservationIds)
+    }
+    val entityIds = entities.mapTo(mutableSetOf()) { it.id }
+    val claims = dataset.claims.filter { claim ->
+        observationIds.containsAll(claim.supportingObservationIds) &&
+            claim.subjectEntityId in entityIds &&
+            (claim.objectEntityId == null || claim.objectEntityId in entityIds)
+    }
     val referencedEvidenceIds = observations.flatMapTo(mutableSetOf(), SilverObservation::evidenceIds)
     return dataset.copy(
         evidence = dataset.evidence.filter { evidence ->
             evidence.bronzeSourceId !in sourceIds && evidence.id in referencedEvidenceIds
         },
         observations = observations,
+        entities = entities,
+        claims = claims,
         modifiedAtMillis = removedAtMillis,
         removedSourceIds = dataset.removedSourceIds + sourceIds.associateWith { removedAtMillis },
     )

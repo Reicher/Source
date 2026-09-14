@@ -5,12 +5,15 @@ import com.source.client.knowledge.SILVER_EXTRACTION_COMPLETE_KIND
 import com.source.client.knowledge.sha256Hex
 import com.source.client.model.AiModelMetadata
 import com.source.client.storage.SilverBatchCheckpoint
+import com.source.client.storage.SilverClaim
 import com.source.client.storage.SilverData
 import com.source.client.storage.SilverDataset
+import com.source.client.storage.SilverEntity
 import com.source.client.storage.SilverJsonObject
 import com.source.client.storage.SilverObservation
 import com.source.client.storage.SilverProducer
 import com.source.client.storage.SilverRefinementCheckpoint
+import com.source.client.storage.SilverScalar
 import com.source.client.storage.testBatchResult
 import com.source.client.storage.testEvidence
 import com.source.client.storage.testObservation
@@ -78,9 +81,25 @@ class SilverQualityTest {
             producer = SilverProducer.create("processor", "1"),
             createdAtMillis = 100,
         )
+        val entity = SilverEntity(
+            id = "00000000-0000-4000-8000-000000000001",
+            originObservationIds = listOf(crossSourceObservation.id),
+            createdBy = crossSourceObservation.producer,
+            createdAtMillis = 100,
+        )
+        val claim = SilverClaim.create(
+            subjectEntityId = entity.id,
+            predicate = "status",
+            value = SilverScalar.text("active"),
+            supportingObservationIds = listOf(crossSourceObservation.id),
+            producer = crossSourceObservation.producer,
+            createdAtMillis = 100,
+        )
         val dataset = SilverDataset(
             evidence = listOf(removedEvidence, otherEvidence),
             observations = listOf(crossSourceObservation),
+            entities = listOf(entity),
+            claims = listOf(claim),
             modifiedAtMillis = 100,
         )
 
@@ -88,6 +107,8 @@ class SilverQualityTest {
 
         assertTrue(updated.evidence.isEmpty())
         assertTrue(updated.observations.isEmpty())
+        assertTrue(updated.entities.isEmpty())
+        assertTrue(updated.claims.isEmpty())
         assertEquals(mapOf("removed-source" to 101L), updated.removedSourceIds)
         SilverData.version(updated)
     }

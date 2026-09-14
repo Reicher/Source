@@ -7,9 +7,9 @@ import org.junit.Test
 
 class SilverDataTest {
     @Test
-    fun `Silver v2 accepts old envelopes only for destructive reset`() {
-        assertEquals(2, SilverData.descriptor.formatVersion)
-        assertEquals(setOf(1, 2), SilverData.supportedFormatVersions)
+    fun `Silver accepts only its current snapshot format`() {
+        assertEquals(1, SilverData.descriptor.formatVersion)
+        assertEquals(setOf(1), SilverData.supportedFormatVersions)
     }
 
     @Test
