@@ -213,6 +213,49 @@ class SecureVaultDeviceTest {
     }
 
     @Test
+    fun userCanBeDeletedLocallyWithoutPasswordWhileOtherUsersRemain() {
+        val vault = SecureVault(context, preferencesName, alias)
+        val blobStore = EncryptedBlobStore(context)
+        val deleted = vault.create("Codex", "forgotten password".toCharArray())
+        val deletedProfileId = deleted.profileId
+        blobStore.importFile(deleted, ByteArrayInputStream("private local data".toByteArray()))
+        deleted.close()
+        val retained = vault.create("Robin", "known password".toCharArray())
+        val retainedProfileId = retained.profileId
+        retained.close()
+
+        vault.deleteProfile(deletedProfileId)
+
+        assertEquals(listOf(retainedProfileId), vault.profiles.map { it.id })
+        assertNull(vault.unlock(deletedProfileId, "forgotten password".toCharArray()))
+        assertFalse(context.filesDir.resolve("library/$deletedProfileId").exists())
+        val preferences = context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
+        assertFalse(preferences.all.keys.any { it.startsWith("profile.$deletedProfileId.") })
+        vault.unlock(retainedProfileId, "known password".toCharArray())!!.close()
+    }
+
+    @Test
+    fun failedLocalFileDeletionRetainsProfileSoDeletionCanBeRetried() {
+        val vault = SecureVault(context, preferencesName, alias)
+        val password = "known password".toCharArray()
+        val created = vault.create("Retryable", password)
+        val profileId = created.profileId
+        created.close()
+
+        val failure = runCatching {
+            vault.deleteProfile(profileId) { throw IllegalStateException("Simulated filesystem failure") }
+        }
+
+        assertTrue(failure.isFailure)
+        assertEquals(listOf(profileId), vault.profiles.map { it.id })
+        vault.unlock(profileId, password)!!.close()
+
+        vault.deleteProfile(profileId)
+        assertTrue(vault.profiles.isEmpty())
+        password.fill('\u0000')
+    }
+
+    @Test
     fun legacySingleUserVaultMigratesWithoutLosingItsIdentity() {
         val vault = SecureVault(context, preferencesName, alias)
         val password = "old password".toCharArray()

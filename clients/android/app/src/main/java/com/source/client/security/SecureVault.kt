@@ -101,6 +101,37 @@ class SecureVault(
 
     fun save(session: VaultSession) = persistVault(session)
 
+    /** Removes one local profile and its encrypted device-only data without contacting a Node. */
+    fun deleteProfile(profileId: String) = deleteProfile(profileId, ::deleteLocalFiles)
+
+    internal fun deleteProfile(profileId: String, removeLocalFiles: (String) -> Unit) {
+        val currentProfiles = profiles
+        if (currentProfiles.none { it.id == profileId }) return
+
+        // Keep the profile and wrapped key until every local file is gone. If this
+        // fails, callers can surface the error and retry the same profile.
+        removeLocalFiles(profileId)
+
+        val profilePrefix = "profile.$profileId."
+        val editor = preferences.edit()
+        preferences.all.keys.filter { it.startsWith(profilePrefix) }.forEach(editor::remove)
+        if (profileId == LEGACY_PROFILE_ID) {
+            LEGACY_KEYS.forEach(editor::remove)
+            editor.remove(KEY_INITIALIZED)
+        }
+        editor.putString(KEY_PROFILES, encodeProfiles(currentProfiles.filterNot { it.id == profileId }))
+        check(editor.commit()) { "Could not delete Source identity" }
+    }
+
+    private fun deleteLocalFiles(profileId: String) {
+        check(context.filesDir.resolve("library/$profileId").deleteRecursively()) {
+            "Could not delete encrypted Library data"
+        }
+        check(context.cacheDir.resolve("library-sync").deleteRecursively()) {
+            "Could not delete cached Library data"
+        }
+    }
+
     internal fun loadData(session: VaultSession, data: SourceDataDescriptor): ByteArray? {
         check(!session.closed)
         val encodedNonce = preferences.getString(profileKey(session.profileId, dataKey(data.id, KEY_DATA_NONCE)), null)

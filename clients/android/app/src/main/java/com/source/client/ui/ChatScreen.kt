@@ -76,6 +76,7 @@ internal fun MainScreen(
     newConversation: () -> Unit,
     cancelInference: () -> Unit,
     logout: () -> Unit,
+    deleteUser: () -> Unit,
     selectDestination: (MainDestination) -> Unit,
     importFile: (android.net.Uri) -> Unit,
     removeLibraryItemFromDevice: (String) -> Unit,
@@ -225,6 +226,10 @@ internal fun MainScreen(
             onLogout = {
                 settingsOpen = false
                 logout()
+            },
+            onDeleteUser = {
+                settingsOpen = false
+                deleteUser()
             },
             onDismiss = { settingsOpen = false },
         )
