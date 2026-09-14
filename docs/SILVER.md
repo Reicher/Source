@@ -306,8 +306,15 @@ select a preferred Gold interpretation.
 
 ## Reprocessing and history
 
-The following rules make later reprocessing safe without defining job
-execution in Silver:
+One completed extraction generation is identified by its Bronze source and
+content hash plus its extraction processor, processor version, and model. The
+Android commit boundary accepts a generation only when all Evidence belongs to
+that exact Bronze revision, every Observation belongs to one producer/model,
+all references are internally complete, and a
+`knowledge-extraction-complete` receipt is present.
+
+The following rules make reprocessing safe without making checkpoints or jobs
+part of Silver:
 
 1. Equal Evidence identity fields produce the same Evidence ID.
 2. Equal normalized Observation identity fields produce the same Observation
@@ -315,19 +322,26 @@ execution in Silver:
 3. Equal normalized Claim identity fields, including equal resolved Entity
    UUIDs, produce the same Claim ID. A Bronze revision alone does not determine
    Claim identity.
-4. New Bronze content or a new processor/model version produces new immutable
-   observations and claims.
-5. New records do not delete old records. Old claims may change lifecycle state,
-   but their assertion, evidence, producer, and creation metadata remain
-   available.
-6. Current knowledge is a projection over active claims, not the latest record
-   chosen by wall-clock time or model size.
-7. Retention or compaction may be added later. Until then, Source retains old
-   interpretations.
-
-The exact activation, replacement, and stale-generation policy belongs to the
-Silver reprocessing issue. These fields ensure that policy can be implemented
-without changing the four core concepts.
+4. The complete generation is resolved and validated in memory before the
+   stored snapshot is replaced. An interrupted or invalid generation therefore
+   leaves the previous valid snapshot current; local batch checkpoints are not
+   exposed as Silver.
+5. A later generation from the same extraction `processorId` supersedes active
+   Claims derived from that source which it no longer produces. This applies to
+   a new processor version, model, or Bronze revision, including a completed
+   generation with no findings.
+6. A different extraction `processorId`, or a derivation from another Bronze
+   source, remains active and may compete with the new Claims. Silver does not
+   silently choose between independent interpretations.
+7. New records do not delete old records. Superseded Claims retain their
+   assertion and supporting Observation IDs; the old Observations and Evidence
+   remain available through the exact old Bronze content hash.
+8. Claim lifecycle merges are monotonic: `active` cannot resurrect a
+   `superseded` or `retracted` Claim from another replica.
+9. Current knowledge is a projection over active claims, not the latest record
+   chosen by wall-clock time, processor version text, or model size.
+10. Retention or compaction may be added later. Until then, Source retains old
+    interpretations.
 
 ## End-to-end examples
 

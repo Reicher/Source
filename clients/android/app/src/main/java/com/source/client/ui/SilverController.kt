@@ -9,6 +9,7 @@ import com.source.client.knowledge.ExtractedSilver
 import com.source.client.knowledge.combineSilverBatches
 import com.source.client.knowledge.deterministicTextChunks
 import com.source.client.knowledge.extractSilverBatch
+import com.source.client.knowledge.replaceSilverGeneration
 import com.source.client.knowledge.sha256Hex
 import com.source.client.knowledge.SILVER_EXTRACTION_PROCESSOR_ID
 import com.source.client.knowledge.SILVER_EXTRACTION_PROCESSOR_VERSION
@@ -306,7 +307,7 @@ internal class SilverController(
                     publish()
                     continue
                 }
-                commit(source.id, extracted)
+                commit(source, extracted)
                 removeCheckpoint(source.id)
                 persistCheckpoints()
                 state = state.copy(
@@ -395,39 +396,28 @@ internal class SilverController(
         }
     }
 
-    private suspend fun commit(sourceId: String, extracted: ExtractedSilver) {
+    private suspend fun commit(source: BronzeTextSource, extracted: ExtractedSilver) {
         val activeSession = session() ?: return
         val storeStartedAt = SystemClock.elapsedRealtime()
         val now = nextModifiedAt()
-        val evidence = (extracted.evidence + state.dataset.evidence).associateBy { it.id }.values.toList()
-        val observations = (extracted.observations + state.dataset.observations).associateBy { it.id }.values.toList()
-        val unresolvedDataset = state.dataset.copy(
-            evidence = evidence,
-            observations = observations,
-            modifiedAtMillis = now,
-            removedSourceIds = state.dataset.removedSourceIds - sourceId,
+        val committed = replaceSilverGeneration(state.dataset, source, extracted, resolver, now)
+        if (committed.dataset === state.dataset) {
+            Log.i(SILVER_LOG_TAG, "Silver generation already committed; no snapshot or sync change")
+            return
+        }
+        val committedState = state.copy(
+            dataset = committed.dataset,
+            pendingSync = state.pendingSync + source.id,
+            syncFailed = state.syncFailed - source.id,
         )
-        val resolved = resolver.resolve(unresolvedDataset, extracted.observations, now)
-        val allObservations = (resolved.observations + observations).associateBy { it.id }.values.toList()
-        val entities = (resolved.entities + state.dataset.entities).associateBy { it.id }.values.toList()
-        val claims = (resolved.claims + state.dataset.claims).associateBy { it.id }.values.toList()
-        state = state.copy(
-            dataset = unresolvedDataset.copy(
-                observations = allObservations,
-                entities = entities,
-                claims = claims,
-            ),
-            pendingSync = state.pendingSync + sourceId,
-            syncFailed = state.syncFailed - sourceId,
-        )
+        sync.persist(activeSession, committed.dataset)
         sync.changed()
-        sync.persist(activeSession, state.dataset)
+        state = committedState
         Log.i(
             SILVER_LOG_TAG,
             "Silver stored durationMs=${SystemClock.elapsedRealtime() - storeStartedAt} " +
                 "evidence=${extracted.evidence.size} observations=${extracted.observations.size} " +
-                "resolutionObservations=${resolved.observations.size} entities=${resolved.entities.size} " +
-                "claims=${resolved.claims.size}",
+                "supersededClaims=${committed.supersededClaimIds.size}",
         )
         publish()
         synchronize()

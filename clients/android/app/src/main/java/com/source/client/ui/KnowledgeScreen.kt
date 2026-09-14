@@ -120,10 +120,10 @@ internal fun buildKnowledgeUiState(
     val entitiesById = silver.entities.associateBy(SilverEntity::id)
     val activeClaims = silver.claims.filter { it.state == SilverClaimState.ACTIVE }
     val entityNames = silver.entities.associate { entity ->
-        entity.id to preferredClaimText(activeClaims, entity.id, SILVER_NAME_PREDICATE, shortId(entity.id))
+        entity.id to preferredClaimText(silver.claims, entity.id, SILVER_NAME_PREDICATE, shortId(entity.id))
     }
     val entityTypes = silver.entities.associate { entity ->
-        entity.id to preferredClaimText(activeClaims, entity.id, SILVER_ENTITY_TYPE_PREDICATE, "unknown")
+        entity.id to preferredClaimText(silver.claims, entity.id, SILVER_ENTITY_TYPE_PREDICATE, "unknown")
     }
     val competingClaimIds = competingClaimIds(activeClaims)
     val resolutionByInput = silver.observations.filter { it.kind == SILVER_RESOLUTION_KIND }
@@ -340,7 +340,7 @@ private fun preferredClaimText(
     fallback: String,
 ): String = claims.asSequence()
     .filter { it.subjectEntityId == entityId && it.predicate == predicate }
-    .sortedBy(SilverClaim::id)
+    .sortedWith(compareBy<SilverClaim>({ if (it.state == SilverClaimState.ACTIVE) 0 else 1 }, SilverClaim::id))
     .mapNotNull { (it.value?.value as? SilverJsonString)?.value }
     .firstOrNull() ?: fallback
 
