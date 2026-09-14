@@ -34,6 +34,8 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
       - name: Install Android SDK 36
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;28.1.13356709" "cmake;3.31.6"
       - name: Provision pinned llama.cpp
