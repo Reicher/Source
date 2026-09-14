@@ -10,17 +10,21 @@ import com.source.client.knowledge.combineSilverBatches
 import com.source.client.knowledge.deterministicTextChunks
 import com.source.client.knowledge.extractSilverBatch
 import com.source.client.knowledge.sha256Hex
+import com.source.client.knowledge.SILVER_EXTRACTION_PROCESSOR_ID
+import com.source.client.knowledge.SILVER_EXTRACTION_PROCESSOR_VERSION
+import com.source.client.knowledge.SILVER_EXTRACTION_COMPLETE_KIND
 import com.source.client.model.AiModelMetadata
 import com.source.client.model.ConnectedNode
 import com.source.client.protocol.SourceApiException
 import com.source.client.security.VaultSession
 import com.source.client.storage.SilverBatchCheckpoint
+import com.source.client.storage.SilverBatchResult
 import com.source.client.storage.SilverCheckpointData
 import com.source.client.storage.SilverCheckpointDataset
 import com.source.client.storage.SilverData
 import com.source.client.storage.SilverDataset
+import com.source.client.storage.SilverObservation
 import com.source.client.storage.SilverRefinementCheckpoint
-import com.source.client.storage.SilverResult
 import com.source.client.storage.SourceDataStore
 import com.source.client.storage.SourceDataSync
 import kotlinx.coroutines.CancellationException
@@ -108,7 +112,7 @@ internal class SilverController(
             dataset = dataset,
             refinementPaused = pausedByUser,
             pendingSync = if (activeSession == null) emptySet() else buildSet {
-                dataset.results.mapTo(this, SilverResult::bronzeSourceId)
+                dataset.evidence.mapTo(this) { it.bronzeSourceId }
                 addAll(dataset.removedSourceIds.keys)
             },
         )
@@ -206,14 +210,10 @@ internal class SilverController(
 
     fun removeSource(sourceId: String) {
         val activeSession = session() ?: return
-        if (state.dataset.results.none { it.bronzeSourceId == sourceId } && sourceId in state.dataset.removedSourceIds) return
+        if (state.dataset.evidence.none { it.bronzeSourceId == sourceId } && sourceId in state.dataset.removedSourceIds) return
         val now = nextModifiedAt()
         state = state.copy(
-            dataset = state.dataset.copy(
-                results = state.dataset.results.filterNot { it.bronzeSourceId == sourceId },
-                modifiedAtMillis = now,
-                removedSourceIds = state.dataset.removedSourceIds + (sourceId to now),
-            ),
+            dataset = removeSilverSources(state.dataset, setOf(sourceId), now),
             processing = state.processing - sourceId,
             progress = state.progress - sourceId,
             pendingSync = state.pendingSync + sourceId,
@@ -241,7 +241,7 @@ internal class SilverController(
                 val desiredModel = connectedNode()?.aiModel ?: LOCAL_AI_MODEL
                 val candidateSources = sources.filter { source ->
                     source.id !in attempted && needsSilverRefinement(
-                        state.dataset.results.firstOrNull { it.bronzeSourceId == source.id },
+                        state.dataset,
                         source,
                         desiredModel,
                         PROCESSOR_VERSION,
@@ -303,18 +303,7 @@ internal class SilverController(
                     publish()
                     continue
                 }
-                val result = SilverResult(
-                    bronzeSourceId = source.id,
-                    bronzeContentSha256 = source.contentSha256,
-                    entities = extracted.entities,
-                    claims = extracted.claims,
-                    modelId = extracted.model.modelId,
-                    parameterCount = extracted.model.parameterCount,
-                    processorVersion = PROCESSOR_VERSION,
-                    processedAtMillis = clock().coerceAtLeast(1),
-                )
-                val existing = state.dataset.results.firstOrNull { it.bronzeSourceId == source.id }
-                if (shouldReplaceSilver(existing, result)) commit(result)
+                commit(source.id, extracted)
                 removeCheckpoint(source.id)
                 persistCheckpoints()
                 state = state.copy(
@@ -351,8 +340,8 @@ internal class SilverController(
                 ?: return combineSilverBatches(candidate.chunks.indices.map { index ->
                     val result = checkNotNull(completedByIndex[index]).result
                     ExtractedSilver(
-                        result.entities,
-                        result.claims,
+                        result.evidence,
+                        result.observations,
                         AiModelMetadata(result.modelId, result.parameterCount),
                     )
                 })
@@ -362,6 +351,11 @@ internal class SilverController(
                 candidate.chunks[batchIndex],
                 batchIndex,
                 candidate.chunks.size,
+                PROCESSOR_VERSION,
+                maxOf(
+                    clock().coerceAtLeast(1),
+                    (state.dataset.removedSourceIds[source.id] ?: 0) + 1,
+                ),
             )
             val establishedModel = checkpoint?.completedBatches?.firstOrNull()?.result?.let {
                 AiModelMetadata(it.modelId, it.parameterCount)
@@ -374,15 +368,11 @@ internal class SilverController(
                 updateProgress(source.id, 0, candidate.chunks.size)
                 continue
             }
-            val batchResult = SilverResult(
-                bronzeSourceId = source.id,
-                bronzeContentSha256 = source.contentSha256,
-                entities = extracted.entities,
-                claims = extracted.claims,
+            val batchResult = SilverBatchResult(
+                evidence = extracted.evidence,
+                observations = extracted.observations,
                 modelId = extracted.model.modelId,
                 parameterCount = extracted.model.parameterCount,
-                processorVersion = PROCESSOR_VERSION,
-                processedAtMillis = clock().coerceAtLeast(1),
             )
             val completed = checkpoint?.completedBatches.orEmpty() + SilverBatchCheckpoint(
                 batchIndex,
@@ -402,32 +392,35 @@ internal class SilverController(
         }
     }
 
-    private suspend fun commit(result: SilverResult) {
+    private suspend fun commit(sourceId: String, extracted: ExtractedSilver) {
         val activeSession = session() ?: return
         val storeStartedAt = SystemClock.elapsedRealtime()
         val now = nextModifiedAt()
+        val evidence = (extracted.evidence + state.dataset.evidence).associateBy { it.id }.values.toList()
+        val observations = (extracted.observations + state.dataset.observations).associateBy { it.id }.values.toList()
         state = state.copy(
             dataset = state.dataset.copy(
-                results = state.dataset.results.filterNot { it.bronzeSourceId == result.bronzeSourceId } + result,
+                evidence = evidence,
+                observations = observations,
                 modifiedAtMillis = now,
-                removedSourceIds = state.dataset.removedSourceIds - result.bronzeSourceId,
+                removedSourceIds = state.dataset.removedSourceIds - sourceId,
             ),
-            pendingSync = state.pendingSync + result.bronzeSourceId,
-            syncFailed = state.syncFailed - result.bronzeSourceId,
+            pendingSync = state.pendingSync + sourceId,
+            syncFailed = state.syncFailed - sourceId,
         )
         sync.changed()
         sync.persist(activeSession, state.dataset)
         Log.i(
             SILVER_LOG_TAG,
             "Silver stored durationMs=${SystemClock.elapsedRealtime() - storeStartedAt} " +
-                "entities=${result.entities.size} claims=${result.claims.size}",
+                "evidence=${extracted.evidence.size} observations=${extracted.observations.size}",
         )
         publish()
         synchronize()
     }
 
     private suspend fun removeOrphanedData(activeSourceIds: Set<String>) {
-        val removed = state.dataset.results.map(SilverResult::bronzeSourceId).filterNot(activeSourceIds::contains).toSet()
+        val removed = state.dataset.evidence.map { it.bronzeSourceId }.filterNot(activeSourceIds::contains).toSet()
         val orphanedCheckpoints = checkpoints.checkpoints.map(SilverRefinementCheckpoint::bronzeSourceId)
             .filterNot(activeSourceIds::contains).toSet()
         if (removed.isEmpty() && orphanedCheckpoints.isEmpty()) return
@@ -439,12 +432,9 @@ internal class SilverController(
             persistCheckpoints(activeSession)
         }
         if (removed.isEmpty()) return
+        val now = nextModifiedAt()
         state = state.copy(
-            dataset = state.dataset.copy(
-                results = state.dataset.results.filter { it.bronzeSourceId in activeSourceIds },
-                modifiedAtMillis = nextModifiedAt(),
-                removedSourceIds = state.dataset.removedSourceIds + removed.associateWith { nextModifiedAt() },
-            ),
+            dataset = removeSilverSources(state.dataset, removed, now),
             processing = state.processing - removed,
             progress = state.progress - removed,
             pendingSync = state.pendingSync + removed,
@@ -527,7 +517,7 @@ internal class SilverController(
     }
 
     companion object {
-        const val PROCESSOR_VERSION = 2
+        const val PROCESSOR_VERSION = SILVER_EXTRACTION_PROCESSOR_VERSION
         private const val RETRY_DELAY_MILLIS = 30_000L
         private const val SILVER_LOG_TAG = "SourceSilver"
     }
@@ -544,12 +534,35 @@ internal fun firstUnfinishedBatch(totalBatches: Int, completedBatches: Set<Int>)
     return (0 until totalBatches).firstOrNull { it !in completedBatches }
 }
 
+internal fun removeSilverSources(
+    dataset: SilverDataset,
+    sourceIds: Set<String>,
+    removedAtMillis: Long,
+): SilverDataset {
+    require(sourceIds.isNotEmpty())
+    require(removedAtMillis > 0)
+    val removedEvidenceIds = dataset.evidence.filter { it.bronzeSourceId in sourceIds }
+        .mapTo(mutableSetOf()) { it.id }
+    val observations = dataset.observations.filterNot { observation ->
+        observation.evidenceIds.any(removedEvidenceIds::contains)
+    }
+    val referencedEvidenceIds = observations.flatMapTo(mutableSetOf(), SilverObservation::evidenceIds)
+    return dataset.copy(
+        evidence = dataset.evidence.filter { evidence ->
+            evidence.bronzeSourceId !in sourceIds && evidence.id in referencedEvidenceIds
+        },
+        observations = observations,
+        modifiedAtMillis = removedAtMillis,
+        removedSourceIds = dataset.removedSourceIds + sourceIds.associateWith { removedAtMillis },
+    )
+}
+
 internal fun isReusableCheckpoint(
     checkpoint: SilverRefinementCheckpoint,
     source: BronzeTextSource,
     chunks: List<String>,
     desiredModel: AiModelMetadata,
-    processorVersion: Int,
+    processorVersion: String,
 ): Boolean = checkpoint.bronzeSourceId == source.id &&
     checkpoint.bronzeContentSha256 == source.contentSha256 &&
     checkpoint.processorVersion == processorVersion &&
@@ -568,21 +581,19 @@ private fun syncErrorSummary(error: Exception?): String = when (error) {
 }
 
 internal fun needsSilverRefinement(
-    existing: SilverResult?,
+    dataset: SilverDataset,
     source: BronzeTextSource,
     desiredModel: AiModelMetadata,
-    processorVersion: Int,
-): Boolean = when {
-    existing == null -> true
-    existing.bronzeContentSha256 != source.contentSha256 -> true
-    existing.processorVersion < processorVersion -> true
-    else -> existing.processorVersion == processorVersion && existing.parameterCount < desiredModel.parameterCount
-}
-
-internal fun shouldReplaceSilver(existing: SilverResult?, candidate: SilverResult): Boolean = when {
-    existing == null -> true
-    existing.bronzeContentSha256 != candidate.bronzeContentSha256 -> true
-    candidate.processorVersion > existing.processorVersion -> true
-    candidate.processorVersion < existing.processorVersion -> false
-    else -> candidate.parameterCount > existing.parameterCount
+    processorVersion: String,
+): Boolean {
+    val matchingEvidenceIds = dataset.evidence.filter { evidence ->
+        evidence.bronzeSourceId == source.id && evidence.bronzeContentSha256 == source.contentSha256
+    }.mapTo(mutableSetOf()) { it.id }
+    return dataset.observations.none { observation ->
+        observation.kind == SILVER_EXTRACTION_COMPLETE_KIND &&
+            observation.producer.processorId == SILVER_EXTRACTION_PROCESSOR_ID &&
+            observation.producer.processorVersion == processorVersion &&
+            observation.producer.modelId == desiredModel.modelId &&
+            observation.evidenceIds.any(matchingEvidenceIds::contains)
+    }
 }

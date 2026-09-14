@@ -340,13 +340,47 @@ Gothenburg`.
 
 ## Implementation consequences
 
-The prototype Android model differs from this contract in three important ways:
+Android Silver snapshot format v2 implements the Evidence and Observation
+portion of this contract. Snapshot v1 data is discarded on read rather than
+migrated because it contains prematurely resolved prototype entities and
+claims. The first subsequent write replaces both local and synchronized v1
+Silver state with v2 records; Bronze, Library, and conversation data are not
+affected.
 
-- `entityId(type, name)` must be replaced by opaque stable entity identity;
-- one replaceable `SilverResult` per Bronze source must evolve into retained
-  evidence, observations, entities, and claims;
-- inline `evidenceExcerpt` must become a reference to exact first-class
-  Evidence, while an excerpt may remain as display metadata.
+The Android `source.android.silver-extraction` processor version `3` emits one
+`attribute-candidate` or `relationship-candidate` Observation for each valid
+local finding. Its payload schema is:
+
+```json
+{
+  "subject": {"name": "Robin", "type": "person"},
+  "predicate": "created",
+  "object": {"name": "Source", "type": "project"},
+  "evidenceExcerpt": "Robin created Source"
+}
+```
+
+The subject and object are local mentions, not Entity identities. An attribute
+candidate has a scalar `value`; a relationship candidate has an
+`object` mention. Candidate confidence is stored in the Observation's
+`confidence` field. The processor validates excerpts against the processed
+Bronze text before retaining them. Every candidate references Evidence for the
+exact Bronze item and content hash; fragment selectors can be added without
+changing the record model.
+
+Each completed source also receives a `knowledge-extraction-complete`
+Observation with an empty payload. It is a durable, deterministic processing
+receipt, including when the processor found no candidates, and prevents an
+unchanged source and producer version from being processed repeatedly.
+
+The remaining prototype consequences are handled by subsequent issues:
+
+- opaque stable Entity identities must be introduced without reviving the old
+  name-derived identity scheme;
+- Entities and Claims must be added as retained first-class records linked
+  to these Observations;
+- candidate excerpts may later be promoted into fragment-level Evidence while
+  remaining optional display metadata.
 
 Those migrations belong to the implementation issues following this model
 definition. Existing Bronze data remains canonical throughout the migration.

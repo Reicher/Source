@@ -33,10 +33,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.source.client.R
-import com.source.client.storage.SilverClaim
 import com.source.client.storage.SilverDataset
-import com.source.client.storage.SilverEntity
-import com.source.client.storage.SilverScalarValue
 import java.util.Locale
 
 data class KnowledgeSourceUi(
@@ -65,47 +62,7 @@ data class KnowledgeUiState(val entities: List<KnowledgeEntityUi> = emptyList())
 internal fun buildKnowledgeUiState(
     silver: SilverDataset,
     library: LibraryUiState,
-): KnowledgeUiState {
-    val sourceNames = library.items.associate { it.id to it.filename }
-    val currentResults = silver.results.filter { it.bronzeSourceId in sourceNames }
-    val entities = currentResults.flatMap { it.entities }.associateBy(SilverEntity::id)
-    val claims = currentResults.flatMap { it.claims }
-    return KnowledgeUiState(
-        entities.values.map { entity ->
-            val related = claims.filter { it.subjectEntityId == entity.id || it.objectEntityId == entity.id }
-            val grouped = related.groupBy { claim ->
-                listOf(
-                    claim.subjectEntityId,
-                    claim.predicate.lowercase(Locale.ROOT),
-                    claim.objectEntityId.orEmpty(),
-                    scalarDisplay(claim.value),
-                ).joinToString("\u0000")
-            }
-            KnowledgeEntityUi(
-                id = entity.id,
-                name = entity.name,
-                type = entity.type,
-                claims = grouped.values.map { supportingClaims ->
-                    val claim = supportingClaims.first()
-                    KnowledgeClaimUi(
-                        subjectName = entities[claim.subjectEntityId]?.name ?: claim.subjectEntityId,
-                        predicate = claim.predicate,
-                        objectDisplay = claim.objectEntityId?.let { entities[it]?.name ?: it }
-                            ?: scalarDisplay(claim.value),
-                        confidence = supportingClaims.maxOf(SilverClaim::confidence),
-                        sources = supportingClaims.map { support ->
-                            KnowledgeSourceUi(
-                                support.bronzeSourceId,
-                                sourceNames[support.bronzeSourceId] ?: support.bronzeSourceId,
-                                support.evidenceExcerpt,
-                            )
-                        }.distinctBy(KnowledgeSourceUi::id),
-                    )
-                }.sortedWith(compareBy(KnowledgeClaimUi::predicate, KnowledgeClaimUi::objectDisplay)),
-            )
-        }.filter { it.claims.isNotEmpty() }.sortedBy { it.name.lowercase(Locale.ROOT) },
-    )
-}
+): KnowledgeUiState = KnowledgeUiState()
 
 @Composable
 internal fun KnowledgeScreen(
@@ -211,13 +168,6 @@ internal fun KnowledgeScreen(
             }
         }
     }
-}
-
-private fun scalarDisplay(value: SilverScalarValue?): String = when (value) {
-    null -> ""
-    is SilverScalarValue.Text -> value.text
-    is SilverScalarValue.Number -> value.number.toString()
-    is SilverScalarValue.BooleanValue -> value.boolean.toString()
 }
 
 private fun displayType(type: String): String = type.replace('-', ' ').replaceFirstChar { it.titlecase(Locale.ROOT) }

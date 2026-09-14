@@ -1,70 +1,91 @@
 package com.source.client.storage
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertSame
 import org.junit.Test
 
 class SilverDataTest {
     @Test
-    fun `merge keeps the better result for each Bronze source`() {
-        val low = result("source-1", "a", 4_000_000_000, 1, 100)
-        val high = result("source-1", "a", 9_000_000_000, 1, 90)
-        val other = result("source-2", "b", 4_000_000_000, 1, 80)
-        val local = SilverDataset(listOf(low, other), 100)
-        val remote = SilverDataset(listOf(high), 101)
+    fun `Silver v2 accepts old envelopes only for destructive reset`() {
+        assertEquals(2, SilverData.descriptor.formatVersion)
+        assertEquals(setOf(1, 2), SilverData.supportedFormatVersions)
+    }
+
+    @Test
+    fun `merge unions observations and deduplicates identical processing`() {
+        val evidence = testEvidence()
+        val early = testObservation(evidence, createdAtMillis = 90)
+        val repeated = testObservation(evidence, createdAtMillis = 100)
+        val otherEvidence = testEvidence("source-2", "b".repeat(64))
+        val other = testObservation(otherEvidence, createdAtMillis = 80)
+        val local = SilverDataset(listOf(evidence), listOf(repeated), 100)
+        val remote = SilverDataset(listOf(evidence, otherEvidence), listOf(early, other), 101)
 
         val merged = SilverData.merge(local, remote)
 
-        assertEquals(setOf(high, other), merged.results.toSet())
-        assertEquals(102, merged.modifiedAtMillis)
+        assertEquals(setOf(evidence, otherEvidence), merged.evidence.toSet())
+        assertEquals(setOf(early, other), merged.observations.toSet())
+        assertSame(remote, merged)
     }
 
     @Test
-    fun `merge returns an existing dataset when it already contains all better results`() {
-        val high = result("source-1", "a", 9_000_000_000, 1, 100)
-        val low = result("source-1", "a", 4_000_000_000, 1, 110)
-        val local = SilverDataset(listOf(high), 100)
+    fun `new processor versions remain traceable beside old observations`() {
+        val evidence = testEvidence()
+        val old = testObservation(evidence, processorVersion = "1")
+        val fresh = testObservation(evidence, processorVersion = "2")
 
-        assertSame(local, SilverData.merge(local, SilverDataset(listOf(low), 110)))
-    }
-
-    @Test
-    fun `merge keeps a deletion marker newer than a remote result`() {
-        val removed = SilverDataset(
-            results = emptyList(),
-            modifiedAtMillis = 120,
-            removedSourceIds = mapOf("source-1" to 120),
+        val merged = SilverData.merge(
+            SilverDataset(listOf(evidence), listOf(old), 100),
+            SilverDataset(listOf(evidence), listOf(fresh), 101),
         )
-        val staleRemote = SilverDataset(listOf(result("source-1", "a", 9_000_000_000, 1, 100)), 100)
+
+        assertNotEquals(old.id, fresh.id)
+        assertEquals(setOf(old, fresh), merged.observations.toSet())
+    }
+
+    @Test
+    fun `new Bronze revisions retain observations from the old revision`() {
+        val oldEvidence = testEvidence("source-1", "a".repeat(64))
+        val newEvidence = testEvidence("source-1", "b".repeat(64))
+        val old = testObservation(oldEvidence, createdAtMillis = 100)
+        val fresh = testObservation(newEvidence, createdAtMillis = 200)
+
+        val merged = SilverData.merge(
+            SilverDataset(listOf(oldEvidence), listOf(old), 100),
+            SilverDataset(listOf(newEvidence), listOf(fresh), 200),
+        )
+
+        assertEquals(setOf(oldEvidence, newEvidence), merged.evidence.toSet())
+        assertEquals(setOf(old, fresh), merged.observations.toSet())
+    }
+
+    @Test
+    fun `merge keeps a deletion marker newer than an observation`() {
+        val evidence = testEvidence()
+        val observation = testObservation(evidence, createdAtMillis = 100)
+        val removed = SilverDataset(modifiedAtMillis = 120, removedSourceIds = mapOf("source-1" to 120))
+        val staleRemote = SilverDataset(listOf(evidence), listOf(observation), 100)
 
         val merged = SilverData.merge(removed, staleRemote)
 
         assertSame(removed, merged)
-        assertEquals(emptyList<SilverResult>(), merged.results)
-        assertEquals(mapOf("source-1" to 120L), merged.removedSourceIds)
+        assertEquals(emptyList<SilverEvidence>(), merged.evidence)
+        assertEquals(emptyList<SilverObservation>(), merged.observations)
     }
 
     @Test
-    fun `merge allows a newly processed result to supersede an old deletion marker`() {
-        val removed = SilverDataset(
-            results = emptyList(),
-            modifiedAtMillis = 100,
-            removedSourceIds = mapOf("source-1" to 100),
-        )
-        val reprocessed = result("source-1", "b", 4_000_000_000, 1, 120)
-        val remote = SilverDataset(listOf(reprocessed), 120)
+    fun `a new observation supersedes an old deletion marker`() {
+        val evidence = testEvidence()
+        val observation = testObservation(evidence, createdAtMillis = 120)
+        val removed = SilverDataset(modifiedAtMillis = 100, removedSourceIds = mapOf("source-1" to 100))
+        val reprocessed = SilverDataset(listOf(evidence), listOf(observation), 120)
 
-        assertSame(remote, SilverData.merge(removed, remote))
+        assertSame(reprocessed, SilverData.merge(removed, reprocessed))
     }
 
-    private fun result(source: String, hashCharacter: String, parameters: Long, version: Int, time: Long) = SilverResult(
-        bronzeSourceId = source,
-        bronzeContentSha256 = hashCharacter.repeat(64),
-        entities = emptyList(),
-        claims = emptyList(),
-        modelId = "model-$parameters",
-        parameterCount = parameters,
-        processorVersion = version,
-        processedAtMillis = time,
-    )
+    @Test(expected = IllegalArgumentException::class)
+    fun `dataset rejects observations without their Evidence`() {
+        SilverData.encode(SilverDataset(observations = listOf(testObservation())))
+    }
 }

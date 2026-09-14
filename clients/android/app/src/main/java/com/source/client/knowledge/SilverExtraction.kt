@@ -10,12 +10,16 @@ import com.source.client.ai.SourceAiRole
 import com.source.client.ai.SourceAiRuntime
 import com.source.client.ai.SourceAiWorkload
 import com.source.client.model.AiModelMetadata
-import com.source.client.storage.SilverClaim
-import com.source.client.storage.SilverEntity
-import com.source.client.storage.SilverScalarValue
+import com.source.client.storage.SilverEvidence
+import com.source.client.storage.SilverJsonBoolean
+import com.source.client.storage.SilverJsonNumber
+import com.source.client.storage.SilverJsonObject
+import com.source.client.storage.SilverJsonString
+import com.source.client.storage.SilverJsonValue
+import com.source.client.storage.SilverObservation
+import com.source.client.storage.SilverProducer
 import java.security.MessageDigest
 import java.util.Locale
-import java.util.UUID
 import kotlinx.coroutines.flow.collect
 import org.json.JSONArray
 import org.json.JSONObject
@@ -29,8 +33,8 @@ data class BronzeTextSource(
 )
 
 data class ExtractedSilver(
-    val entities: List<SilverEntity>,
-    val claims: List<SilverClaim>,
+    val evidence: List<SilverEvidence>,
+    val observations: List<SilverObservation>,
     val model: AiModelMetadata,
 )
 
@@ -50,7 +54,7 @@ internal suspend fun extractSilver(
     Log.i(
         SILVER_LOG_TAG,
         "refinement finished durationMs=${SystemClock.elapsedRealtime() - refinementStartedAt} " +
-            "entities=${extracted.entities.size} claims=${extracted.claims.size}",
+            "evidence=${extracted.evidence.size} observations=${extracted.observations.size}",
     )
     return extracted
 }
@@ -61,6 +65,8 @@ internal suspend fun extractSilverBatch(
     chunk: String,
     batchIndex: Int,
     totalBatches: Int,
+    processorVersion: String = SILVER_EXTRACTION_PROCESSOR_VERSION,
+    createdAtMillis: Long = System.currentTimeMillis().coerceAtLeast(1),
 ): ExtractedSilver {
     require(batchIndex in 0 until totalBatches)
     Log.i(
@@ -89,7 +95,7 @@ internal suspend fun extractSilverBatch(
     )
     val parseStartedAt = SystemClock.elapsedRealtime()
     val parsed = try {
-        parseExtraction(response.text, chunk, source.id)
+        parseExtraction(response.text, chunk)
     } catch (error: Exception) {
         Log.w(
             SILVER_LOG_TAG,
@@ -103,27 +109,54 @@ internal suspend fun extractSilverBatch(
         SILVER_LOG_TAG,
         "response parsed chunk=${batchIndex + 1}/$totalBatches " +
             "durationMs=${SystemClock.elapsedRealtime() - parseStartedAt} " +
-            "rawEntities=${parsed.rawEntityCount} entities=${parsed.entities.size} " +
-            "rawClaims=${parsed.rawClaimCount} claims=${parsed.claims.size}",
+            "rawEntities=${parsed.rawEntityCount} entities=${parsed.entityCount} " +
+            "rawClaims=${parsed.rawClaimCount} claims=${parsed.claimCount}",
     )
-    return ExtractedSilver(
-        parsed.entities,
-        parsed.claims,
-        response.model ?: error("The AI runtime did not identify the model used"),
+    val model = response.model ?: error("The AI runtime did not identify the model used")
+    val evidence = SilverEvidence.create(
+        bronzeSourceId = source.id,
+        bronzeContentSha256 = source.contentSha256,
     )
+    val producer = SilverProducer.create(
+        processorId = SILVER_EXTRACTION_PROCESSOR_ID,
+        processorVersion = processorVersion,
+        modelId = model.modelId,
+    )
+    val observations = parsed.findings.map { finding ->
+        SilverObservation.create(
+            kind = finding.kind,
+            payload = finding.payload,
+            evidenceIds = listOf(evidence.id),
+            confidence = finding.confidence,
+            producer = producer,
+            createdAtMillis = createdAtMillis,
+        )
+    } + SilverObservation.create(
+        kind = SILVER_EXTRACTION_COMPLETE_KIND,
+        payload = SilverJsonObject(emptyMap()),
+        evidenceIds = listOf(evidence.id),
+        producer = producer,
+        createdAtMillis = createdAtMillis,
+    )
+    return ExtractedSilver(listOf(evidence), observations, model)
 }
 
 internal fun combineSilverBatches(batches: List<ExtractedSilver>): ExtractedSilver {
     require(batches.isNotEmpty())
     val model = batches.first().model
     require(batches.all { it.model == model }) { "The AI runtime changed while refining one Bronze item" }
-    val entities = linkedMapOf<String, SilverEntity>()
-    val claims = linkedMapOf<String, SilverClaim>()
+    val evidence = linkedMapOf<String, SilverEvidence>()
+    val observations = linkedMapOf<String, SilverObservation>()
     batches.forEach { batch ->
-        batch.entities.forEach { entities.putIfAbsent(it.id, it) }
-        batch.claims.forEach { claim -> claims.putIfAbsent(claimIdentity(claim), claim) }
+        batch.evidence.forEach { evidence.putIfAbsent(it.id, it) }
+        batch.observations.forEach { observation ->
+            val existing = observations[observation.id]
+            if (existing == null || observation.createdAtMillis < existing.createdAtMillis) {
+                observations[observation.id] = observation
+            }
+        }
     }
-    return ExtractedSilver(entities.values.toList(), claims.values.toList(), model)
+    return ExtractedSilver(evidence.values.toList(), observations.values.toList(), model)
 }
 
 internal fun deterministicTextChunks(text: String, maximumUtf8Bytes: Int = MAXIMUM_CHUNK_UTF8_BYTES): List<String> {
@@ -156,12 +189,6 @@ internal fun deterministicTextChunks(text: String, maximumUtf8Bytes: Int = MAXIM
         while (start < text.length && text[start].isWhitespace()) start += 1
     }
     return chunks
-}
-
-internal fun entityId(type: String, name: String): String {
-    val normalizedType = normalizeEntityType(type)
-    val normalizedName = normalizeEntityName(name).lowercase(Locale.ROOT)
-    return sha256Hex("source-entity-v1\u0000$normalizedType\u0000$normalizedName")
 }
 
 internal fun sha256Hex(value: String): String = MessageDigest.getInstance("SHA-256")
@@ -223,86 +250,110 @@ private suspend fun collectExtractionResponse(
     )
 }
 
-private data class ParsedExtraction(
-    val entities: List<SilverEntity>,
-    val claims: List<SilverClaim>,
-    val rawEntityCount: Int,
-    val rawClaimCount: Int,
+private data class CandidateEntity(val key: String, val name: String, val type: String)
+
+private data class CandidateClaim(
+    val subjectKey: String,
+    val predicate: String,
+    val objectKey: String?,
+    val value: SilverJsonValue?,
+    val confidence: Double,
+    val evidenceExcerpt: String?,
 )
 
-private fun parseExtraction(raw: String, bronzeChunk: String, bronzeSourceId: String): ParsedExtraction {
+private data class ParsedExtraction(
+    val findings: List<CandidateFinding>,
+    val rawEntityCount: Int,
+    val rawClaimCount: Int,
+    val entityCount: Int,
+    val claimCount: Int,
+)
+
+private data class CandidateFinding(
+    val kind: String,
+    val payload: SilverJsonObject,
+    val confidence: Double,
+)
+
+private fun parseExtraction(raw: String, bronzeChunk: String): ParsedExtraction {
     val json = raw.substring(raw.indexOf('{').takeIf { it >= 0 } ?: error("Silver extraction was not JSON"),
         (raw.lastIndexOf('}').takeIf { it >= 0 } ?: error("Silver extraction was not JSON")) + 1)
     val root = JSONObject(json)
     val rawEntities = root.optJSONArray("entities") ?: JSONArray()
-    val entitiesByKey = linkedMapOf<String, SilverEntity>()
+    val entitiesByKey = linkedMapOf<String, CandidateEntity>()
     repeat(rawEntities.length()) { index ->
-        val value = rawEntities.optJSONObject(index) ?: return@repeat
-        val key = value.optString("key").trim().take(40)
-        val name = normalizeEntityName(value.optString("name"))
-        val type = normalizeEntityType(value.optString("type"))
+        val candidate = rawEntities.optJSONObject(index) ?: return@repeat
+        val key = candidate.optString("key").trim().take(40)
+        val name = normalizeEntityName(candidate.optString("name"))
+        val type = normalizeEntityType(candidate.optString("type"))
         if (key.isEmpty() || name.isEmpty()) return@repeat
-        entitiesByKey[key] = SilverEntity(entityId(type, name), name, type)
+        entitiesByKey[key] = CandidateEntity(key, name, type)
     }
-    val claims = mutableListOf<SilverClaim>()
+    val claims = mutableListOf<CandidateClaim>()
     val rawClaims = root.optJSONArray("claims") ?: JSONArray()
     repeat(rawClaims.length()) { index ->
-        val value = rawClaims.optJSONObject(index) ?: return@repeat
-        val subject = entitiesByKey[value.optString("subjectKey")] ?: return@repeat
-        val predicate = cleanInline(value.optString("predicate"), 100)
+        val candidate = rawClaims.optJSONObject(index) ?: return@repeat
+        val subjectKey = candidate.optString("subjectKey").takeIf(entitiesByKey::containsKey) ?: return@repeat
+        val predicate = cleanInline(candidate.optString("predicate"), 100)
         if (predicate.isEmpty()) return@repeat
-        val rawScalar = value.opt("value").takeUnless { it == null || it == JSONObject.NULL }
+        val rawScalar = candidate.opt("value").takeUnless { it == null || it == JSONObject.NULL }
         val scalarEntityKey = (rawScalar as? String)?.trim()?.takeIf(entitiesByKey::containsKey)
-        val requestedObjectKey = value.optString("objectKey").trim().takeIf(String::isNotEmpty)
-        val objectEntity = (requestedObjectKey ?: scalarEntityKey)?.let(entitiesByKey::get)
-        if (requestedObjectKey != null && objectEntity == null) return@repeat
-        if (objectEntity == null && rawScalar is String && LOCAL_ENTITY_KEY_PATTERN.matches(rawScalar.trim())) {
+        val requestedObjectKey = candidate.optString("objectKey").trim().takeIf(String::isNotEmpty)
+        val objectKey = (requestedObjectKey ?: scalarEntityKey)?.takeIf(entitiesByKey::containsKey)
+        if (requestedObjectKey != null && objectKey == null) return@repeat
+        if (objectKey == null && rawScalar is String && LOCAL_ENTITY_KEY_PATTERN.matches(rawScalar.trim())) {
             return@repeat
         }
-        val scalar = if (objectEntity == null) {
-            parseScalar(rawScalar)
-        } else {
-            null
-        }
-        if ((objectEntity == null) == (scalar == null)) return@repeat
-        val confidence = value.optDouble("confidence", Double.NaN)
+        val scalar = if (objectKey == null) parseScalar(rawScalar) else null
+        if ((objectKey == null) == (scalar == null)) return@repeat
+        val confidence = candidate.optDouble("confidence", Double.NaN)
         if (!confidence.isFinite() || confidence !in 0.0..1.0) return@repeat
-        val excerpt = cleanInline(value.optString("evidenceExcerpt"), 240).takeIf { candidate ->
-            candidate.isNotEmpty() && bronzeChunk.contains(candidate, ignoreCase = true)
+        val excerpt = cleanInline(candidate.optString("evidenceExcerpt"), 240).takeIf { excerptCandidate ->
+            excerptCandidate.isNotEmpty() && bronzeChunk.contains(excerptCandidate, ignoreCase = true)
         }
-        claims += SilverClaim(
-            subjectEntityId = subject.id,
-            predicate = predicate,
-            objectEntityId = objectEntity?.id,
-            value = scalar,
-            confidence = confidence,
-            bronzeSourceId = bronzeSourceId,
-            evidenceExcerpt = excerpt,
-        )
+        claims += CandidateClaim(subjectKey, predicate, objectKey, scalar, confidence, excerpt)
     }
-    val referencedIds = claims.flatMapTo(mutableSetOf()) { claim ->
-        listOfNotNull(claim.subjectEntityId, claim.objectEntityId)
-    }
-    return ParsedExtraction(
-        entities = entitiesByKey.values.filter { it.id in referencedIds }.distinctBy(SilverEntity::id),
-        claims = claims,
-        rawEntityCount = rawEntities.length(),
-        rawClaimCount = rawClaims.length(),
+    val referencedKeys = claims.flatMapTo(mutableSetOf()) { listOfNotNull(it.subjectKey, it.objectKey) }
+    val entities = entitiesByKey.values.filter { it.key in referencedKeys }
+    val findings = claims.map { claim -> candidateFinding(claim, entitiesByKey) }
+    return ParsedExtraction(findings, rawEntities.length(), rawClaims.length(), entities.size, claims.size)
+}
+
+private fun entityJson(entity: CandidateEntity) = SilverJsonObject(mapOf(
+    "name" to SilverJsonString(entity.name),
+    "type" to SilverJsonString(entity.type),
+))
+
+private fun candidateFinding(
+    claim: CandidateClaim,
+    entities: Map<String, CandidateEntity>,
+): CandidateFinding {
+    val objectEntity = claim.objectKey?.let { checkNotNull(entities[it]) }
+    return CandidateFinding(
+        kind = if (objectEntity == null) SILVER_ATTRIBUTE_CANDIDATE_KIND else SILVER_RELATIONSHIP_CANDIDATE_KIND,
+        payload = SilverJsonObject(buildMap {
+            put("subject", entityJson(checkNotNull(entities[claim.subjectKey])))
+            put("predicate", SilverJsonString(claim.predicate))
+            objectEntity?.let { put("object", entityJson(it)) }
+            claim.value?.let { put("value", it) }
+            claim.evidenceExcerpt?.let { put("evidenceExcerpt", SilverJsonString(it)) }
+        }),
+        confidence = claim.confidence,
     )
 }
 
-private fun parseScalar(value: Any?): SilverScalarValue? = when (value) {
-    is String -> cleanInline(value, 500).takeIf(String::isNotEmpty)?.let(SilverScalarValue::Text)
-    is Number -> value.toDouble().takeIf(Double::isFinite)?.let(SilverScalarValue::Number)
-    is Boolean -> SilverScalarValue.BooleanValue(value)
+private fun parseScalar(value: Any?): SilverJsonValue? = when (value) {
+    is String -> cleanInline(value, 500).takeIf(String::isNotEmpty)?.let(::SilverJsonString)
+    is Number -> value.toDouble().takeIf(Double::isFinite)?.let(::SilverJsonNumber)
+    is Boolean -> SilverJsonBoolean(value)
     else -> null
 }
 
 private fun extractionPrompt(chunk: String): String = """
-    Extract entities and factual claims from the Bronze text below. Return compact JSON only, with this shape:
+    Extract entity mentions and factual relationship or attribute candidates from the Bronze text below. Return compact JSON only, with this shape:
     {"entities":[{"key":"e1","name":"Robin","type":"person"},{"key":"e2","name":"Source","type":"project"}],"claims":[{"subjectKey":"e1","predicate":"created","objectKey":"e2","confidence":0.95,"evidenceExcerpt":"Robin created Source"},{"subjectKey":"e2","predicate":"status","value":"active","confidence":0.8,"evidenceExcerpt":"Source is active"}]}
-    Entity keys are local references, never literal claim values. Every subjectKey and objectKey must match an entity declared in the same response. Use objectKey for relationships between named people, places, organizations, projects, technologies, and other entities. Use value only for actual scalar text, numbers, or booleans, never for strings like "e1" or "e2". Every claim must have exactly one of objectKey or value.
-    Capture each useful explicit fact and relationship once; do not stop after only a few claims when the text contains more. Include explicit family, location, work, education/background, interests, ownership/creation, and project-purpose relationships when present. Do not infer unstated facts or turn suggestions, questions, possibilities, or general observations into facts. Types and predicates should be short lowercase labels. Keep evidence excerpts verbatim, short, and under 240 characters when practical. If nothing useful exists, return empty arrays.
+    Entity keys are local references within this processor result, not global Source identities and never literal claim values. Every subjectKey and objectKey must match an entity declared in the same response. Use objectKey for relationships between named people, places, organizations, projects, technologies, and other entities. Use value only for actual scalar text, numbers, or booleans, never for strings like "e1" or "e2". Every claim must have exactly one of objectKey or value.
+    Capture each useful explicit fact and relationship once; do not stop after only a few candidates when the text contains more. Include explicit family, location, work, education/background, interests, ownership/creation, and project-purpose relationships when present. Do not infer unstated facts or turn suggestions, questions, possibilities, or general observations into facts. Types and predicates should be short lowercase labels. Keep evidence excerpts verbatim, short, and under 240 characters when practical. If nothing useful exists, return empty arrays.
 
     Bronze text:
     $chunk
@@ -324,14 +375,11 @@ private fun cleanInline(value: String, maximumLength: Int): String = value
     .filterNot(Char::isISOControl)
     .take(maximumLength)
 
-private fun claimIdentity(claim: SilverClaim): String = listOf(
-    claim.subjectEntityId,
-    claim.predicate.lowercase(Locale.ROOT),
-    claim.objectEntityId.orEmpty(),
-    claim.value.toString(),
-    claim.evidenceExcerpt.orEmpty(),
-).joinToString("\u0000")
-
+internal const val SILVER_EXTRACTION_PROCESSOR_ID = "source.android.silver-extraction"
+internal const val SILVER_EXTRACTION_PROCESSOR_VERSION = "3"
+internal const val SILVER_ATTRIBUTE_CANDIDATE_KIND = "attribute-candidate"
+internal const val SILVER_RELATIONSHIP_CANDIDATE_KIND = "relationship-candidate"
+internal const val SILVER_EXTRACTION_COMPLETE_KIND = "knowledge-extraction-complete"
 private const val MAXIMUM_CHUNK_UTF8_BYTES = 2_400
 private const val SILVER_LOG_TAG = "SourceSilver"
 private val LOCAL_ENTITY_KEY_PATTERN = Regex("(?i)^e\\d{1,4}$")
