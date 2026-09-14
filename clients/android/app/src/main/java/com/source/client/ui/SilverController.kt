@@ -13,6 +13,8 @@ import com.source.client.knowledge.sha256Hex
 import com.source.client.knowledge.SILVER_EXTRACTION_PROCESSOR_ID
 import com.source.client.knowledge.SILVER_EXTRACTION_PROCESSOR_VERSION
 import com.source.client.knowledge.SILVER_EXTRACTION_COMPLETE_KIND
+import com.source.client.knowledge.ConservativeSilverResolver
+import com.source.client.knowledge.SilverObservationResolver
 import com.source.client.model.AiModelMetadata
 import com.source.client.model.ConnectedNode
 import com.source.client.protocol.SourceApiException
@@ -69,6 +71,7 @@ internal class SilverController(
     private val bronzeSources: suspend () -> List<BronzeTextSource>,
     private val onStateChanged: (SilverUiState) -> Unit,
     private val clock: () -> Long = System::currentTimeMillis,
+    private val resolver: SilverObservationResolver = ConservativeSilverResolver(),
 ) {
     private val sync = SourceDataSync(SilverData, localStore, nodeApi)
     private var worker: Job? = null
@@ -398,12 +401,21 @@ internal class SilverController(
         val now = nextModifiedAt()
         val evidence = (extracted.evidence + state.dataset.evidence).associateBy { it.id }.values.toList()
         val observations = (extracted.observations + state.dataset.observations).associateBy { it.id }.values.toList()
+        val unresolvedDataset = state.dataset.copy(
+            evidence = evidence,
+            observations = observations,
+            modifiedAtMillis = now,
+            removedSourceIds = state.dataset.removedSourceIds - sourceId,
+        )
+        val resolved = resolver.resolve(unresolvedDataset, extracted.observations, now)
+        val allObservations = (resolved.observations + observations).associateBy { it.id }.values.toList()
+        val entities = (resolved.entities + state.dataset.entities).associateBy { it.id }.values.toList()
+        val claims = (resolved.claims + state.dataset.claims).associateBy { it.id }.values.toList()
         state = state.copy(
-            dataset = state.dataset.copy(
-                evidence = evidence,
-                observations = observations,
-                modifiedAtMillis = now,
-                removedSourceIds = state.dataset.removedSourceIds - sourceId,
+            dataset = unresolvedDataset.copy(
+                observations = allObservations,
+                entities = entities,
+                claims = claims,
             ),
             pendingSync = state.pendingSync + sourceId,
             syncFailed = state.syncFailed - sourceId,
@@ -413,7 +425,9 @@ internal class SilverController(
         Log.i(
             SILVER_LOG_TAG,
             "Silver stored durationMs=${SystemClock.elapsedRealtime() - storeStartedAt} " +
-                "evidence=${extracted.evidence.size} observations=${extracted.observations.size}",
+                "evidence=${extracted.evidence.size} observations=${extracted.observations.size} " +
+                "resolutionObservations=${resolved.observations.size} entities=${resolved.entities.size} " +
+                "claims=${resolved.claims.size}",
         )
         publish()
         synchronize()

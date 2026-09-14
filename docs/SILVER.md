@@ -14,7 +14,7 @@ storage schema or API wire format.
 The Silver flow is:
 
 ```text
-Bronze reference -> Evidence -> Observation -> Entity + Claim -> Gold views
+Bronze reference -> Evidence -> Observation -> Resolution observation -> Entity + Claim -> Gold views
 ```
 
 Silver owns evidence references, processor observations, stable entity
@@ -212,6 +212,28 @@ rerun does not.
 
 An observation may remain unresolved indefinitely. Uncertainty is preferable
 to forcing a false entity match.
+
+## Initial entity resolution
+
+Android's initial resolver is intentionally conservative. It consumes candidate
+Observations and the current Silver Entity and Claim state through the
+`SilverObservationResolver` interface.
+
+- A mention reuses an Entity only when its normalized name and type match one
+  existing Entity uniquely.
+- A mention with a name not present in current Silver state creates a new opaque
+  Entity UUID.
+- A same-name type conflict or multiple exact matches remains unresolved.
+- Resolution never copies Observation confidence into Claim confidence.
+
+Every attempted mention produces an immutable `entity-resolution` Observation.
+Its payload records the input Observation ID, mention role, mention name/type,
+outcome, and resolved Entity ID when available. It carries the resolver's
+processor/version metadata and references the same Evidence as its input.
+Created Entities use that decision as origin provenance, while Claims reference
+both the candidate and resolution Observations. Repeating the same decision is
+therefore deterministic; a future resolver version or correction can add a new
+decision without deleting the old Observation or its Bronze evidence.
 
 ## Entity
 
