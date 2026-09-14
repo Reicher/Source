@@ -178,11 +178,14 @@ The API contract is `contracts/source-api.openapi.yml`.
 
 ## Automatic deployment with GitHub Actions
 
-The repository keeps tests on GitHub-hosted runners. After the existing
-`Test` workflow succeeds for a push to `main`, the separate `Deploy` workflow
-runs only its deployment job on a Source Node labeled `source-node`. A pull
-request workflow run can never satisfy that job's event checks, so pull-request
-code is not checked out or executed on the Node by this workflow.
+The repository keeps tests on GitHub-hosted runners. The `Test` workflow runs
+for pull requests and is enforced before merge by `main` branch protection. The
+separate `Deploy` workflow starts on every permitted push to `main` and runs its
+deployment job on a Source Node labeled `source-node`; it does not rerun tests
+or independently verify the pushed revision. Deployment safety therefore
+depends on branch protection requiring an up-to-date, successful `Test` check
+and preventing direct, bot, administrator, and other protection-bypass pushes.
+Pull-request code is not checked out or executed on the Node by this workflow.
 
 The runner connects outbound to GitHub. Do not expose a runner, SSH, Docker, or
 an additional HTTP port to the internet. Source's runtime services keep the
@@ -244,11 +247,13 @@ untracked. The workflow intentionally sets `clean: false`; changing that to a
 destructive checkout clean would remove ignored local state in the worktree.
 
 Create a GitHub environment named `source-node` and restrict its deployment
-branches to `main`. Protect `main` so the `Test` workflow is required before
-merge, prevent force pushes, and limit changes to `.github/workflows/` and
+branches to `main`. Protect `main` so changes require a pull request, the branch
+must be up to date, and the `Test` workflow must pass before merge. Apply the
+protection to administrators, do not grant bypass permission to users or bots,
+prevent force pushes, and limit changes to `.github/workflows/` and
 `scripts/deploy.sh` to trusted maintainers. The runner requires no repository
 write permission or deployment secret; each job receives only read access to
-the tested revision.
+the pushed deployment revision.
 
 This repository is public, so also set **Settings > Actions > General > Fork
 pull request workflows** to require approval for all outside collaborators.
@@ -269,10 +274,12 @@ cd <runner-directory>
 sudo ./svc.sh start
 ```
 
-Later pushes to `main` deploy automatically only after all tests pass.
+Every permitted push to `main` deploys automatically without a post-merge test
+gate. Merge only through the protected pull-request path described above; a
+protection bypass can deploy code that was not tested by this workflow.
 Deployments are serialized, and failures leave the workflow failed for
-inspection. If GitHub or the runner service is unavailable, SSH to the Node
-and deploy a tested `main` revision manually:
+inspection. If GitHub or the runner service is unavailable, SSH to the Node and
+manually deploy a `main` revision whose pull-request checks passed:
 
 ```sh
 cd <runner-directory>/_work/<repository>/<repository>
