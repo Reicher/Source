@@ -91,6 +91,12 @@ endpoint works. The Compose deployment above supplies those boundaries.
 The QR renderer is compiled into the Source Node binary and never contacts an
 external service at runtime.
 
+To build and deploy Source Client to one authorized USB-connected Android
+device, run `./scripts/deploy-android.sh` from the repository root. Once the
+model recorded in `models/source-ai-models.json` is installed, subsequent runs
+retain it and update only the Client APK. See the
+[Android Client README](clients/android/README.md) for details and device tests.
+
 ## License
 
 No open-source license has been selected yet. The repository may be viewed and
