@@ -2,6 +2,7 @@ package com.source.client.ui
 
 import com.source.client.knowledge.ConservativeSilverResolver
 import com.source.client.knowledge.SILVER_ATTRIBUTE_CANDIDATE_KIND
+import com.source.client.knowledge.SILVER_RELATIONSHIP_CANDIDATE_KIND
 import com.source.client.storage.SilverClaim
 import com.source.client.storage.SilverDataset
 import com.source.client.storage.SilverEntity
@@ -12,6 +13,7 @@ import com.source.client.storage.SilverProducer
 import com.source.client.storage.testEvidence
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -59,6 +61,7 @@ class KnowledgeScreenTest {
         assertEquals("“active”", status.objectDisplay)
         assertEquals(listOf(observation.id), status.supportingObservationIds)
         assertEquals("source.android.silver-resolution", status.producer.processorId)
+        assertFalse(source.claims.any { it.predicate == "name" || it.predicate == "entity-type" })
     }
 
     @Test
@@ -83,6 +86,45 @@ class KnowledgeScreenTest {
         assertEquals("source-1", source.id)
         assertTrue(source.evidence.isEmpty())
         assertTrue(source.observations.isEmpty())
+    }
+
+    @Test
+    fun `duplicate resolved facts are collapsed for presentation`() {
+        val observations = listOf(
+            candidate("status", "active"),
+            candidate("status", "active", confidence = .8),
+        )
+        val base = dataset(observations)
+        val silver = base.with(resolver.resolve(base, observations, 200))
+
+        val source = buildKnowledgeUiState(silver, library()).sources.single()
+
+        assertEquals(1, source.claims.size)
+        assertEquals("status", source.claims.single().predicate)
+        assertEquals(2, source.claims.single().supportingObservationIds.size)
+        assertEquals(.9, source.claims.single().confidence)
+    }
+
+    @Test
+    fun `technical labels are made readable`() {
+        assertEquals("Entity type", "entity-type".displayLabel())
+        assertEquals("Lives in", "lives_in".displayLabel())
+        assertEquals("Conversation", "conversation".displayLabel())
+    }
+
+    @Test
+    fun `entity colors are distinct and reused by relationship facts`() {
+        val observation = relationshipCandidate()
+        val base = dataset(listOf(observation))
+        val silver = base.with(resolver.resolve(base, listOf(observation), 200))
+
+        val source = buildKnowledgeUiState(silver, library()).sources.single()
+        val colorsByName = source.entities.associate { it.name to it.colorIndex }
+        val fact = source.claims.single()
+
+        assertNotEquals(colorsByName.getValue("Robin"), colorsByName.getValue("Cozy place"))
+        assertEquals(colorsByName.getValue("Robin"), fact.subjectColorIndex)
+        assertEquals(colorsByName.getValue("Cozy place"), fact.objectColorIndex)
     }
 
     @Test
@@ -114,7 +156,7 @@ class KnowledgeScreenTest {
         modifiedAtMillis = modifiedAtMillis + 1,
     )
 
-    private fun candidate(predicate: String, value: String): SilverObservation {
+    private fun candidate(predicate: String, value: String, confidence: Double = .9): SilverObservation {
         val evidence = testEvidence()
         return SilverObservation.create(
             kind = SILVER_ATTRIBUTE_CANDIDATE_KIND,
@@ -125,6 +167,28 @@ class KnowledgeScreenTest {
                 )),
                 "predicate" to SilverJsonString(predicate),
                 "value" to SilverJsonString(value),
+            )),
+            evidenceIds = listOf(evidence.id),
+            confidence = confidence,
+            producer = SilverProducer.create("source.android.silver-extraction", "3", "model-4b"),
+            createdAtMillis = 100,
+        )
+    }
+
+    private fun relationshipCandidate(): SilverObservation {
+        val evidence = testEvidence()
+        return SilverObservation.create(
+            kind = SILVER_RELATIONSHIP_CANDIDATE_KIND,
+            payload = SilverJsonObject(mapOf(
+                "subject" to SilverJsonObject(mapOf(
+                    "name" to SilverJsonString("Robin"),
+                    "type" to SilverJsonString("cat"),
+                )),
+                "predicate" to SilverJsonString("rests-at"),
+                "object" to SilverJsonObject(mapOf(
+                    "name" to SilverJsonString("Cozy place"),
+                    "type" to SilverJsonString("place"),
+                )),
             )),
             evidenceIds = listOf(evidence.id),
             confidence = .9,

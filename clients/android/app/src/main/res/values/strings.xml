@@ -24,8 +24,8 @@
     <string name="chat">Chat</string>
     <string name="library">Library</string>
     <string name="knowledge">Knowledge</string>
-    <string name="knowledge_sync_status">Knowledge sync</string>
-    <string name="knowledge_sync_failed">Knowledge sync failed</string>
+    <string name="knowledge_sync_status">Knowledge backup</string>
+    <string name="knowledge_sync_failed">Knowledge backup to Node failed</string>
     <string name="knowledge_refinement">Knowledge refinement</string>
     <string name="knowledge_refinement_running">Refining knowledge</string>
     <string name="knowledge_refinement_paused">Refinement paused</string>
