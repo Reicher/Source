@@ -121,6 +121,11 @@ administrator, and the storage contract may evolve to give Node the plaintext
 access required for authoritative Silver refinement. Future protection from a
 malicious/root Node administrator requires a separate design.
 
+The target Source-level semantics are specified in
+[`STORAGE_AND_SYNC.md`](STORAGE_AND_SYNC.md). The current whole-snapshot API and
+its timestamp-based reconciliation are transitional compatibility behavior;
+they do not define canonical revision, conflict, backup, or deletion semantics.
+
 ## Installation
 
 Copy and review the configuration:

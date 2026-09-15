@@ -65,6 +65,12 @@ See [`docs/operations.md`](docs/operations.md) for setup, user administration,
 security boundaries, verification, automatic deployment from GitHub Actions,
 backup, and restore guidance.
 
+The canonical cross-Client storage, synchronization, conflict, and deletion
+semantics are specified in
+[`docs/STORAGE_AND_SYNC.md`](docs/STORAGE_AND_SYNC.md). The prototype's current
+whole-snapshot synchronization is a compatibility path pending implementation
+of that model.
+
 ## Development
 
 ### Project language

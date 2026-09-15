@@ -7,6 +7,13 @@ opaque client-encrypted application snapshots. The loopback-only admin API is
 documented separately in [`../docs/pairing.md`](../docs/pairing.md) and is not
 part of the LAN contract.
 
+The Source-level identity, authority, revision, conflict, backup, and deletion
+semantics are defined in
+[`../docs/STORAGE_AND_SYNC.md`](../docs/STORAGE_AND_SYNC.md). The current
+snapshot endpoints predate that model and are a compatibility transport, not
+the canonical synchronization contract. Versioned wire operations for the
+canonical model belong to its implementation and migration work.
+
 Source Nodes advertise `_source._tcp` over DNS-SD. The advertisement is an
 untrusted routing hint; paired clients use the authenticated identity-challenge
 operation in the OpenAPI contract to verify the Node's permanent Ed25519 key

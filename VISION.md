@@ -195,4 +195,6 @@ explicit design and must not complicate the current one-Node-per-profile model.
 - [`docs/operations.md`](docs/operations.md) — deployment and security boundaries
 - [`docs/pairing.md`](docs/pairing.md) — current administration and pairing protocol
 - [`docs/SILVER.md`](docs/SILVER.md) — normative Silver v1 knowledge model
+- [`docs/STORAGE_AND_SYNC.md`](docs/STORAGE_AND_SYNC.md) — canonical storage,
+  backup, synchronization, conflict, and deletion model
 - [`contracts/`](contracts/README.md) — versioned Source API and AI contracts
