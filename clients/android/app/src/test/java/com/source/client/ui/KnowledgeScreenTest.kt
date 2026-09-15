@@ -4,6 +4,7 @@ import com.source.client.knowledge.ConservativeSilverResolver
 import com.source.client.knowledge.SILVER_ATTRIBUTE_CANDIDATE_KIND
 import com.source.client.knowledge.SILVER_RELATIONSHIP_CANDIDATE_KIND
 import com.source.client.storage.SilverClaim
+import com.source.client.storage.SilverClaimState
 import com.source.client.storage.SilverDataset
 import com.source.client.storage.SilverEntity
 import com.source.client.storage.SilverJsonObject
@@ -62,6 +63,22 @@ class KnowledgeScreenTest {
         assertEquals(listOf(observation.id), status.supportingObservationIds)
         assertEquals("source.android.silver-resolution", status.producer.processorId)
         assertFalse(source.claims.any { it.predicate == "name" || it.predicate == "entity-type" })
+    }
+
+    @Test
+    fun `observations supported by superseded Claims do not need review`() {
+        val observation = candidate("status", "active")
+        val base = dataset(listOf(observation))
+        val resolved = base.with(resolver.resolve(base, listOf(observation), 200))
+        val historical = resolved.copy(
+            claims = resolved.claims.map { it.copy(state = SilverClaimState.SUPERSEDED) },
+        )
+
+        val source = buildKnowledgeUiState(historical, library()).sources.single()
+
+        assertEquals(SilverInspectorObservationStatus.RESOLVED, source.observations.single().status)
+        assertEquals(0, source.unresolvedCount)
+        assertTrue(source.claims.isEmpty())
     }
 
     @Test

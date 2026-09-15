@@ -139,7 +139,9 @@ internal fun buildKnowledgeUiState(
     }
     val competingClaimIds = competingClaimIds(activeClaims)
     val observationConfidenceById = silver.observations.associate { it.id to it.confidence }
-    val claimsByObservationId = activeClaims.flatMap { claim ->
+    // Historical Claims still prove that an Observation was resolved, even though only active
+    // Claims belong in the current Facts projection.
+    val claimsByObservationId = silver.claims.flatMap { claim ->
         claim.supportingObservationIds.map { observationId -> observationId to claim }
     }.groupBy({ it.first }, { it.second })
 
