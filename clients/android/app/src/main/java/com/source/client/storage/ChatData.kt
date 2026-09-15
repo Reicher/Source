@@ -16,6 +16,7 @@ object ChatData : SourceData<ChatConversations> {
         remoteAppId = "source-client",
         snapshotFormat = "source-client-conversation",
         formatVersion = 3,
+        canonicalCollection = "conversations",
     )
     override val supportedFormatVersions = setOf(1, 2, descriptor.formatVersion)
     override val emptyValue = ChatConversations()
@@ -118,6 +119,60 @@ object ChatData : SourceData<ChatConversations> {
             }
         },
     )
+
+    override fun merge(local: ChatConversations, remote: ChatConversations): ChatConversations? {
+        val localTombstones = local.tombstones.associateBy(ChatConversationTombstone::conversationId)
+        val remoteTombstones = remote.tombstones.associateBy(ChatConversationTombstone::conversationId)
+        val localConversations = local.conversations.associateBy(ChatConversation::id)
+        val remoteConversations = remote.conversations.associateBy(ChatConversation::id)
+        if (localTombstones.keys.any(remoteConversations::containsKey) ||
+            remoteTombstones.keys.any(localConversations::containsKey)
+        ) return null
+
+        val tombstones = (localTombstones.keys + remoteTombstones.keys).sorted().map { id ->
+            val left = localTombstones[id]
+            val right = remoteTombstones[id]
+            when {
+                left == null -> checkNotNull(right)
+                right == null -> left
+                left == right -> left
+                else -> return null
+            }
+        }
+        val conversations = (localConversations.keys + remoteConversations.keys).sorted().map { id ->
+            val left = localConversations[id]
+            val right = remoteConversations[id]
+            when {
+                left == null -> checkNotNull(right)
+                right == null -> left
+                left == right -> left
+                left.createdAtMillis != right.createdAtMillis -> return null
+                else -> mergeConversation(left, right) ?: return null
+            }
+        }
+        val active = when {
+            local.activeConversationId == remote.activeConversationId -> local.activeConversationId
+            local.activeConversationId == null -> remote.activeConversationId
+            remote.activeConversationId == null -> local.activeConversationId
+            else -> return null
+        }?.takeIf { id -> conversations.any { it.id == id } }
+        val merged = ChatConversations(conversations, active, tombstones)
+        return when (version(merged).contentIdentity) {
+            version(local).contentIdentity -> local
+            version(remote).contentIdentity -> remote
+            else -> merged
+        }
+    }
+
+    private fun mergeConversation(local: ChatConversation, remote: ChatConversation): ChatConversation? {
+        val byId = linkedMapOf<String, ChatMessage>()
+        (local.messages + remote.messages).forEach { message ->
+            val existing = byId[message.id]
+            if (existing != null && existing != message) return null
+            byId[message.id] = message
+        }
+        return local.copy(messages = byId.values.sortedWith(compareBy(ChatMessage::createdAtMillis, ChatMessage::id)))
+    }
 
     private fun encodeMessages(messages: List<ChatMessage>) = JSONArray().apply {
         messages.forEach { message ->

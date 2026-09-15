@@ -49,6 +49,7 @@ object LibraryData : SourceData<LibraryManifest> {
         remoteAppId = "source-library",
         snapshotFormat = "source-library-manifest",
         formatVersion = 1,
+        canonicalCollection = "library-manifests",
     )
     override val emptyValue = LibraryManifest()
 
@@ -131,6 +132,47 @@ object LibraryData : SourceData<LibraryManifest> {
             }
             },
         )
+    }
+
+    override fun merge(local: LibraryManifest, remote: LibraryManifest): LibraryManifest? {
+        validateManifest(local)
+        validateManifest(remote)
+        val localItems = local.items.associateBy(LibraryItem::id)
+        val remoteItems = remote.items.associateBy(LibraryItem::id)
+        val localTombstones = local.tombstones.associateBy(LibraryTombstone::itemId)
+        val remoteTombstones = remote.tombstones.associateBy(LibraryTombstone::itemId)
+        if (localTombstones.keys.any(remoteItems::containsKey) || remoteTombstones.keys.any(localItems::containsKey)) {
+            return null
+        }
+        val items = (localItems.keys + remoteItems.keys).sorted().map { id ->
+            val left = localItems[id]
+            val right = remoteItems[id]
+            when {
+                left == null -> checkNotNull(right)
+                right == null -> left
+                left == right -> left
+                left.copy(nodeStored = false) == right.copy(nodeStored = false) ->
+                    left.copy(nodeStored = left.nodeStored || right.nodeStored)
+                else -> return null
+            }
+        }
+        if (items.map(LibraryItem::contentSha256).distinct().size != items.size) return null
+        val tombstones = (localTombstones.keys + remoteTombstones.keys).sorted().map { id ->
+            val left = localTombstones[id]
+            val right = remoteTombstones[id]
+            when {
+                left == null -> checkNotNull(right)
+                right == null -> left
+                left == right -> left
+                else -> return null
+            }
+        }
+        val merged = LibraryManifest(items, tombstones, maxOf(local.modifiedAtMillis, remote.modifiedAtMillis) + 1)
+        return when (version(merged).contentIdentity) {
+            version(local).contentIdentity -> local
+            version(remote).contentIdentity -> remote
+            else -> merged
+        }
     }
 
     private fun validateManifest(value: LibraryManifest) {

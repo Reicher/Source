@@ -46,6 +46,75 @@ CREATE TABLE library_items(
 CREATE UNIQUE INDEX library_active_content_idx ON library_items(user_id,content_sha256) WHERE deleted_at IS NULL;
 CREATE INDEX library_items_updated_idx ON library_items(user_id,COALESCE(deleted_at,created_at) DESC);`,
 	},
+	{
+		version: 4,
+		up: `
+CREATE TABLE profile_sync_state(
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    authority_node_id TEXT NOT NULL,
+    authority_epoch TEXT NOT NULL,
+    next_commit_sequence INTEGER NOT NULL CHECK(next_commit_sequence>0),
+    retained_log_floor INTEGER NOT NULL DEFAULT 0 CHECK(retained_log_floor>=0),
+    UNIQUE(user_id,authority_epoch)
+) STRICT;
+CREATE TABLE storage_revisions(
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    collection TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('content','tombstone')),
+    parents_json TEXT NOT NULL,
+    payload_format TEXT,
+    payload_format_version INTEGER,
+    byte_count INTEGER,
+    plaintext_sha256 TEXT,
+    created_at INTEGER,
+    origin_id TEXT NOT NULL,
+    origin_epoch TEXT NOT NULL,
+    origin_sequence INTEGER NOT NULL CHECK(origin_sequence>0),
+    authority_epoch TEXT NOT NULL,
+    commit_sequence INTEGER NOT NULL CHECK(commit_sequence>0),
+    operation_id TEXT NOT NULL,
+    revision_digest TEXT NOT NULL,
+    PRIMARY KEY(user_id,revision_id),
+    UNIQUE(user_id,authority_epoch,commit_sequence)
+) STRICT;
+CREATE INDEX storage_revisions_object_idx ON storage_revisions(user_id,collection,object_id,commit_sequence);
+CREATE TABLE storage_heads(
+    user_id TEXT NOT NULL,
+    collection TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    revision_id TEXT NOT NULL,
+    PRIMARY KEY(user_id,collection,object_id,revision_id),
+    FOREIGN KEY(user_id,revision_id) REFERENCES storage_revisions(user_id,revision_id) ON DELETE CASCADE
+) STRICT;
+CREATE TABLE storage_operations(
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    operation_id TEXT NOT NULL,
+    mutation_digest TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_epoch TEXT NOT NULL,
+    origin_sequence INTEGER NOT NULL CHECK(origin_sequence>0),
+    revision_id TEXT NOT NULL,
+    authority_node_id TEXT NOT NULL,
+    authority_epoch TEXT NOT NULL,
+    commit_sequence INTEGER NOT NULL CHECK(commit_sequence>0),
+    PRIMARY KEY(user_id,operation_id),
+    UNIQUE(user_id,origin_id,origin_epoch,origin_sequence),
+    FOREIGN KEY(user_id,revision_id) REFERENCES storage_revisions(user_id,revision_id) ON DELETE CASCADE
+) STRICT;
+CREATE TABLE client_sync_cursors(
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    collection TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    authority_node_id TEXT NOT NULL,
+    authority_epoch TEXT NOT NULL,
+    commit_sequence INTEGER NOT NULL CHECK(commit_sequence>=0),
+    acknowledged_at INTEGER NOT NULL,
+    PRIMARY KEY(user_id,client_id,collection,object_id)
+) STRICT;`,
+	},
 }
 
 const schemaVersionTable = `

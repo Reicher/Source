@@ -2,19 +2,20 @@
 
 ## Implemented first version
 
-Source Node exposes a localhost-only administration interface and three
+Source Node exposes a localhost-only administration interface and four
 facilities on a trusted local network:
 
 - temporary, administrator-authorized client pairing;
 - chat through a locally running language model;
-- storage and retrieval of snapshots already encrypted by a client.
+- canonical revision storage and incremental synchronization; and
+- compatibility storage and retrieval of snapshots already encrypted by a Client.
 
-Source Node never receives the client's vault key. It can manage accounts,
-quotas, retention, metadata, and ciphertext, but it cannot read an encrypted
-snapshot. Text explicitly sent to chat exists in plaintext in the model
-process during that request. The current version never reads snapshots or adds
-stored personal data to model context. These are facts about the implemented
-snapshot API, not a zero-knowledge requirement for the architecture.
+Source Node never receives the Client's local vault key. It cannot read a
+legacy encrypted snapshot or raw Library blob, but canonical conversation and
+manifest payloads are Node-readable logical bytes. Text explicitly sent to
+chat also exists in plaintext in the model process during that request. Source
+does not yet add stored personal data to model context. These are facts about
+the incremental migration, not a zero-knowledge requirement for the architecture.
 
 ## Current trust model and data responsibility
 
@@ -121,10 +122,14 @@ administrator, and the storage contract may evolve to give Node the plaintext
 access required for authoritative Silver refinement. Future protection from a
 malicious/root Node administrator requires a separate design.
 
-The target Source-level semantics are specified in
-[`STORAGE_AND_SYNC.md`](STORAGE_AND_SYNC.md). The current whole-snapshot API and
-its timestamp-based reconciliation are transitional compatibility behavior;
-they do not define canonical revision, conflict, backup, or deletion semantics.
+The Source-level semantics are specified in
+[`STORAGE_AND_SYNC.md`](STORAGE_AND_SYNC.md). Canonical revisions are committed
+under the `canonical` storage subtree and their graph, operation receipts,
+authority epoch, change sequence, and Client acknowledgements are part of the
+SQLite backup unit. Conversation and Library-manifest Clients use this path.
+The old whole-snapshot API, feature-specific Library blob transport, and
+Client-produced Silver remain explicit transitional compatibility behavior;
+they do not define canonical conflict, backup, or deletion semantics.
 
 ## Installation
 
@@ -344,9 +349,10 @@ docker compose down
 docker compose up -d
 ```
 
-The archive contains account state, ciphertext, metadata, and gateway state so
-the local CA identity can be restored. llama.cpp model files are excluded because
-they can be provisioned again.
+The archive contains account state, canonical payloads, compatibility
+ciphertext, metadata, and gateway state so the local CA identity can be
+restored. llama.cpp model files are excluded because they can be provisioned
+again.
 
 Node-wide restore is intentionally manual: keep the current data directory, unpack the
 archive as a replacement with restrictive permissions, run preflight, and only
@@ -356,6 +362,6 @@ their external retention period expires.
 For a lost phone, create a fresh local user on the replacement client. In the
 admin UI choose **Recover** for the existing Node user, scan the short-lived QR
 code, and enter the recovery key previously shown by the connected client. The
-replacement client receives the existing encrypted snapshots and registers a
-new client credential; all earlier client credentials for that user are
-revoked.
+replacement Client restores canonical revisions, falls back to existing
+encrypted snapshots where migration has not happened yet, and registers a new
+Client credential; all earlier Client credentials for that user are revoked.

@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"source.local/node/internal/httpapi"
 	"source.local/node/internal/pairing"
 	"source.local/node/internal/security"
+	"source.local/node/internal/syncmodel"
 )
 
 type fakeAI struct{ received []localai.Message }
@@ -144,6 +146,7 @@ func TestSourceAPIEndToEnd(t *testing.T) {
 	var paired map[string]any
 	decode(t, completed.Body, &paired)
 	credential := paired["clientCredential"].(string)
+	userID := paired["user"].(map[string]any)["id"].(string)
 	replay := jsonRequest(t, http.MethodPost, api.URL+"/api/v1/pairing/complete", nil, completeBody)
 	wantStatus(t, replay, 404)
 	wantErrorCode(t, replay.Body, "pairing_unavailable")
@@ -193,6 +196,85 @@ func TestSourceAPIEndToEnd(t *testing.T) {
 		t.Fatal("snapshot round trip changed data or metadata")
 	}
 
+	canonicalBody := []byte(`{"version":3,"conversations":[],"tombstones":[]}`)
+	canonicalSum := sha256.Sum256(canonicalBody)
+	createdAt := now.UnixMilli()
+	canonicalRevision := syncmodel.Revision{
+		ObjectKey: syncmodel.ObjectKey{
+			ProfileID: userID, Collection: "conversations",
+			ObjectID: "22222222-2222-4222-8222-222222222222",
+		},
+		Kind: "content", ParentRevisionIDs: []string{},
+		Payload: &syncmodel.Payload{
+			Format: "source-client-conversation", FormatVersion: 3,
+			ByteCount: int64(len(canonicalBody)), PlaintextSHA256: hex.EncodeToString(canonicalSum[:]),
+		},
+		CreatedAtMillis: &createdAt,
+	}
+	canonicalRevision.RevisionID, e = syncmodel.RevisionID(canonicalRevision)
+	if e != nil {
+		t.Fatal(e)
+	}
+	canonicalOperation, _ := security.UUID()
+	canonicalEpoch, _ := security.UUID()
+	emptyManifest := jsonRequest(t, http.MethodPost, api.URL+"/api/v1/sync/changes", map[string]string{"Authorization": "Bearer " + credential}, map[string]any{
+		"contractVersion": 1, "collection": "conversations", "objectId": canonicalRevision.ObjectKey.ObjectID,
+	})
+	wantStatus(t, emptyManifest, 200)
+	var emptyManifestBody syncmodel.ChangesResponse
+	decode(t, emptyManifest.Body, &emptyManifestBody)
+	if emptyManifestBody.Heads == nil || emptyManifestBody.Changes == nil || len(emptyManifestBody.Heads) != 0 {
+		t.Fatalf("empty manifest must use empty arrays: %#v", emptyManifestBody)
+	}
+	canonicalURL := api.URL + "/api/v1/sync/mutations/" + canonicalOperation
+	canonicalHeaders := map[string]string{
+		"Authorization": "Bearer " + credential, "Content-Type": "application/octet-stream",
+		"X-Source-Contract-Version": "1", "X-Source-Origin-Epoch": canonicalEpoch,
+		"X-Source-Origin-Sequence": "1", "X-Source-Collection": "conversations",
+		"X-Source-Object-Id":   canonicalRevision.ObjectKey.ObjectID,
+		"X-Source-Revision-Id": canonicalRevision.RevisionID, "X-Source-Revision-Kind": "content",
+		"X-Source-Payload-Format":         canonicalRevision.Payload.Format,
+		"X-Source-Payload-Format-Version": "3", "X-Source-Byte-Count": strconv.Itoa(len(canonicalBody)),
+		"X-Source-Plaintext-SHA256":  canonicalRevision.Payload.PlaintextSHA256,
+		"X-Source-Created-At-Millis": strconv.FormatInt(createdAt, 10),
+	}
+	canonicalCommit := request(t, http.MethodPost, canonicalURL, canonicalHeaders, canonicalBody)
+	wantStatus(t, canonicalCommit, 201)
+	var commitResult struct {
+		Receipt syncmodel.CommitReceipt `json:"receipt"`
+		Heads   []syncmodel.Revision    `json:"heads"`
+	}
+	decode(t, canonicalCommit.Body, &commitResult)
+	if commitResult.Receipt.RevisionID != canonicalRevision.RevisionID || commitResult.Receipt.CommitSequence != 1 || len(commitResult.Heads) != 1 {
+		t.Fatalf("unexpected canonical commit: %#v", commitResult)
+	}
+	canonicalRetry := request(t, http.MethodPost, canonicalURL, canonicalHeaders, canonicalBody)
+	wantStatus(t, canonicalRetry, 200)
+	canonicalRetry.Body.Close()
+
+	changes := jsonRequest(t, http.MethodPost, api.URL+"/api/v1/sync/changes", map[string]string{"Authorization": "Bearer " + credential}, map[string]any{
+		"contractVersion": 1, "collection": "conversations", "objectId": canonicalRevision.ObjectKey.ObjectID,
+	})
+	wantStatus(t, changes, 200)
+	var changesResult syncmodel.ChangesResponse
+	decode(t, changes.Body, &changesResult)
+	if !changesResult.RequiresManifest || changesResult.Cursor.CommitSequence != 1 || len(changesResult.Heads) != 1 {
+		t.Fatalf("unexpected canonical manifest: %#v", changesResult)
+	}
+	canonicalPayload := request(t, http.MethodGet, api.URL+"/api/v1/sync/revisions/"+canonicalRevision.RevisionID+"/payload", map[string]string{"Authorization": "Bearer " + credential}, nil)
+	wantStatus(t, canonicalPayload, 200)
+	canonicalRestored, _ := io.ReadAll(canonicalPayload.Body)
+	canonicalPayload.Body.Close()
+	if !bytes.Equal(canonicalRestored, canonicalBody) {
+		t.Fatal("canonical payload round trip changed bytes")
+	}
+	ack := jsonRequest(t, http.MethodPost, api.URL+"/api/v1/sync/ack", map[string]string{"Authorization": "Bearer " + credential}, map[string]any{
+		"contractVersion": 1, "collection": "conversations",
+		"objectId": canonicalRevision.ObjectKey.ObjectID, "cursor": changesResult.Cursor,
+	})
+	wantStatus(t, ack, 200)
+	ack.Body.Close()
+
 	libraryItemID, _ := security.UUID()
 	libraryContentHash := strings.Repeat("a", 64)
 	encryptedItem := bytes.Repeat([]byte{9}, 64)
@@ -235,7 +317,6 @@ func TestSourceAPIEndToEnd(t *testing.T) {
 	wantStatus(t, pendingUpload, 409)
 	wantErrorCode(t, pendingUpload.Body, "library_item_deleted")
 
-	userID := paired["user"].(map[string]any)["id"].(string)
 	recoveryInvite := request(t, http.MethodPost, adm.URL+"/admin/api/users/"+userID+"/recovery-invitations", map[string]string{"Origin": adm.URL, "Cookie": cookie, "X-Source-Csrf": csrf}, nil)
 	wantStatus(t, recoveryInvite, 201)
 	var recoveryResult struct {

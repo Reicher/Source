@@ -7,15 +7,16 @@ import com.source.client.model.ChatMessage
 import com.source.client.model.ChatRole
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class SourceDataTest {
     @Test
-    fun `newer remote conversation replaces local state`() {
+    fun `legacy snapshot resolution accepts a newer remote value`() {
         val local = conversations("local", 100)
         val remote = conversations("remote", 200)
 
-        assertEquals(SourceDataResolution.USE_REMOTE, resolveSourceData(ChatData.version(local), ChatData.version(remote)))
+        assertEquals(SourceDataResolution.USE_REMOTE, resolveLegacySourceData(ChatData.version(local), ChatData.version(remote)))
     }
 
     @Test
@@ -28,7 +29,7 @@ class SourceDataTest {
 
         assertEquals(
             SourceDataResolution.MATCH,
-            resolveSourceData(ChatData.version(data), ChatData.version(data)),
+            resolveLegacySourceData(ChatData.version(data), ChatData.version(data)),
         )
     }
 
@@ -37,7 +38,7 @@ class SourceDataTest {
         val local = conversations("local", 200)
         val remote = conversations("remote", 100)
 
-        assertEquals(SourceDataResolution.KEEP_LOCAL, resolveSourceData(ChatData.version(local), ChatData.version(remote)))
+        assertEquals(SourceDataResolution.KEEP_LOCAL, resolveLegacySourceData(ChatData.version(local), ChatData.version(remote)))
     }
 
     @Test
@@ -47,6 +48,28 @@ class SourceDataTest {
         assertEquals("source-client-conversation", ChatData.descriptor.snapshotFormat)
         assertEquals(3, ChatData.descriptor.formatVersion)
         assertEquals(setOf(1, 2, 3), ChatData.supportedFormatVersions)
+        assertEquals("conversations", ChatData.descriptor.canonicalCollection)
+    }
+
+    @Test
+    fun `concurrent additive conversation branches merge without choosing by clock`() {
+        val first = conversations("first", 500)
+        val second = conversations("second", 100)
+
+        val merged = ChatData.merge(first.copy(activeConversationId = null), second.copy(activeConversationId = null))!!
+
+        assertEquals(setOf("first", "second"), merged.conversations.flatMap { it.messages }.map { it.content }.toSet())
+    }
+
+    @Test
+    fun `concurrent delete and edit remains an explicit conflict`() {
+        val stored = conversations("stored", 100)
+        val deleted = ChatConversations(
+            tombstones = listOf(ChatConversationTombstone(stored.conversations.single().id, 200)),
+        )
+
+        assertNull(ChatData.merge(deleted, stored))
+        assertNull(ChatData.merge(stored, deleted))
     }
 
     @Test
@@ -71,7 +94,7 @@ class SourceDataTest {
 
         assertEquals(
             SourceDataResolution.KEEP_LOCAL,
-            resolveSourceData(ChatData.version(deleted), ChatData.version(stored)),
+            resolveLegacySourceData(ChatData.version(deleted), ChatData.version(stored)),
         )
     }
 

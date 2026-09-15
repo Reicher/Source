@@ -22,6 +22,26 @@ class SourceDataStore(private val secureVault: SecureVault) {
         }
     }
 
+    fun <T> saveWithSyncState(
+        session: VaultSession,
+        data: SourceData<T>,
+        value: T,
+        syncState: CanonicalSyncState,
+    ) {
+        val plaintext = data.encode(value)
+        try {
+            secureVault.saveDataAndSyncState(session, data.descriptor, plaintext, syncState)
+        } finally {
+            plaintext.fill(0)
+        }
+    }
+
+    fun <T> loadSyncState(session: VaultSession, data: SourceData<T>): CanonicalSyncState =
+        secureVault.loadSyncState(session, data.descriptor) ?: CanonicalSyncState()
+
+    fun <T> saveSyncState(session: VaultSession, data: SourceData<T>, state: CanonicalSyncState) =
+        secureVault.saveSyncState(session, data.descriptor, state)
+
     fun <T> createSnapshot(
         session: VaultSession,
         data: SourceData<T>,
