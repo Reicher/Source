@@ -82,6 +82,9 @@ internal class SilverController(
     private var pausedByUser = false
     private var checkpoints = SilverCheckpointDataset()
     private val checkpointStoreMutex = Mutex()
+    // A refinement commit and a remote reconciliation both replace the complete persisted snapshot.
+    // Keep their read/merge/persist/state transitions atomic so neither can publish stale Silver state.
+    private val datasetMutex = Mutex()
 
     var state = SilverUiState()
         private set
@@ -96,31 +99,33 @@ internal class SilverController(
         pausedForInteraction = false
         pausedForBackground = false
         pausedByUser = false
-        sync.reset()
-        val dataset = if (activeSession == null) {
-            SilverDataset()
-        } else {
-            localStore.load(activeSession, SilverData)
-        }
-        checkpoints = if (activeSession == null) {
-            SilverCheckpointDataset()
-        } else {
-            checkpointStoreMutex.withLock {
-                withContext(Dispatchers.Default) {
-                    localStore.load(activeSession, SilverCheckpointData)
+        datasetMutex.withLock {
+            sync.reset()
+            val dataset = if (activeSession == null) {
+                SilverDataset()
+            } else {
+                localStore.load(activeSession, SilverData)
+            }
+            checkpoints = if (activeSession == null) {
+                SilverCheckpointDataset()
+            } else {
+                checkpointStoreMutex.withLock {
+                    withContext(Dispatchers.Default) {
+                        localStore.load(activeSession, SilverCheckpointData)
+                    }
                 }
             }
+            pausedByUser = checkpoints.refinementPaused
+            state = SilverUiState(
+                dataset = dataset,
+                refinementPaused = pausedByUser,
+                pendingSync = if (activeSession == null) emptySet() else buildSet {
+                    dataset.evidence.mapTo(this) { it.bronzeSourceId }
+                    addAll(dataset.removedSourceIds.keys)
+                },
+            )
+            publish()
         }
-        pausedByUser = checkpoints.refinementPaused
-        state = SilverUiState(
-            dataset = dataset,
-            refinementPaused = pausedByUser,
-            pendingSync = if (activeSession == null) emptySet() else buildSet {
-                dataset.evidence.mapTo(this) { it.bronzeSourceId }
-                addAll(dataset.removedSourceIds.keys)
-            },
-        )
-        publish()
         if (activeSession != null) refresh()
     }
 
@@ -178,62 +183,80 @@ internal class SilverController(
     suspend fun synchronize() {
         val activeSession = session() ?: return
         val connected = connectedNode() ?: return
-        val affected = state.pendingSync
-        val syncStartedAt = SystemClock.elapsedRealtime()
-        if (affected.isNotEmpty()) {
-            Log.i(SILVER_LOG_TAG, "Silver sync started items=${affected.size}")
-        }
-        if (affected.isNotEmpty()) {
-            state = state.copy(syncing = affected, syncFailed = state.syncFailed - affected)
-            publish()
-        }
-        sync.synchronize(activeSession, connected, state.dataset) { remote ->
-            state = state.copy(dataset = remote, pendingSync = emptySet(), syncing = emptySet(), syncFailed = emptySet())
-            publish()
-        }
-        state = if (sync.isBackedUp) {
-            state.copy(pendingSync = emptySet(), syncing = emptySet(), syncFailed = emptySet())
-        } else {
-            state.copy(syncing = emptySet(), syncFailed = state.syncFailed + affected)
-        }
-        if (affected.isNotEmpty()) {
-            val error = sync.lastError
-            if (sync.isBackedUp) {
-                Log.i(SILVER_LOG_TAG, "Silver sync finished durationMs=${SystemClock.elapsedRealtime() - syncStartedAt}")
-            } else {
-                Log.w(
-                    SILVER_LOG_TAG,
-                    "Silver sync failed durationMs=${SystemClock.elapsedRealtime() - syncStartedAt} " +
-                        "error=${syncErrorSummary(error)}",
-                )
+        datasetMutex.withLock {
+            val affected = state.pendingSync
+            val syncStartedAt = SystemClock.elapsedRealtime()
+            if (affected.isNotEmpty()) {
+                Log.i(SILVER_LOG_TAG, "Silver sync started items=${affected.size}")
             }
+            if (affected.isNotEmpty()) {
+                state = state.copy(syncing = affected, syncFailed = state.syncFailed - affected)
+                publish()
+            }
+            sync.synchronize(activeSession, connected, state.dataset) { remote ->
+                state = state.copy(
+                    dataset = remote,
+                    pendingSync = emptySet(),
+                    syncing = emptySet(),
+                    syncFailed = emptySet(),
+                )
+                publish()
+            }
+            state = if (sync.isBackedUp) {
+                state.copy(pendingSync = emptySet(), syncing = emptySet(), syncFailed = emptySet())
+            } else {
+                state.copy(syncing = emptySet(), syncFailed = state.syncFailed + affected)
+            }
+            if (affected.isNotEmpty()) {
+                val error = sync.lastError
+                if (sync.isBackedUp) {
+                    Log.i(
+                        SILVER_LOG_TAG,
+                        "Silver sync finished durationMs=${SystemClock.elapsedRealtime() - syncStartedAt}",
+                    )
+                } else {
+                    Log.w(
+                        SILVER_LOG_TAG,
+                        "Silver sync failed durationMs=${SystemClock.elapsedRealtime() - syncStartedAt} " +
+                            "error=${syncErrorSummary(error)}",
+                    )
+                }
+            }
+            publish()
         }
-        publish()
         refresh()
     }
 
     fun removeSource(sourceId: String) {
         val activeSession = session() ?: return
-        if (state.dataset.evidence.none { it.bronzeSourceId == sourceId } && sourceId in state.dataset.removedSourceIds) return
-        val now = nextModifiedAt()
-        val affectedSourceIds = setOf(sourceId)
-        state = state.copy(
-            dataset = removeSilverSources(state.dataset, affectedSourceIds, now),
-            processing = state.processing - affectedSourceIds,
-            progress = state.progress - affectedSourceIds,
-            pendingSync = state.pendingSync + affectedSourceIds,
-            syncFailed = state.syncFailed - affectedSourceIds,
-        )
-        checkpoints = checkpoints.copy(checkpoints = checkpoints.checkpoints.filterNot {
-            it.bronzeSourceId in affectedSourceIds
-        })
-        sync.changed()
-        publish()
         scope.launch {
-            sync.persist(activeSession, state.dataset)
-            persistCheckpoints(activeSession)
-            synchronize()
-            refresh()
+            val removed = datasetMutex.withLock {
+                if (
+                    state.dataset.evidence.none { it.bronzeSourceId == sourceId } &&
+                    sourceId in state.dataset.removedSourceIds
+                ) return@withLock false
+                val now = nextModifiedAt()
+                val affectedSourceIds = setOf(sourceId)
+                state = state.copy(
+                    dataset = removeSilverSources(state.dataset, affectedSourceIds, now),
+                    processing = state.processing - affectedSourceIds,
+                    progress = state.progress - affectedSourceIds,
+                    pendingSync = state.pendingSync + affectedSourceIds,
+                    syncFailed = state.syncFailed - affectedSourceIds,
+                )
+                checkpoints = checkpoints.copy(checkpoints = checkpoints.checkpoints.filterNot {
+                    it.bronzeSourceId in affectedSourceIds
+                })
+                sync.changed()
+                publish()
+                sync.persist(activeSession, state.dataset)
+                persistCheckpoints(activeSession)
+                true
+            }
+            if (removed) {
+                synchronize()
+                refresh()
+            }
         }
     }
 
@@ -401,58 +424,62 @@ internal class SilverController(
     private suspend fun commit(source: BronzeTextSource, extracted: ExtractedSilver) {
         val activeSession = session() ?: return
         val storeStartedAt = SystemClock.elapsedRealtime()
-        val now = nextModifiedAt()
-        val committed = replaceSilverGeneration(state.dataset, source, extracted, resolver, now)
-        if (committed.dataset === state.dataset) {
-            Log.i(SILVER_LOG_TAG, "Silver generation already committed; no snapshot or sync change")
-            return
+        val changed = datasetMutex.withLock {
+            val now = nextModifiedAt()
+            val committed = replaceSilverGeneration(state.dataset, source, extracted, resolver, now)
+            if (committed.dataset === state.dataset) {
+                Log.i(SILVER_LOG_TAG, "Silver generation already committed; no snapshot or sync change")
+                return@withLock false
+            }
+            sync.persist(activeSession, committed.dataset)
+            sync.changed()
+            state = state.copy(
+                dataset = committed.dataset,
+                pendingSync = state.pendingSync + source.id,
+                syncFailed = state.syncFailed - source.id,
+            )
+            Log.i(
+                SILVER_LOG_TAG,
+                "Silver stored durationMs=${SystemClock.elapsedRealtime() - storeStartedAt} " +
+                    "evidence=${extracted.evidence.size} observations=${extracted.observations.size} " +
+                    "supersededClaims=${committed.supersededClaimIds.size}",
+            )
+            publish()
+            true
         }
-        val committedState = state.copy(
-            dataset = committed.dataset,
-            pendingSync = state.pendingSync + source.id,
-            syncFailed = state.syncFailed - source.id,
-        )
-        sync.persist(activeSession, committed.dataset)
-        sync.changed()
-        state = committedState
-        Log.i(
-            SILVER_LOG_TAG,
-            "Silver stored durationMs=${SystemClock.elapsedRealtime() - storeStartedAt} " +
-                "evidence=${extracted.evidence.size} observations=${extracted.observations.size} " +
-                "supersededClaims=${committed.supersededClaimIds.size}",
-        )
-        publish()
-        synchronize()
+        if (changed) synchronize()
     }
 
     private suspend fun removeOrphanedData(activeSourceIds: Set<String>) {
-        val removed = state.dataset.evidence.map { it.bronzeSourceId }.filterNot(activeSourceIds::contains).toSet()
-        val orphanedCheckpoints = checkpoints.checkpoints.map(SilverRefinementCheckpoint::bronzeSourceId)
-            .filterNot(activeSourceIds::contains).toSet()
-        if (removed.isEmpty() && orphanedCheckpoints.isEmpty()) return
-        val activeSession = session() ?: return
-        if (orphanedCheckpoints.isNotEmpty()) {
-            checkpoints = checkpoints.copy(checkpoints = checkpoints.checkpoints.filter {
-                it.bronzeSourceId in activeSourceIds
+        datasetMutex.withLock {
+            val removed = state.dataset.evidence.map { it.bronzeSourceId }.filterNot(activeSourceIds::contains).toSet()
+            val orphanedCheckpoints = checkpoints.checkpoints.map(SilverRefinementCheckpoint::bronzeSourceId)
+                .filterNot(activeSourceIds::contains).toSet()
+            if (removed.isEmpty() && orphanedCheckpoints.isEmpty()) return@withLock
+            val activeSession = session() ?: return@withLock
+            if (orphanedCheckpoints.isNotEmpty()) {
+                checkpoints = checkpoints.copy(checkpoints = checkpoints.checkpoints.filter {
+                    it.bronzeSourceId in activeSourceIds
+                })
+                persistCheckpoints(activeSession)
+            }
+            if (removed.isEmpty()) return@withLock
+            val now = nextModifiedAt()
+            val affectedSourceIds = removed
+            state = state.copy(
+                dataset = removeSilverSources(state.dataset, affectedSourceIds, now),
+                processing = state.processing - affectedSourceIds,
+                progress = state.progress - affectedSourceIds,
+                pendingSync = state.pendingSync + affectedSourceIds,
+            )
+            checkpoints = checkpoints.copy(checkpoints = checkpoints.checkpoints.filterNot {
+                it.bronzeSourceId in affectedSourceIds
             })
             persistCheckpoints(activeSession)
+            sync.changed()
+            sync.persist(activeSession, state.dataset)
+            publish()
         }
-        if (removed.isEmpty()) return
-        val now = nextModifiedAt()
-        val affectedSourceIds = removed
-        state = state.copy(
-            dataset = removeSilverSources(state.dataset, affectedSourceIds, now),
-            processing = state.processing - affectedSourceIds,
-            progress = state.progress - affectedSourceIds,
-            pendingSync = state.pendingSync + affectedSourceIds,
-        )
-        checkpoints = checkpoints.copy(checkpoints = checkpoints.checkpoints.filterNot {
-            it.bronzeSourceId in affectedSourceIds
-        })
-        persistCheckpoints(activeSession)
-        sync.changed()
-        sync.persist(activeSession, state.dataset)
-        publish()
     }
 
     private fun nextModifiedAt(): Long = maxOf(clock().coerceAtLeast(1), state.dataset.modifiedAtMillis + 1)
