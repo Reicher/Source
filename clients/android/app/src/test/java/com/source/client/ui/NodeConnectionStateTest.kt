@@ -2,10 +2,14 @@ package com.source.client.ui
 
 import com.source.client.model.ConnectedNode
 import com.source.client.model.DiscoveredNode
+import com.source.client.model.LocalIdentity
 import com.source.client.model.NodeConnectionState
 import com.source.client.model.TrustedNode
+import com.source.client.model.UnlockedVault
+import com.source.client.model.bindAuthoritativeNode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -28,5 +32,40 @@ class NodeConnectionStateTest {
 
         assertTrue(state.isAuthenticating(discovered))
         assertEquals(2, state.attempt)
+    }
+
+    @Test
+    fun `automatic reconnect ignores discovery order and selects only the authoritative node`() {
+        val other = discovered.copy(serviceName = "other", nodeIdHint = "other", displayName = "Other")
+
+        val candidate = trusted.automaticConnectionCandidate(listOf(other, discovered))
+
+        assertEquals(discovered, candidate?.first)
+        assertEquals(trusted, candidate?.second)
+        assertNull(trusted.automaticConnectionCandidate(listOf(other)))
+    }
+
+    @Test
+    fun `unpaired profiles expose every discovered node without selecting one automatically`() {
+        val other = discovered.copy(serviceName = "other", nodeIdHint = "other", displayName = "Other")
+        val discoveries = listOf(other, discovered)
+        val authority: TrustedNode? = null
+
+        assertNull(authority.automaticConnectionCandidate(discoveries))
+        assertEquals(discoveries, authority.manuallySelectableNodes(discoveries))
+        assertEquals(discoveries, NodeConnectionState.Found(discoveries).selectableNodes())
+    }
+
+    @Test
+    fun `binding cannot silently move an authoritative profile to another node`() {
+        val identity = LocalIdentity("user", "User", "client", "Client", "public", "private")
+        val vault = UnlockedVault(identity).bindAuthoritativeNode(trusted)
+
+        assertThrows(IllegalArgumentException::class.java) {
+            vault.bindAuthoritativeNode(trusted.copy(nodeId = "other"))
+        }
+        assertEquals(trusted.copy(displayName = "Renamed"), vault.bindAuthoritativeNode(
+            trusted.copy(displayName = "Renamed"),
+        ).authoritativeNode)
     }
 }

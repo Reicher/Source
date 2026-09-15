@@ -31,8 +31,15 @@ data class PairingResult(
 
 data class UnlockedVault(
     val identity: LocalIdentity,
-    val trustedNodes: List<TrustedNode>,
+    val authoritativeNode: TrustedNode? = null,
 )
+
+fun UnlockedVault.bindAuthoritativeNode(node: TrustedNode): UnlockedVault {
+    require(authoritativeNode == null || authoritativeNode.nodeId == node.nodeId) {
+        "Moving a profile to another Node requires an explicit migration"
+    }
+    return copy(authoritativeNode = node)
+}
 
 data class VaultProfile(
     val id: String,

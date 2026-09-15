@@ -63,7 +63,7 @@ class SecureVault(
         val (deviceNonce, deviceEnvelope) = keystoreEncrypt(passwordEnvelope)
         passwordEnvelope.fill(0)
 
-        val session = VaultSession(profile.id, vaultKey, UnlockedVault(identity, emptyList()))
+        val session = VaultSession(profile.id, vaultKey, UnlockedVault(identity))
         persistVault(session)
         val updatedProfiles = profiles + profile
         val committed = preferences.edit()
@@ -292,7 +292,7 @@ class SecureVault(
     }
 
     private fun encode(vault: UnlockedVault): String = JSONObject().apply {
-        put("version", 1)
+        put("version", 2)
         put("identity", JSONObject().apply {
             put("userId", vault.identity.userId)
             put("userDisplayName", vault.identity.userDisplayName)
@@ -301,46 +301,44 @@ class SecureVault(
             put("clientPublicKey", vault.identity.clientPublicKey)
             put("clientPrivateKey", vault.identity.clientPrivateKey)
         })
-        put("trustedNodes", JSONArray().apply {
-            vault.trustedNodes.forEach { node ->
-                put(JSONObject().apply {
-                    put("nodeId", node.nodeId)
-                    put("nodePublicKey", node.nodePublicKey)
-                    put("tlsCaCertificate", node.tlsCaCertificate)
-                    put("displayName", node.displayName)
-                    put("clientCredential", node.clientCredential)
-                    put("userId", node.userId)
-                    put("clientId", node.clientId)
-                    node.recoveryKey?.let { put("recoveryKey", it) }
-                    node.dataKey?.let { put("dataKey", it) }
-                    if (node.recoverySetupPending) put("recoverySetupPending", true)
-                })
-            }
-        })
+        vault.authoritativeNode?.let { put("authoritativeNode", encodeTrustedNode(it)) }
     }.toString()
 
     private fun decode(raw: String): UnlockedVault {
         val root = JSONObject(raw)
-        require(root.getInt("version") == 1)
+        require(root.getInt("version") == 2)
         val identity = root.getJSONObject("identity").let {
             LocalIdentity(
                 it.getString("userId"), it.getString("userDisplayName"), it.getString("clientId"),
                 it.getString("clientDisplayName"), it.getString("clientPublicKey"), it.getString("clientPrivateKey"),
             )
         }
-        val trusted = root.getJSONArray("trustedNodes")
-        return UnlockedVault(identity, List(trusted.length()) { index ->
-            trusted.getJSONObject(index).let {
-                TrustedNode(
-                    it.getString("nodeId"), it.getString("nodePublicKey"), it.getString("tlsCaCertificate"), it.getString("displayName"),
-                    it.getString("clientCredential"), it.getString("userId"), it.getString("clientId"),
-                    it.optString("recoveryKey").takeIf(String::isNotBlank),
-                    it.optString("dataKey").takeIf(String::isNotBlank),
-                    it.optBoolean("recoverySetupPending", false),
-                )
-            }
-        })
+        return UnlockedVault(
+            identity,
+            root.optJSONObject("authoritativeNode")?.let(::decodeTrustedNode),
+        )
     }
+
+    private fun encodeTrustedNode(node: TrustedNode): JSONObject = JSONObject().apply {
+        put("nodeId", node.nodeId)
+        put("nodePublicKey", node.nodePublicKey)
+        put("tlsCaCertificate", node.tlsCaCertificate)
+        put("displayName", node.displayName)
+        put("clientCredential", node.clientCredential)
+        put("userId", node.userId)
+        put("clientId", node.clientId)
+        node.recoveryKey?.let { put("recoveryKey", it) }
+        node.dataKey?.let { put("dataKey", it) }
+        if (node.recoverySetupPending) put("recoverySetupPending", true)
+    }
+
+    private fun decodeTrustedNode(raw: JSONObject): TrustedNode = TrustedNode(
+        raw.getString("nodeId"), raw.getString("nodePublicKey"), raw.getString("tlsCaCertificate"), raw.getString("displayName"),
+        raw.getString("clientCredential"), raw.getString("userId"), raw.getString("clientId"),
+        raw.optString("recoveryKey").takeIf(String::isNotBlank),
+        raw.optString("dataKey").takeIf(String::isNotBlank),
+        raw.optBoolean("recoverySetupPending", false),
+    )
 
     private fun dataKey(dataId: String, suffix: String) = "${dataId}_$suffix"
 

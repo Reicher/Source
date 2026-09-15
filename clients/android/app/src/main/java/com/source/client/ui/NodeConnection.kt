@@ -7,6 +7,7 @@ import com.source.client.model.NodeConnectionState
 import com.source.client.model.NodeDisconnectReason
 import com.source.client.model.NodeRecoveryPhase
 import com.source.client.model.TrustedNode
+import com.source.client.model.bindAuthoritativeNode
 import com.source.client.security.SourceCrypto
 import com.source.client.security.VaultSession
 import kotlinx.coroutines.CancellationException
@@ -23,6 +24,19 @@ internal fun NodeConnectionState.connectedNodeOrNull(): ConnectedNode? =
 internal fun NodeConnectionState.isAuthenticating(node: DiscoveredNode): Boolean =
     this is NodeConnectionState.Authenticating &&
         this.node.serviceName == node.serviceName && this.node.apiBaseUrl == node.apiBaseUrl
+
+internal fun TrustedNode?.automaticConnectionCandidate(
+    nodes: List<DiscoveredNode>,
+): Pair<DiscoveredNode, TrustedNode>? {
+    val trusted = this ?: return null
+    return nodes.firstOrNull { it.nodeIdHint == trusted.nodeId }?.let { it to trusted }
+}
+
+internal fun TrustedNode?.manuallySelectableNodes(nodes: List<DiscoveredNode>): List<DiscoveredNode> =
+    if (this == null) nodes else emptyList()
+
+internal fun NodeConnectionState.selectableNodes(): List<DiscoveredNode> =
+    (this as? NodeConnectionState.Found)?.nodes.orEmpty()
 
 internal class NodeConnection(
     private val app: SourceClientApplication,
@@ -61,7 +75,7 @@ internal class NodeConnection(
 
     fun onBackground() {
         foreground = false
-        val trusted = current?.trusted ?: session()?.vault?.trustedNodes?.firstOrNull()
+        val trusted = current?.trusted ?: session()?.vault?.authoritativeNode
         app.nodeDiscovery.stop()
         app.networkMonitor.stop()
         cancelConnectionWork()
@@ -111,10 +125,8 @@ internal class NodeConnection(
         reconcile(app.nodeDiscovery.nodes.value, app.networkMonitor.available.value)
     }
 
-    fun saveTrustedNode(activeSession: VaultSession, trusted: TrustedNode) {
-        activeSession.vault = activeSession.vault.copy(
-            trustedNodes = activeSession.vault.trustedNodes.filterNot { it.nodeId == trusted.nodeId } + trusted,
-        )
+    fun saveAuthoritativeNode(activeSession: VaultSession, trusted: TrustedNode) {
+        activeSession.vault = activeSession.vault.bindAuthoritativeNode(trusted)
         app.secureVault.save(activeSession)
     }
 
@@ -125,11 +137,12 @@ internal class NodeConnection(
     }
 
     fun stateForCurrentNodes(): NodeConnectionState {
-        val trusted = session()?.vault?.trustedNodes.orEmpty()
+        val authority = session()?.vault?.authoritativeNode
         val nodes = app.nodeDiscovery.nodes.value
+        val selectable = authority.manuallySelectableNodes(nodes)
         return when {
-            trusted.isNotEmpty() -> NodeConnectionState.Disconnected(trusted.first(), NodeDisconnectReason.NOT_FOUND)
-            nodes.isNotEmpty() -> NodeConnectionState.Found(nodes)
+            authority != null -> NodeConnectionState.Disconnected(authority, NodeDisconnectReason.NOT_FOUND)
+            selectable.isNotEmpty() -> NodeConnectionState.Found(selectable)
             else -> NodeConnectionState.Discovering
         }
     }
@@ -154,17 +167,15 @@ internal class NodeConnection(
             cancelConnectionWork()
             transition(
                 NodeConnectionState.Disconnected(
-                    activeSession.vault.trustedNodes.firstOrNull(),
+                    activeSession.vault.authoritativeNode,
                     NodeDisconnectReason.NETWORK_UNAVAILABLE,
                 ),
             )
             return
         }
         app.nodeDiscovery.start()
-        val trustedNodes = activeSession.vault.trustedNodes
-        val candidate = nodes.firstNotNullOfOrNull { discovered ->
-            trustedNodes.firstOrNull { it.nodeId == discovered.nodeIdHint }?.let { discovered to it }
-        }
+        val authority = activeSession.vault.authoritativeNode
+        val candidate = authority.automaticConnectionCandidate(nodes)
         if (candidate != null) {
             val connected = current
             if (connected?.trusted?.nodeId == candidate.second.nodeId &&
@@ -176,11 +187,11 @@ internal class NodeConnection(
             return
         }
         cancelConnectionWork()
+        val selectable = authority.manuallySelectableNodes(nodes)
         transition(
             when {
-                trustedNodes.isNotEmpty() ->
-                    NodeConnectionState.Disconnected(trustedNodes.first(), NodeDisconnectReason.NOT_FOUND)
-                nodes.isNotEmpty() -> NodeConnectionState.Found(nodes)
+                authority != null -> NodeConnectionState.Disconnected(authority, NodeDisconnectReason.NOT_FOUND)
+                selectable.isNotEmpty() -> NodeConnectionState.Found(selectable)
                 else -> NodeConnectionState.Discovering
             },
         )
@@ -205,11 +216,7 @@ internal class NodeConnection(
                     var refreshed = app.nodeApi.authenticate(discovered.apiBaseUrl, trusted)
                     val activeSession = session() ?: return@launch
                     if (refreshed.displayName != trusted.displayName) {
-                        activeSession.vault = activeSession.vault.copy(
-                            trustedNodes = activeSession.vault.trustedNodes.map {
-                                if (it.nodeId == refreshed.nodeId) refreshed else it
-                            },
-                        )
+                        activeSession.vault = activeSession.vault.bindAuthoritativeNode(refreshed)
                         app.secureVault.save(activeSession)
                     }
                     transition(NodeConnectionState.Connected(connectedNode(discovered, refreshed)))
@@ -253,7 +260,7 @@ internal class NodeConnection(
         } else {
             trusted.copy(recoverySetupPending = true)
         }
-        saveTrustedNode(activeSession, pending)
+        saveAuthoritativeNode(activeSession, pending)
         transition(
             NodeConnectionState.Recovering(
                 discovered,
@@ -270,7 +277,7 @@ internal class NodeConnection(
         }
         app.nodeApi.setupRecovery(discovered.apiBaseUrl, pending, recoveryKey, envelope)
         val updated = pending.copy(recoverySetupPending = false)
-        saveTrustedNode(activeSession, updated)
+        saveAuthoritativeNode(activeSession, updated)
         transition(NodeConnectionState.Connected(connectedNode(discovered, updated)))
         onRecoveryConfigured()
         return updated

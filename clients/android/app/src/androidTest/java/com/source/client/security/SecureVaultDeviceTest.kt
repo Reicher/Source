@@ -13,6 +13,8 @@ import com.source.client.model.ChatConversation
 import com.source.client.model.ChatConversationTombstone
 import com.source.client.model.ChatConversations
 import com.source.client.model.ChatMessage
+import com.source.client.model.TrustedNode
+import com.source.client.model.bindAuthoritativeNode
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -189,9 +191,13 @@ class SecureVaultDeviceTest {
         val robinPassword = "Robin password".toCharArray()
         val testPassword = "test".toCharArray()
         val robin = vault.create("Robin", robinPassword)
+        robin.vault = robin.vault.bindAuthoritativeNode(trustedNode("robin-node"))
+        vault.save(robin)
         dataStore.save(robin, ChatData, conversations(listOf(ChatMessage.user("Robins privata chatt"))))
         robin.close()
         val testUser = vault.create("Test", testPassword)
+        testUser.vault = testUser.vault.bindAuthoritativeNode(trustedNode("test-node"))
+        vault.save(testUser)
         dataStore.save(testUser, ChatData, conversations(listOf(ChatMessage.user("Testets privata chatt"))))
         testUser.close()
 
@@ -202,8 +208,10 @@ class SecureVaultDeviceTest {
         val reopenedRobin = vault.unlock(profiles[0].id, robinPassword)!!
         val reopenedTest = vault.unlock(profiles[1].id, testPassword)!!
         assertEquals("Robin", reopenedRobin.vault.identity.userDisplayName)
+        assertEquals("robin-node", reopenedRobin.vault.authoritativeNode?.nodeId)
         assertEquals("Robins privata chatt", dataStore.load(reopenedRobin, ChatData).activeConversation!!.messages.single().content)
         assertEquals("Test", reopenedTest.vault.identity.userDisplayName)
+        assertEquals("test-node", reopenedTest.vault.authoritativeNode?.nodeId)
         assertEquals("Testets privata chatt", dataStore.load(reopenedTest, ChatData).activeConversation!!.messages.single().content)
         assertFalse(reopenedRobin.vault.identity.clientId == reopenedTest.vault.identity.clientId)
         reopenedRobin.close()
@@ -303,4 +311,14 @@ class SecureVaultDeviceTest {
         val conversation = ChatConversation(id = "conversation-test", messages = messages)
         return ChatConversations(listOf(conversation), conversation.id)
     }
+
+    private fun trustedNode(nodeId: String) = TrustedNode(
+        nodeId = nodeId,
+        nodePublicKey = "key-$nodeId",
+        tlsCaCertificate = "ca-$nodeId",
+        displayName = nodeId,
+        clientCredential = "credential-$nodeId",
+        userId = "user-$nodeId",
+        clientId = "client-$nodeId",
+    )
 }

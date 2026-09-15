@@ -95,6 +95,7 @@
     <string name="error_node_ai_failed">The Node AI could not complete the response.</string>
     <string name="error_node_stream_interrupted">The connection to the Node was interrupted during the response.</string>
     <string name="error_qr_code_wrong_node">The QR code does not belong to the Node you selected.</string>
+    <string name="error_profile_bound_to_another_node">This user is already bound to another Node. Moving a user requires an explicit migration.</string>
     <string name="error_recovery_key_invalid">The recovery key is invalid.</string>
     <string name="error_recovery_data_pending">The user has reconnected, but the data could not be retrieved yet. The client will try again.</string>
     <string name="error_data_pending">The data could not be retrieved yet. The client will try again.</string>
