@@ -16,6 +16,7 @@ import (
 	"source.local/node/internal/database"
 	"source.local/node/internal/pairing"
 	"source.local/node/internal/ratelimit"
+	"source.local/node/internal/silver"
 	"source.local/node/internal/storage"
 )
 
@@ -26,6 +27,7 @@ type Handler struct {
 	pairing    *pairing.Service
 	auth       *auth.Service
 	storage    *storage.Storage
+	silver     *silver.Service
 	chat       *ratelimit.Limiter
 	background *ratelimit.Limiter
 	logger     *log.Logger
@@ -62,10 +64,12 @@ func (w *statusWriter) Flush() {
 }
 
 func New(db *database.DB, cfg config.Config, ai localai.Backend, p *pairing.Service, logger *log.Logger) http.Handler {
+	canonicalStorage := storage.New(db, cfg.StorageRoot, cfg.SnapshotRetention, cfg.Now)
 	h := &Handler{
 		db: db, cfg: cfg, ai: ai, pairing: p,
 		auth:       auth.New(db, cfg.Now),
-		storage:    storage.New(db, cfg.StorageRoot, cfg.SnapshotRetention, cfg.Now),
+		storage:    canonicalStorage,
+		silver:     silver.New(db, canonicalStorage, ai, cfg.MaximumSnapshotBytes, cfg.Now),
 		chat:       ratelimit.New(10, time.Minute, cfg.Now),
 		background: ratelimit.New(10_000, time.Hour, cfg.Now),
 		logger:     logger,
@@ -92,6 +96,8 @@ func (h *Handler) registerRoutes() {
 	h.mux.HandleFunc("/api/v1/sync/changes", h.method(http.MethodPost, h.requireClient(h.syncChanges)))
 	h.mux.HandleFunc("/api/v1/sync/ack", h.method(http.MethodPost, h.requireClient(h.ackSyncCursor)))
 	h.mux.HandleFunc("/api/v1/sync/revisions/{revision}/payload", h.method(http.MethodGet, h.requireClient(h.syncPayload)))
+	h.mux.HandleFunc("/api/v1/silver/refinements", h.method(http.MethodPost, h.requireClient(h.refineSilver)))
+	h.mux.HandleFunc("/api/v1/silver/removals", h.method(http.MethodPost, h.requireClient(h.removeSilver)))
 	h.mux.HandleFunc("/", h.unmatched)
 }
 

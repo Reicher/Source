@@ -147,14 +147,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             message = ::message,
             onStateChanged = ::publishLibrary,
         )
-        val silverAiRuntime = AiRuntimeRouter(
-            local = app.localAiRuntime,
-            nodeApi = app.nodeApi,
-            connectedNode = { nodeConnection.current?.takeIf { it.aiModel != null } },
-            onNodeUnavailable = { nodeConnection.disconnect(it.trusted) },
-        )
         silverController = SilverController(
-            aiRuntime = silverAiRuntime,
             scope = viewModelScope,
             localStore = sourceDataStore,
             nodeApi = app.nodeApi,

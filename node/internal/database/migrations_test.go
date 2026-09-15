@@ -23,6 +23,8 @@ func TestOpenAppliesAndPersistsMigrations(t *testing.T) {
 	assertTable(t, db.sql, "storage_heads")
 	assertTable(t, db.sql, "storage_operations")
 	assertTable(t, db.sql, "client_sync_cursors")
+	assertTable(t, db.sql, "silver_refinement_sources")
+	assertTable(t, db.sql, "silver_refinement_operations")
 	if err = db.Close(); err != nil {
 		t.Fatal(err)
 	}

@@ -18,6 +18,8 @@ object SilverData : SourceData<SilverDataset> {
         remoteAppId = "source-silver",
         snapshotFormat = "source-silver",
         formatVersion = 1,
+        canonicalCollection = "silver-datasets",
+        authority = SourceDataAuthority.NODE,
     )
     override val emptyValue = SilverDataset()
 

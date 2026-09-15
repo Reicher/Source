@@ -22,6 +22,7 @@ import com.source.client.storage.toJson
 import com.source.client.storage.toStorageCursor
 import com.source.client.storage.toStorageReceipt
 import com.source.client.storage.toStorageRevision
+import com.source.client.knowledge.BronzeTextSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -419,6 +420,56 @@ class SourceNodeApi {
         }
     }
 
+    /** Sends plaintext Bronze to the trusted authoritative Node for durable refinement. */
+    suspend fun refineSilver(
+        apiBaseUrl: String,
+        trusted: TrustedNode,
+        source: BronzeTextSource,
+        operationId: String,
+    ) = withContext(Dispatchers.IO) {
+        val response = postJson(
+            "${apiBaseUrl.removeSuffix("/")}/silver/refinements",
+            JSONObject().apply {
+                put("contractVersion", SOURCE_STORAGE_CONTRACT_VERSION)
+                put("operationId", operationId)
+                put("source", JSONObject().apply {
+                    put("id", source.id)
+                    put("name", source.name)
+                    put("sourceType", source.sourceType)
+                    put("contentSha256", source.contentSha256)
+                    put("text", source.text)
+                })
+            },
+            trusted.tlsCaCertificate,
+            trusted.clientCredential,
+            LIBRARY_TIMEOUT_MILLIS,
+        )
+        if (!response.has("bronzeAccepted") || !response.has("refined")) {
+            throw SourceApiException("invalid_response", "The Node returned an incomplete Silver result.")
+        }
+    }
+
+    suspend fun removeSilver(
+        apiBaseUrl: String,
+        trusted: TrustedNode,
+        sourceId: String,
+        operationId: String,
+    ) = withContext(Dispatchers.IO) {
+        val response = postJson(
+            "${apiBaseUrl.removeSuffix("/")}/silver/removals",
+            JSONObject()
+                .put("contractVersion", SOURCE_STORAGE_CONTRACT_VERSION)
+                .put("operationId", operationId)
+                .put("sourceId", sourceId),
+            trusted.tlsCaCertificate,
+            trusted.clientCredential,
+            LIBRARY_TIMEOUT_MILLIS,
+        )
+        if (!response.has("bronzeRemoved") || !response.has("silverChanged")) {
+            throw SourceApiException("invalid_response", "The Node returned an incomplete Silver removal result.")
+        }
+    }
+
     suspend fun storageChanges(
         apiBaseUrl: String,
         trusted: TrustedNode,
@@ -641,7 +692,10 @@ class SourceNodeApi {
         "recovery_not_configured" -> "The user does not have a recovery key."
         "authentication_required" -> "The Node no longer recognizes this client."
         "model_unavailable" -> "The local AI model on the Node is unavailable."
+        "silver_model_unavailable", "silver_refinement_failed" ->
+            "The Node could not refine knowledge from this source."
         "chat_rate_limited" -> "Too many AI requests. Wait a moment."
+        "background_ai_rate_limited" -> "Too many background AI requests. Wait a moment."
         "storage_quota_exceeded" -> "The user storage space on the Node is full."
         "library_item_deleted" -> "The Node has already recorded this item as deleted."
         "library_item_identity_conflict", "library_content_exists" -> "The Node rejected a conflicting Library item."

@@ -80,6 +80,30 @@ func TestCanonicalMutationsAreIdempotentAndPreserveConcurrentHeads(t *testing.T)
 	}
 }
 
+func TestClientCannotCommitPersistentSilver(t *testing.T) {
+	db, err := database.Open(":memory:")
+	if err != nil { t.Fatal(err) }
+	defer db.Close()
+	identity, err := security.GenerateNodeIdentity()
+	if err != nil { t.Fatal(err) }
+	if _, err = db.InitializeNode("Test", identity, "password", 1); err != nil { t.Fatal(err) }
+	user, _, err := db.CreatePairedUser("Test", 1024*1024, "recovery", "envelope", database.NewClient{
+		ID: "client-a", DisplayName: "A", PublicKey: "public", CredentialHash: "credential", ProtocolVersion: 1,
+	}, 1)
+	if err != nil { t.Fatal(err) }
+	store := New(db, t.TempDir(), 20, func() time.Time { return time.UnixMilli(10) })
+	mutation := testMutation(t, user.ID, "client-a", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", 1,
+		"22222222-2222-4222-8222-222222222222", nil, []byte("client Silver"))
+	mutation.Revision.ObjectKey.Collection = "silver-datasets"
+	mutation.Revision.RevisionID, err = syncmodel.RevisionID(mutation.Revision)
+	if err != nil { t.Fatal(err) }
+	_, _, _, err = store.CommitMutation(user.ID, "client-a", identity.NodeID, mutation,
+		bytes.NewReader([]byte("client Silver")), 1024)
+	if errorCode(err) != "silver_node_authority_required" {
+		t.Fatalf("Client Silver commit error = %v", err)
+	}
+}
+
 func testMutation(t *testing.T, profileID, originID, operationID string, sequence int64, objectID string, parents []string, body []byte) syncmodel.Mutation {
 	t.Helper()
 	sum := sha256.Sum256(body)

@@ -8,6 +8,8 @@ data class SourceDataDescriptor(
     val formatVersion: Int,
     /** Collection used by canonical sync. Null keeps an explicitly transitional compatibility path. */
     val canonicalCollection: String? = null,
+    /** Node-authoritative datasets are read-only offline caches on Clients. */
+    val authority: SourceDataAuthority = SourceDataAuthority.CLIENT,
 ) {
     init {
         require(id.matches(IDENTIFIER_PATTERN)) { "Invalid local dataset identifier" }
@@ -24,6 +26,8 @@ data class SourceDataDescriptor(
         val CANONICAL_COLLECTION_PATTERN = Regex("^[a-z][a-z0-9-]{1,63}$")
     }
 }
+
+enum class SourceDataAuthority { CLIENT, NODE }
 
 data class SourceDataVersion(
     val modifiedAtMillis: Long,

@@ -115,6 +115,31 @@ CREATE TABLE client_sync_cursors(
     PRIMARY KEY(user_id,client_id,collection,object_id)
 ) STRICT;`,
 	},
+	{
+		version: 5,
+		up: `
+CREATE TABLE silver_refinement_sources(
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    source_id TEXT NOT NULL,
+    source_name TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL CHECK(length(content_sha256)=64),
+    plaintext TEXT NOT NULL,
+    accepted_at INTEGER NOT NULL,
+    removed_at INTEGER,
+    refined_processor_version TEXT,
+    refined_model_id TEXT,
+    refined_at INTEGER,
+    PRIMARY KEY(user_id,source_id)
+) STRICT;
+CREATE TABLE silver_refinement_operations(
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    operation_id TEXT NOT NULL,
+    request_digest TEXT NOT NULL CHECK(length(request_digest)=64),
+    source_id TEXT NOT NULL,
+    PRIMARY KEY(user_id,operation_id)
+) STRICT;`,
+	},
 }
 
 const schemaVersionTable = `
