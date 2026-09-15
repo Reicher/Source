@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.CloudDone
 import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.outlined.SyncProblem
@@ -313,11 +314,14 @@ private fun LibraryItemRow(
                         Button(onClick = onOpen) { Text(stringResource(R.string.library_view)) }
                         Spacer(Modifier.width(8.dp))
                     }
-                    TextButton(onClick = onOpenKnowledge) { Text(stringResource(R.string.knowledge)) }
+                    OutlinedButton(onClick = onOpenKnowledge) { Text(stringResource(R.string.knowledge)) }
                     if (item.canDeleteFromSource) {
-                        Spacer(Modifier.width(8.dp))
-                        OutlinedButton(onClick = onDeleteFromSource) {
-                            Text(stringResource(R.string.delete), color = MaterialTheme.colorScheme.error)
+                        IconButton(onClick = onDeleteFromSource) {
+                            Icon(
+                                Icons.Outlined.Delete,
+                                contentDescription = stringResource(R.string.delete),
+                                tint = MaterialTheme.colorScheme.error,
+                            )
                         }
                     }
                 }
