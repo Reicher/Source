@@ -3,6 +3,7 @@ package com.source.client.knowledge
 import com.source.client.model.AiModelMetadata
 import com.source.client.storage.SilverClaim
 import com.source.client.storage.SilverClaimState
+import com.source.client.storage.SilverData
 import com.source.client.storage.SilverDataset
 import com.source.client.storage.SilverEvidence
 import com.source.client.storage.SilverJsonObject
@@ -107,6 +108,63 @@ class SilverReprocessingTest {
             competing.dataset.statusClaims().filter { it.state == SilverClaimState.ACTIVE }
                 .mapTo(mutableSetOf()) { it.textValue() },
         )
+    }
+
+    @Test
+    fun `independent Bronze sources retain each others Silver knowledge and provenance`() {
+        val conversation = source(id = "conversation:1", hash = "a".repeat(64))
+        val conversationGeneration = generation(
+            conversation,
+            processorVersion = "1",
+            value = "conversation-value",
+        )
+        val afterConversation = replaceSilverGeneration(
+            SilverDataset(),
+            conversation,
+            conversationGeneration,
+            resolver,
+            100,
+        ).dataset
+        val conversationEvidenceIds = afterConversation.evidence.mapTo(mutableSetOf(), SilverEvidence::id)
+        val conversationObservationIds = afterConversation.observations.mapTo(mutableSetOf(), SilverObservation::id)
+        val conversationClaimIds = afterConversation.claims.mapTo(mutableSetOf(), SilverClaim::id)
+
+        val contacts = source(id = "contacts", hash = "b".repeat(64))
+        val afterContacts = replaceSilverGeneration(
+            afterConversation,
+            contacts,
+            generation(contacts, processorVersion = "1", value = "contacts-value"),
+            resolver,
+            200,
+        ).dataset
+
+        assertTrue(afterContacts.evidence.map(SilverEvidence::id).containsAll(conversationEvidenceIds))
+        assertTrue(afterContacts.observations.map(SilverObservation::id).containsAll(conversationObservationIds))
+        assertTrue(afterContacts.claims.map(SilverClaim::id).containsAll(conversationClaimIds))
+        assertTrue(afterContacts.claims.filter { it.id in conversationClaimIds }.all {
+            it.state == SilverClaimState.ACTIVE
+        })
+        val contactClaimIds = afterContacts.claims.mapTo(mutableSetOf(), SilverClaim::id) - conversationClaimIds
+
+        val changedContacts = contacts.copy(contentSha256 = "c".repeat(64), text = "Contacts changed")
+        val reprocessedContacts = replaceSilverGeneration(
+            afterContacts,
+            changedContacts,
+            generation(changedContacts, processorVersion = "2", value = "updated-contacts-value"),
+            resolver,
+            300,
+        )
+
+        assertEquals(contactClaimIds, reprocessedContacts.supersededClaimIds)
+        assertTrue(reprocessedContacts.dataset.evidence.map(SilverEvidence::id).containsAll(conversationEvidenceIds))
+        assertTrue(
+            reprocessedContacts.dataset.observations.map(SilverObservation::id)
+                .containsAll(conversationObservationIds),
+        )
+        assertTrue(reprocessedContacts.dataset.claims.filter { it.id in conversationClaimIds }.all {
+            it.state == SilverClaimState.ACTIVE
+        })
+        SilverData.version(reprocessedContacts.dataset)
     }
 
     @Test
@@ -223,8 +281,8 @@ class SilverReprocessingTest {
         )
     }
 
-    private fun source(hash: String = "a".repeat(64)) = BronzeTextSource(
-        id = "source-1",
+    private fun source(id: String = "source-1", hash: String = "a".repeat(64)) = BronzeTextSource(
+        id = id,
         name = "notes.txt",
         sourceType = "file",
         contentSha256 = hash,
