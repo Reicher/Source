@@ -47,6 +47,8 @@ go run ./cmd/source-node status
 go run ./cmd/source-node list
 go run ./cmd/source-node discovery
 go run ./cmd/source-node healthcheck
+# Only after restoring a point-in-time rollback while the server is stopped:
+go run ./cmd/source-node rotate-sync-epochs --confirm-rollback
 ```
 
 ## State

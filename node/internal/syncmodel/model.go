@@ -3,6 +3,7 @@
 package syncmodel
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"unicode/utf8"
 
 	"golang.org/x/text/unicode/norm"
@@ -132,15 +134,81 @@ func RevisionID(revision Revision) (string, error) {
 			FormatVersion: revision.Payload.FormatVersion, PlaintextSHA256: revision.Payload.PlaintextSHA256,
 		}
 	}
-	canonical, err := json.Marshal(identity)
-	if err != nil {
-		return "", err
-	}
+	canonical := marshalRevisionIdentity(identity)
 	digest := sha256.New()
 	_, _ = digest.Write([]byte("source-storage-revision"))
 	_, _ = digest.Write([]byte{0})
 	_, _ = digest.Write(canonical)
 	return hex.EncodeToString(digest.Sum(nil)), nil
+}
+
+// marshalRevisionIdentity implements the RFC 8785 serialization needed by the
+// cross-platform revision hash. In particular, it does not apply Go's
+// HTML-safe escaping to &, <, >, U+2028, or U+2029.
+func marshalRevisionIdentity(identity revisionIdentity) []byte {
+	var result bytes.Buffer
+	result.WriteString(`{"collection":`)
+	appendJSONString(&result, identity.Collection)
+	result.WriteString(`,"kind":`)
+	appendJSONString(&result, identity.Kind)
+	result.WriteString(`,"objectId":`)
+	appendJSONString(&result, identity.ObjectID)
+	result.WriteString(`,"parents":[`)
+	for index, parent := range identity.Parents {
+		if index > 0 {
+			result.WriteByte(',')
+		}
+		appendJSONString(&result, parent)
+	}
+	result.WriteString(`],"payload":`)
+	if identity.Payload == nil {
+		result.WriteString("null")
+	} else {
+		result.WriteString(`{"byteCount":`)
+		result.WriteString(strconv.FormatInt(identity.Payload.ByteCount, 10))
+		result.WriteString(`,"format":`)
+		appendJSONString(&result, identity.Payload.Format)
+		result.WriteString(`,"formatVersion":`)
+		result.WriteString(strconv.Itoa(identity.Payload.FormatVersion))
+		result.WriteString(`,"plaintextSha256":`)
+		appendJSONString(&result, identity.Payload.PlaintextSHA256)
+		result.WriteByte('}')
+	}
+	result.WriteString(`,"profileId":`)
+	appendJSONString(&result, identity.ProfileID)
+	result.WriteByte('}')
+	return result.Bytes()
+}
+
+func appendJSONString(result *bytes.Buffer, value string) {
+	const hexadecimal = "0123456789abcdef"
+	result.WriteByte('"')
+	for _, character := range value {
+		switch character {
+		case '"', '\\':
+			result.WriteByte('\\')
+			result.WriteRune(character)
+		case '\b':
+			result.WriteString(`\b`)
+		case '\t':
+			result.WriteString(`\t`)
+		case '\n':
+			result.WriteString(`\n`)
+		case '\f':
+			result.WriteString(`\f`)
+		case '\r':
+			result.WriteString(`\r`)
+		default:
+			if character < 0x20 {
+				result.WriteString(`\u00`)
+				result.WriteByte(hexadecimal[byte(character)>>4])
+				result.WriteByte(hexadecimal[byte(character)&0x0f])
+			} else {
+				result.WriteRune(character)
+			}
+		}
+	}
+	result.WriteByte('"')
 }
 
 func ValidateMutation(mutation Mutation) error {

@@ -300,7 +300,14 @@ internal class LibraryController(
             publish()
         }
         if (nodeStatusChanged) manifestSync.persist(activeSession, manifest)
-        manifestSync.backupIfNeeded(activeSession, connected, manifest)
+        manifestSync.backupIfNeeded(activeSession, connected, manifest, ::applySynchronizedManifest)
+    }
+
+    private fun applySynchronizedManifest(synchronized: LibraryManifest) {
+        manifest = synchronized
+        val retainedItems = manifest.items.mapTo(mutableSetOf(), LibraryItem::id)
+        syncStates = syncStates.filterKeys(retainedItems::contains)
+        publish()
     }
 
     private fun readMetadata(uri: Uri): SelectedFileMetadata {

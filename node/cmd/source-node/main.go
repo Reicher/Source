@@ -51,8 +51,13 @@ func run() error {
 			return printStatus(db)
 		case "list":
 			return printUsers(db)
+		case "rotate-sync-epochs":
+			if len(os.Args) != 3 || os.Args[2] != "--confirm-rollback" {
+				return fmt.Errorf("usage: source-node rotate-sync-epochs --confirm-rollback")
+			}
+			return rotateSyncEpochs(db)
 		default:
-			return fmt.Errorf("usage: source-node [discovery|healthcheck|status|list]")
+			return fmt.Errorf("usage: source-node [discovery|healthcheck|status|list|rotate-sync-epochs]")
 		}
 	}
 	if e = os.MkdirAll(cfg.StorageRoot, 0700); e != nil {
@@ -111,6 +116,15 @@ func printUsers(db *database.DB) error {
 	for _, u := range users {
 		fmt.Printf("%s\t%d client(s)\t%d bytes\t%s\n", u.DisplayName, u.ClientCount, u.QuotaBytes, u.ID)
 	}
+	return nil
+}
+
+func rotateSyncEpochs(db *database.DB) error {
+	epoch, profiles, err := db.RotateSyncEpochs()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("rotated %d profile sync epoch(s) to %s\n", profiles, epoch)
 	return nil
 }
 

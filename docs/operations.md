@@ -354,10 +354,21 @@ ciphertext, metadata, and gateway state so the local CA identity can be
 restored. llama.cpp model files are excluded because they can be provisioned
 again.
 
-Node-wide restore is intentionally manual: keep the current data directory, unpack the
-archive as a replacement with restrictive permissions, run preflight, and only
-then start Source. Older backups can retain a deleted user's ciphertext until
-their external retention period expires.
+Node-wide restore is intentionally manual: keep the current data directory,
+unpack the archive as a replacement with restrictive permissions, and run
+preflight. If the archive is an older point-in-time rollback, rotate every
+profile's authority epoch before synchronization can resume:
+
+```sh
+docker compose run --rm node /usr/local/bin/source-node rotate-sync-epochs --confirm-rollback
+docker compose up -d
+```
+
+The rotation retains the restored heads as the authoritative manifest, resets
+the per-epoch commit sequence, and clears stale Client cursor acknowledgements.
+Do not run it for a continuity-safe copy of the current, complete Node state.
+Older backups can retain a deleted user's ciphertext until their external
+retention period expires.
 
 For a lost phone, create a fresh local user on the replacement client. In the
 admin UI choose **Recover** for the existing Node user, scan the short-lived QR

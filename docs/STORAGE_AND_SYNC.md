@@ -202,6 +202,11 @@ or an explicit future authority migration that cannot preserve the log, MUST
 create a new epoch and force reconciliation. A Node MUST never reuse a lower
 `commitSequence` in the same epoch.
 
+The implemented rollback procedure runs `source-node rotate-sync-epochs
+--confirm-rollback` while the serving process is stopped. It retains the
+restored heads, assigns a fresh epoch, resets the new epoch's commit sequence,
+and removes acknowledgements that belonged to the abandoned history.
+
 ## Idempotency and duplicates
 
 All writes and deletion requests MUST be safe to retry after a timeout,

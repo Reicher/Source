@@ -38,6 +38,37 @@ func (d *DB) SyncState(userID, nodeID string) (SyncState, error) {
 	return state, tx.Commit()
 }
 
+// RotateSyncEpochs starts a new authority history after an explicit rollback
+// restore. Existing heads remain the restored manifest, while old cursors and
+// receipts can no longer be mistaken for acknowledgements in the new history.
+func (d *DB) RotateSyncEpochs() (string, int64, error) {
+	epoch, err := security.UUID()
+	if err != nil {
+		return "", 0, err
+	}
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return "", 0, err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`UPDATE profile_sync_state
+SET authority_epoch=?,next_commit_sequence=1,retained_log_floor=0`, epoch)
+	if err != nil {
+		return "", 0, err
+	}
+	if _, err = tx.Exec(`DELETE FROM client_sync_cursors`); err != nil {
+		return "", 0, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return "", 0, err
+	}
+	if err = tx.Commit(); err != nil {
+		return "", 0, err
+	}
+	return epoch, count, nil
+}
+
 func ensureSyncState(tx *sql.Tx, userID, nodeID string) (SyncState, error) {
 	var state SyncState
 	err := tx.QueryRow(`SELECT authority_node_id,authority_epoch,next_commit_sequence,retained_log_floor
@@ -153,16 +184,19 @@ func (d *DB) CommitSyncMutation(
 		return receipt, false, tx.Commit()
 	}
 
-	var sequenceOperation, sequenceDigest string
-	err = tx.QueryRow(`SELECT operation_id,mutation_digest FROM storage_operations
-WHERE user_id=? AND origin_id=? AND origin_epoch=? AND origin_sequence=?`,
-		userID, mutation.OriginID, mutation.OriginEpoch, mutation.OriginSequence,
-	).Scan(&sequenceOperation, &sequenceDigest)
-	if err == nil {
-		return syncmodel.CommitReceipt{}, false, SyncFailure{"origin_sequence_conflict", "The origin sequence position was reused."}
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	var lastOriginSequence int64
+	err = tx.QueryRow(`SELECT COALESCE(MAX(origin_sequence),0) FROM storage_operations
+WHERE user_id=? AND origin_id=? AND origin_epoch=?`,
+		userID, mutation.OriginID, mutation.OriginEpoch,
+	).Scan(&lastOriginSequence)
+	if err != nil {
 		return syncmodel.CommitReceipt{}, false, err
+	}
+	if mutation.OriginSequence != lastOriginSequence+1 {
+		return syncmodel.CommitReceipt{}, false, SyncFailure{
+			"origin_sequence_out_of_order",
+			"The origin sequence must be the next journal position without gaps or reordering.",
+		}
 	}
 
 	existing, existingDigest, err := findRevisionTx(tx, userID, mutation.Revision.RevisionID)
@@ -427,7 +461,12 @@ func (d *DB) AcknowledgeSyncCursor(userID, clientID, collection, objectID string
 	_, err = d.sql.Exec(`INSERT INTO client_sync_cursors(user_id,client_id,collection,object_id,authority_node_id,authority_epoch,commit_sequence,acknowledged_at)
 VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(user_id,client_id,collection,object_id) DO UPDATE SET
 authority_node_id=excluded.authority_node_id,authority_epoch=excluded.authority_epoch,
-commit_sequence=MAX(client_sync_cursors.commit_sequence,excluded.commit_sequence),acknowledged_at=excluded.acknowledged_at`,
+commit_sequence=CASE
+WHEN client_sync_cursors.authority_node_id=excluded.authority_node_id
+ AND client_sync_cursors.authority_epoch=excluded.authority_epoch
+THEN MAX(client_sync_cursors.commit_sequence,excluded.commit_sequence)
+ELSE excluded.commit_sequence END,
+acknowledged_at=excluded.acknowledged_at`,
 		userID, clientID, collection, objectID, cursor.AuthorityNodeID, cursor.AuthorityEpoch, cursor.CommitSequence, now)
 	return err
 }

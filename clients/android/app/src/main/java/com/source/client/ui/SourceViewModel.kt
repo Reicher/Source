@@ -590,7 +590,12 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private suspend fun backupConversationIfNeeded() {
-        conversationSync.backupIfNeeded(session, nodeConnection.current, chatController.conversations)
+        conversationSync.backupIfNeeded(
+            session,
+            nodeConnection.current,
+            chatController.conversations,
+            chatController::applySynchronizedConversations,
+        )
     }
 
     private suspend fun backupConversationAfterRecoveryConfigured() {

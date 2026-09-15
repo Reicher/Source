@@ -6,6 +6,7 @@ import com.source.client.protocol.SourceNodeApi
 import com.source.client.security.SourceCrypto
 import com.source.client.security.VaultSession
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -19,10 +20,11 @@ class SourceDataSync<T>(
     private val nodeApi: SourceNodeApi,
 ) {
     private val mutex = Mutex()
+    private val localRevisionGate = Any()
     @Volatile private var backupDirty = true
-    private var localRevision = 0L
+    private val localRevision = AtomicLong(0)
     private var canonicalState: CanonicalSyncState? = null
-    private var explicitlyChanged = false
+    @Volatile private var explicitlyChanged = false
 
     var recoveryRestorePending = false
         private set
@@ -35,18 +37,22 @@ class SourceDataSync<T>(
         get() = !backupDirty
 
     fun reset() {
-        backupDirty = true
-        recoveryRestorePending = false
-        localRevision = 0L
-        canonicalState = null
-        explicitlyChanged = false
-        lastError = null
+        synchronized(localRevisionGate) {
+            backupDirty = true
+            recoveryRestorePending = false
+            localRevision.incrementAndGet()
+            canonicalState = null
+            explicitlyChanged = false
+            lastError = null
+        }
     }
 
     fun changed() {
-        localRevision += 1
-        backupDirty = true
-        explicitlyChanged = true
+        synchronized(localRevisionGate) {
+            localRevision.incrementAndGet()
+            backupDirty = true
+            explicitlyChanged = true
+        }
     }
 
     fun requireBackup() {
@@ -76,11 +82,16 @@ class SourceDataSync<T>(
         }
     }
 
-    suspend fun backupIfNeeded(session: VaultSession?, connected: ConnectedNode?, value: T) = mutex.withLock {
+    suspend fun backupIfNeeded(
+        session: VaultSession?,
+        connected: ConnectedNode?,
+        value: T,
+        applyRemote: (T) -> Unit,
+    ) = mutex.withLock {
         if (data.descriptor.canonicalCollection == null) {
             legacyBackupLocked(session, connected, value)
         } else {
-            canonicalSynchronizeLocked(session, connected, value, {})
+            canonicalSynchronizeLocked(session, connected, value, applyRemote)
         }
     }
 
@@ -120,7 +131,7 @@ class SourceDataSync<T>(
             )
             canonicalState = state
             if (restored != null) {
-                localRevision += 1
+                localRevision.incrementAndGet()
                 if (changes.heads.isEmpty() || changes.heads.size > 1) {
                     state = queueMutation(
                         state, connected.trusted.userId, restored,
@@ -168,11 +179,14 @@ class SourceDataSync<T>(
         if (session == null || connected == null) return
         lastError = null
         var localValue = initialValue
+        val initialIdentity = data.version(initialValue).contentIdentity
+        val revisionBeforeSync = localRevision.get()
         try {
             val collection = checkNotNull(data.descriptor.canonicalCollection)
             val objectId = canonicalObjectId(collection)
             var state = state(session)
             var remote = readChanges(connected, collection, objectId, state.cursor)
+            requireLocalRevision(revisionBeforeSync)
 
             val epochChanged = state.cursor != null && (
                 state.cursor.authorityNodeId != remote.cursor.authorityNodeId ||
@@ -183,6 +197,7 @@ class SourceDataSync<T>(
             if (initialManifest) {
                 val authorityValue = reconcileHeads(connected, remote.heads)
                     ?: throw SourceApiException("storage_conflict", "The Node manifest contains unresolved revisions.")
+                requireLocalRevision(revisionBeforeSync)
                 val emptyIdentity = data.version(data.emptyValue).contentIdentity
                 val localIdentity = data.version(localValue).contentIdentity
                 val authorityIdentity = data.version(authorityValue).contentIdentity
@@ -196,9 +211,11 @@ class SourceDataSync<T>(
                     if (data.version(localValue).contentIdentity != authorityIdentity) {
                         state = queueMutation(state, connected.trusted.userId, localValue)
                         canonicalState = state
+                        requireLocalRevision(revisionBeforeSync)
                         withContext(Dispatchers.Default) {
                             localStore.saveWithSyncState(session, data, localValue, state)
                         }
+                        requireLocalRevision(revisionBeforeSync)
                     }
                 }
             } else if (epochChanged) {
@@ -206,13 +223,17 @@ class SourceDataSync<T>(
                     reconcileHeads(connected, remote.heads)
                         ?: throw SourceApiException("storage_conflict", "The restored Node history contains unresolved revisions.")
                 }
+                requireLocalRevision(revisionBeforeSync)
                 localValue = when {
                     authorityValue == null -> localValue
                     data.version(authorityValue).contentIdentity == data.version(localValue).contentIdentity -> authorityValue
                     else -> data.merge(authorityValue, localValue)
                         ?: throw SourceApiException("storage_conflict", "Local changes conflict with the restored Node history.")
                 }
+                state.pending.forEach { it.payloadBytes.fill(0) }
                 state = state.copy(
+                    originEpoch = UUID.randomUUID().toString(),
+                    nextOriginSequence = 1,
                     cursor = remote.cursor,
                     heads = remote.heads.map(StorageRevision::revisionId).sorted(),
                     pending = emptyList(),
@@ -226,19 +247,26 @@ class SourceDataSync<T>(
                     state = queueMutation(state, connected.trusted.userId, localValue)
                 }
                 canonicalState = state
+                requireLocalRevision(revisionBeforeSync)
                 withContext(Dispatchers.Default) { localStore.saveWithSyncState(session, data, localValue, state) }
+                requireLocalRevision(revisionBeforeSync)
             } else if (explicitlyChanged && state.pending.isEmpty()) {
                 state = queueMutation(state, connected.trusted.userId, localValue)
                 canonicalState = state
                 explicitlyChanged = false
+                requireLocalRevision(revisionBeforeSync)
                 withContext(Dispatchers.Default) { localStore.saveWithSyncState(session, data, localValue, state) }
+                requireLocalRevision(revisionBeforeSync)
             }
 
             state = replayPending(session, connected, state)
+            requireLocalRevision(revisionBeforeSync)
             remote = readChanges(connected, collection, objectId, state.cursor)
+            requireLocalRevision(revisionBeforeSync)
 
             if (remote.heads.isEmpty()) {
                 val migrated = legacyRemoteValue(session, connected)
+                requireLocalRevision(revisionBeforeSync)
                 val emptyIdentity = data.version(data.emptyValue).contentIdentity
                 localValue = when {
                     migrated == null -> localValue
@@ -251,24 +279,33 @@ class SourceDataSync<T>(
                     state = state.copy(cursor = remote.cursor, heads = emptyList())
                     state = queueMutation(state, connected.trusted.userId, localValue)
                     canonicalState = state
+                    requireLocalRevision(revisionBeforeSync)
                     withContext(Dispatchers.Default) { localStore.saveWithSyncState(session, data, localValue, state) }
+                    requireLocalRevision(revisionBeforeSync)
                     state = replayPending(session, connected, state)
+                    requireLocalRevision(revisionBeforeSync)
                     remote = readChanges(connected, collection, objectId, state.cursor)
+                    requireLocalRevision(revisionBeforeSync)
                 }
             }
 
             if (remote.heads.size > 1) {
                 val merged = reconcileHeads(connected, remote.heads)
                     ?: throw SourceApiException("storage_conflict", "Concurrent storage revisions require explicit resolution.")
+                requireLocalRevision(revisionBeforeSync)
                 state = state.copy(
                     cursor = remote.cursor,
                     heads = remote.heads.map(StorageRevision::revisionId).sorted(),
                 )
                 state = queueMutation(state, connected.trusted.userId, merged, force = true)
                 canonicalState = state
+                requireLocalRevision(revisionBeforeSync)
                 withContext(Dispatchers.Default) { localStore.saveWithSyncState(session, data, merged, state) }
+                requireLocalRevision(revisionBeforeSync)
                 state = replayPending(session, connected, state)
+                requireLocalRevision(revisionBeforeSync)
                 remote = readChanges(connected, collection, objectId, state.cursor)
+                requireLocalRevision(revisionBeforeSync)
                 if (remote.heads.size != 1) {
                     throw SourceApiException("storage_conflict", "Concurrent storage revisions could not be merged.")
                 }
@@ -281,10 +318,9 @@ class SourceDataSync<T>(
                 } else {
                     readRevision(connected, remote.heads.single())
                 }
+                requireLocalRevision(revisionBeforeSync)
                 if (data.version(remoteValue).contentIdentity != data.version(localValue).contentIdentity) {
                     localValue = remoteValue
-                    localRevision += 1
-                    applyRemote(remoteValue)
                 }
             }
             state = state.copy(
@@ -293,14 +329,26 @@ class SourceDataSync<T>(
                 pending = emptyList(),
             )
             canonicalState = state
+            requireLocalRevision(revisionBeforeSync)
             withContext(Dispatchers.Default) { localStore.saveWithSyncState(session, data, localValue, state) }
+            requireLocalRevision(revisionBeforeSync)
+            val publishedRevision = publishRemoteIfUnchanged(
+                revisionBeforeSync,
+                localValue,
+                data.version(localValue).contentIdentity != initialIdentity,
+                applyRemote,
+            )
             nodeApi.acknowledgeStorageCursor(
                 connected.discovered.apiBaseUrl, connected.trusted, collection, objectId, remote.cursor,
             )
-            backupDirty = state.pending.isNotEmpty() || remote.heads.size > 1
+            backupDirty = localRevision.get() != publishedRevision ||
+                state.pending.isNotEmpty() || remote.heads.size > 1
             lastError = null
         } catch (error: CancellationException) {
             throw error
+        } catch (_: LocalDataChangedDuringSync) {
+            lastError = null
+            backupDirty = true
         } catch (error: Exception) {
             lastError = error
             backupDirty = true
@@ -465,14 +513,14 @@ class SourceDataSync<T>(
     ) {
         if (session == null || connected == null) return
         lastError = null
-        val revisionBeforeDownload = localRevision
+        val revisionBeforeDownload = localRevision.get()
         try {
             val remoteValue = legacyRemoteValue(session, connected)
             if (remoteValue == null) {
                 legacyBackupLocked(session, connected, localValue)
                 return
             }
-            if (localRevision != revisionBeforeDownload) {
+            if (localRevision.get() != revisionBeforeDownload) {
                 legacyBackupLocked(session, connected, localValue)
                 return
             }
@@ -483,13 +531,13 @@ class SourceDataSync<T>(
                 when (mergedIdentity) {
                     localIdentity -> legacyBackupLocked(session, connected, localValue)
                     remoteIdentity -> {
-                        localRevision += 1
+                        localRevision.incrementAndGet()
                         withContext(Dispatchers.Default) { localStore.save(session, data, remoteValue) }
                         backupDirty = false
                         applyRemote(remoteValue)
                     }
                     else -> {
-                        localRevision += 1
+                        localRevision.incrementAndGet()
                         withContext(Dispatchers.Default) { localStore.save(session, data, merged) }
                         backupDirty = true
                         applyRemote(merged)
@@ -500,7 +548,7 @@ class SourceDataSync<T>(
             }
             when (resolveLegacySourceData(data.version(localValue), data.version(remoteValue))) {
                 SourceDataResolution.USE_REMOTE -> {
-                    localRevision += 1
+                    localRevision.incrementAndGet()
                     withContext(Dispatchers.Default) { localStore.save(session, data, remoteValue) }
                     backupDirty = false
                     applyRemote(remoteValue)
@@ -523,7 +571,7 @@ class SourceDataSync<T>(
             backupDirty = true
             return null
         }
-        localRevision += 1
+        localRevision.incrementAndGet()
         withContext(Dispatchers.Default) { localStore.save(session, data, remoteValue) }
         backupDirty = false
         recoveryRestorePending = false
@@ -532,7 +580,7 @@ class SourceDataSync<T>(
 
     private suspend fun legacyBackupLocked(session: VaultSession?, connected: ConnectedNode?, value: T) {
         if (!backupDirty || session == null || connected == null) return
-        val uploadedRevision = localRevision
+        val uploadedRevision = localRevision.get()
         val encryptionKey = snapshotKey(session, connected)
         try {
             val snapshot = withContext(Dispatchers.Default) {
@@ -546,7 +594,7 @@ class SourceDataSync<T>(
                 snapshot,
             )
             lastError = null
-            if (localRevision == uploadedRevision) backupDirty = false
+            if (localRevision.get() == uploadedRevision) backupDirty = false
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
@@ -559,4 +607,24 @@ class SourceDataSync<T>(
 
     private fun snapshotKey(session: VaultSession, connected: ConnectedNode): ByteArray =
         connected.trusted.dataKey?.let(SourceCrypto::base64UrlDecode) ?: session.key
+
+    private fun requireLocalRevision(expected: Long) {
+        if (localRevision.get() != expected) throw LocalDataChangedDuringSync()
+    }
+
+    private fun publishRemoteIfUnchanged(
+        expected: Long,
+        value: T,
+        changed: Boolean,
+        applyRemote: (T) -> Unit,
+    ): Long = synchronized(localRevisionGate) {
+        requireLocalRevision(expected)
+        if (changed) {
+            localRevision.incrementAndGet()
+            applyRemote(value)
+        }
+        localRevision.get()
+    }
 }
+
+private class LocalDataChangedDuringSync : Exception()

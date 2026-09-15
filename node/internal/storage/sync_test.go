@@ -70,7 +70,7 @@ func TestCanonicalMutationsAreIdempotentAndPreserveConcurrentHeads(t *testing.T)
 	if allHeads[0] > allHeads[1] {
 		allHeads[0], allHeads[1] = allHeads[1], allHeads[0]
 	}
-	deleted := testTombstone(t, user.ID, "client-a", "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", 4, objectID, allHeads)
+	deleted := testTombstone(t, user.ID, "client-a", "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", 3, objectID, allHeads)
 	if receipt, heads, created, err = store.CommitMutation(user.ID, "client-a", identity.NodeID, deleted, bytes.NewReader(nil), 1024); err != nil || !created || receipt.CommitSequence != 4 || len(heads) != 1 || heads[0].Kind != "tombstone" {
 		t.Fatalf("delete = %#v %#v %v %v", receipt, heads, created, err)
 	}

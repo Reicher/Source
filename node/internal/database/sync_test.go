@@ -59,6 +59,25 @@ func TestScopedCursorAcknowledgementsAndEpochPrecondition(t *testing.T) {
 	if err != nil || !created || receipt.CommitSequence != 1 {
 		t.Fatalf("commit = %#v %v %v", receipt, created, err)
 	}
+	mutation.OperationID = "33333333-3333-4333-8333-333333333333"
+	mutation.OriginSequence = 3
+	digest, _ = syncmodel.MutationDigest(mutation)
+	_, _, err = db.CommitSyncMutation(user.ID, identity.NodeID, digest, revision.RevisionID, mutation)
+	var failure SyncFailure
+	if !errors.As(err, &failure) || failure.Code != "origin_sequence_out_of_order" {
+		t.Fatalf("gapped origin sequence error = %v", err)
+	}
+	mutation.OriginSequence = 2
+	digest, _ = syncmodel.MutationDigest(mutation)
+	if _, _, err = db.CommitSyncMutation(user.ID, identity.NodeID, digest, revision.RevisionID, mutation); err != nil {
+		t.Fatalf("next origin sequence: %v", err)
+	}
+	mutation.OperationID = "44444444-4444-4444-8444-444444444444"
+	digest, _ = syncmodel.MutationDigest(mutation)
+	_, _, err = db.CommitSyncMutation(user.ID, identity.NodeID, digest, revision.RevisionID, mutation)
+	if !errors.As(err, &failure) || failure.Code != "origin_sequence_out_of_order" {
+		t.Fatalf("reused origin sequence error = %v", err)
+	}
 	cursor := syncmodel.Cursor{AuthorityNodeID: identity.NodeID, AuthorityEpoch: state.AuthorityEpoch, CommitSequence: 1}
 	if err = db.AcknowledgeSyncCursor(user.ID, client.ID, "conversations", "55555555-5555-4555-8555-555555555555", cursor, 11); err != nil {
 		t.Fatal(err)
@@ -71,15 +90,25 @@ func TestScopedCursorAcknowledgementsAndEpochPrecondition(t *testing.T) {
 		t.Fatalf("scoped cursor count = %d, error %v", cursorCount, err)
 	}
 
-	newEpoch := "33333333-3333-4333-8333-333333333333"
-	if _, err = db.sql.Exec(`UPDATE profile_sync_state SET authority_epoch=?,next_commit_sequence=1 WHERE user_id=?`, newEpoch, user.ID); err != nil {
-		t.Fatal(err)
+	newEpoch, rotated, err := db.RotateSyncEpochs()
+	if err != nil || rotated != 1 || newEpoch == state.AuthorityEpoch {
+		t.Fatalf("rotate sync epochs = %q, %d, %v", newEpoch, rotated, err)
 	}
-	mutation.OperationID = "44444444-4444-4444-8444-444444444444"
-	mutation.OriginSequence = 2
+	rotatedState, err := db.SyncState(user.ID, identity.NodeID)
+	if err != nil || rotatedState.AuthorityEpoch != newEpoch || rotatedState.NextSequence != 1 {
+		t.Fatalf("rotated sync state = %#v, %v", rotatedState, err)
+	}
+	if err = db.sql.QueryRow(`SELECT COUNT(*) FROM client_sync_cursors WHERE user_id=?`, user.ID).Scan(&cursorCount); err != nil || cursorCount != 0 {
+		t.Fatalf("cursor count after epoch rotation = %d, error %v", cursorCount, err)
+	}
+	heads, err := db.SyncHeads(user.ID, "conversations", "55555555-5555-4555-8555-555555555555")
+	if err != nil || len(heads) != 1 || heads[0].RevisionID != revision.RevisionID {
+		t.Fatalf("heads after epoch rotation = %#v, %v", heads, err)
+	}
+	mutation.OperationID = "66666666-6666-4666-8666-666666666666"
+	mutation.OriginSequence = 3
 	digest, _ = syncmodel.MutationDigest(mutation)
 	_, _, err = db.CommitSyncMutation(user.ID, identity.NodeID, digest, revision.RevisionID, mutation)
-	var failure SyncFailure
 	if !errors.As(err, &failure) || failure.Code != "authority_epoch_changed" {
 		t.Fatalf("stale epoch mutation error = %v", err)
 	}

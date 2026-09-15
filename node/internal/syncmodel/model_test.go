@@ -39,6 +39,29 @@ func TestRevisionIDUsesCanonicalIdentityAndExcludesCreatedAt(t *testing.T) {
 	}
 }
 
+func TestRevisionIDUsesRFC8785StringEscaping(t *testing.T) {
+	revision := Revision{
+		ObjectKey: ObjectKey{
+			ProfileID:  "11111111-1111-4111-8111-111111111111",
+			Collection: "conversations",
+			ObjectID:   "22222222-2222-4222-8222-222222222222",
+		},
+		Kind:              "content",
+		ParentRevisionIDs: []string{strings.Repeat("a", 64)},
+		Payload: &Payload{
+			Format: "source<&>\u2028\u2029", FormatVersion: 3,
+			ByteCount: 123, PlaintextSHA256: strings.Repeat("b", 64),
+		},
+	}
+	revisionID, err := RevisionID(revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revisionID != "c7aabd6c97a89964902669d991236f465c37cac49f7b68eb0915ab1eb9bae477" {
+		t.Fatalf("revision id with RFC 8785 string characters = %s", revisionID)
+	}
+}
+
 func TestRevisionRejectsNonCanonicalParentsAndUnicode(t *testing.T) {
 	revision := Revision{
 		ObjectKey: ObjectKey{
