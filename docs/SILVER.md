@@ -5,7 +5,8 @@ canonical source material; Silver records what processors observed and what
 Source currently believes about those observations.
 
 This document is the normative model for Silver. It defines data semantics, not
-a storage schema, processing protocol, or API wire format.
+a storage schema, processing protocol, or API wire format. The ownership rules
+below are nevertheless an architectural constraint on every implementation.
 
 ## Boundary
 
@@ -17,12 +18,50 @@ Bronze reference -> Evidence -> Observation -> Entity + Claim -> Gold views
 
 Silver owns evidence references, processor observations, stable entity
 identity, and evidence-backed claims. It does not own job scheduling, batching,
-checkpoints, Client/Node placement, synchronization transport, or user
-interface behavior.
+checkpoints, synchronization transport, or user interface behavior.
 
 Gold is a rebuildable projection. It normally shows current Silver knowledge;
 superseded and retracted interpretations remain available for explanation and
 debugging but are not shown by default.
+
+## Ownership and availability
+
+The current authority model is:
+
+```text
+one profile -> multiple Clients -> one authoritative Node
+```
+
+Bronze originates on Clients. Multiple Clients may belong to one profile; they
+keep their local Bronze and synchronize the material that profile's
+authoritative Node needs for backup or refinement. Only one Node is authoritative
+for a profile at a time. It is the sole producer and authority for the profile's
+persistent Silver and synchronizes relevant Silver back to Clients, which may
+cache it for responsive and offline use.
+
+Clients MUST reconnect to the specific Node paired as authoritative for their
+profile. They MUST NOT select among multiple trusted Nodes or accept Silver from
+whichever Node is discovered first. Automatic failover, Node-to-Node
+synchronization, cross-Node Silver merging or reconciliation, and concurrent
+multi-Node authority are not supported by the current foundation. Replacing or
+migrating the authoritative Node may be added later as an explicit operation.
+
+A Client may run local AI or other local analysis, including while disconnected,
+but it MUST NOT add those results to a competing persistent Silver history. Such
+results remain transient or use a representation outside authoritative Silver.
+Without a Node, the Client remains usable with local Bronze and cached Silver;
+new Silver refinement waits until the Node is available.
+
+This single-Node rule gives each profile one refinement and synchronization
+history. Long-term multi-Node support remains a goal, but its coordination model
+must be designed separately rather than weakening current Silver authority. The
+rule does not make the authoritative Node host a zero-knowledge party: during
+the current development phase, the Node host and administrator/root are trusted,
+and Node processing may access plaintext Bronze and derived data. Isolation from
+a malicious Node administrator is future hardening. Pairing, authenticated
+transport, separation between users, encrypted storage where practical, and
+protection from unintended network or external access remain current security
+requirements.
 
 ## Shared rules
 
@@ -56,8 +95,9 @@ which interpretation wins.
 
 ## Canonical record identities
 
-Clients and Nodes MUST use the following algorithm. A runtime's ordinary JSON
-serializer is not sufficient.
+The Node MUST use the following algorithm when producing persistent Silver.
+Clients and other consumers that validate or cache these records MUST use the
+same algorithm. A runtime's ordinary JSON serializer is not sufficient.
 
 1. Build the record-specific identity object defined below. Optional identity
    fields MUST be present as JSON `null`; omission is not an alternative
@@ -147,12 +187,11 @@ not duplicate that information in another scalar wrapper.
 `createdAtMillis`, `id`, `state`, and storage metadata are excluded.
 `supportingObservationIds` is a set-valued field.
 
-Evidence and Observation identities can converge across a Client and Node from
-the same canonical inputs without entity resolution. Claim identity additionally
-depends on the resolved subject and object Entity UUIDs. Claims therefore
-converge only when both processors use the same synchronized entity identities;
-independent resolution to different entities intentionally produces different
-Claim IDs and must be reconciled by entity resolution.
+Deterministic identities let Node-produced records converge across synchronized
+copies and runtimes. This does not permit a Client to originate persistent
+Silver. Claim identity additionally depends on the resolved subject and object
+Entity UUIDs, so all persistent Claims use the Node's authoritative entity
+resolution history.
 
 Implementations MUST share cross-runtime conformance vectors before persisting
 these IDs. The fixtures must cover property order, `1` versus `1.0`, composed
@@ -184,9 +223,9 @@ revision.
 
 ## Observation
 
-An observation is an immutable local result from one processor. It records what
-the processor found without requiring Source to resolve global entity identity
-or accept the result as current truth.
+An observation is an immutable processor result. It records what the processor
+found without requiring Source to resolve global entity identity or accept the
+result as current truth.
 
 ```text
 Observation
@@ -214,9 +253,10 @@ to forcing a false entity match.
 
 ## Initial entity resolution
 
-Android's initial resolver is intentionally conservative. It consumes candidate
-Observations and the current Silver Entity and Claim state through the
-`SilverObservationResolver` interface.
+The initial Node resolver is intentionally conservative. It consumes candidate
+Observations and the current authoritative Silver Entity and Claim state. The
+current Android prototype expresses the same policy through the
+`SilverObservationResolver` interface while ownership moves to Node.
 
 - A mention reuses an Entity only when its normalized name and type match one
   existing Entity uniquely.
@@ -362,18 +402,20 @@ Gothenburg`.
 - Gold may show the conflict or choose a view-specific interpretation. Silver
   retains both claims and their provenance.
 
-## Implementation consequences
+## Current implementation transition
 
-The Android Silver snapshot persists Evidence, Observation, Entity, and Claim
-as first-class records. There is one Silver shape and no compatibility or
-migration path for older prototypes. Existing local or synchronized Silver
-snapshots must be deleted and rebuilt from Bronze. Bronze, Library, and
-conversation data are not affected. Local in-progress refinement checkpoints
-likewise have one supported shape.
+The Android prototype currently persists Client-produced Evidence, Observation,
+Entity, and Claim records. That is transitional behavior, not the ownership
+model for new work. The Node-authoritative refinement work must define how those
+local snapshots are migrated, invalidated, or rebuilt from Bronze before they
+can participate in synchronization. Until then, the existing Android behavior
+must not be treated as permission for another Client Silver producer. Bronze,
+Library, and conversation data remain separate from this transition.
 
-The Android `source.android.silver-extraction` processor version `3` emits one
+For compatibility with those existing snapshots, the Android
+`source.android.silver-extraction` processor version `3` emits one
 `attribute-candidate` or `relationship-candidate` Observation for each valid
-local finding. Its payload schema is:
+local finding. Its transitional payload schema is:
 
 ```json
 {
@@ -392,19 +434,22 @@ Bronze text before retaining them. Every candidate references Evidence for the
 exact Bronze item and content hash; fragment selectors can be added without
 changing the record model.
 
-Each completed source also receives a `knowledge-extraction-complete`
-Observation with an empty payload. It is a durable, deterministic processing
-receipt, including when the processor found no candidates, and prevents an
-unchanged source and producer version from being processed repeatedly.
+In the current prototype, each completed source also receives a
+`knowledge-extraction-complete` Observation with an empty payload. It is a
+durable, deterministic processing receipt, including when the processor found
+no candidates, and prevents an unchanged source and producer version from being
+processed repeatedly.
 
-Android assembles and validates one complete extraction result in memory before
-atomically replacing the stored snapshot. Interrupted batch work remains in a
-separate checkpoint store and is never exposed as Silver. These are Android
-processing and storage guarantees, not additional Silver record types.
+The current Android implementation assembles and validates one complete
+extraction result in memory before atomically replacing the stored snapshot.
+Interrupted batch work remains in a separate checkpoint store and is never
+exposed as Silver. These facts describe the prototype being replaced; they are
+not additional Silver record types or an exception to Node ownership.
 
 Entity resolution remains deliberately separate: candidate Observations do not
-create global Entities by themselves. A resolution step may now create opaque
-Entity UUIDs and evidence-backed Claims in this storage model. Candidate
-excerpts may later be promoted into fragment-level Evidence while remaining
-optional display metadata. Existing Bronze data remains canonical throughout
-processing.
+create global Entities by themselves. In the current Android prototype, a
+resolution step may create opaque Entity UUIDs and evidence-backed Claims in
+the transitional local snapshot. The Node-authoritative implementation will
+own that step and its resulting persistent records. Candidate excerpts may
+later be promoted into fragment-level Evidence while remaining optional display
+metadata. Existing Bronze data remains canonical throughout processing.

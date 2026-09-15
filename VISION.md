@@ -15,7 +15,8 @@ specifications, and versioned contracts.
 - **Local first.** Core features must work without an internet connection or
   external cloud service.
 - **Private and encrypted by default.** Users own and control their data and
-  keys.
+  keys. Encryption should prevent unintended access, but during development a
+  paired Node and its host administrator are inside the trust boundary.
 - **Client independent, Node enhanced.** A Client must remain useful on its own;
   a trusted Node should transparently provide more storage and compute when it
   is available.
@@ -36,7 +37,7 @@ Source has three primary parts:
 
 - **Source Client** is the user's application. It owns the local profile and
   keys, encrypted local storage, offline behavior, user interface, and
-  connections to trusted Nodes.
+  connection to the profile's authoritative Node.
 - **Source Node** is an optional, more capable local installation. It provides
   larger storage, backup, synchronization, search, processing, and AI over a
   trusted local network.
@@ -51,38 +52,61 @@ application and remains a separate project.
 
 ## Client and Node
 
+The current foundation has one authority relationship:
+
+```text
+one profile -> multiple Clients -> one authoritative Node
+```
+
+A profile may have multiple Clients, but only one Node is authoritative for the
+profile at a time. That Node owns its persistent Silver and server-side
+processing. Clients do not choose between multiple trusted Nodes or accept
+Silver from whichever Node is discovered first.
+
 A Client must be installable and usable without a Node. It keeps the user's
-identity, private keys, and data locally, protected by local authentication. A
-Client password unlocks the Client only and is never sent to a Node.
+identity, private keys, Client-originated Bronze, and relevant cached Silver
+locally, protected by local authentication. A Client password unlocks the
+Client only and is never sent to a Node.
 
 When a trusted Node is available, the Client should prefer it for work the Node
 can do better: backup, larger storage, broader search, expensive processing,
 and more capable AI. Loss of the Node or network must not prevent normal offline
-use of locally available data.
+use of local Bronze or cached Silver. New persistent Silver refinement waits
+until a trusted Node is available again.
 
 A Node has a permanent cryptographic identity independent of its editable
 display name. It can be discovered on the local network, but accepts a new user
 or Client only through a short-lived, administrator-authorized pairing flow
 initiated locally at the Node. Pairing establishes mutual cryptographic trust;
-normal reconnection is automatic after that. The identity model must allow
-multiple Clients per user even when an early product version supports a simpler
-flow.
+normal reconnection targets that specific paired Node after that. The identity
+model must allow multiple Clients per profile even when an early product version
+supports a simpler flow. Automatic failover to another Node is not supported.
 
 Node administration controls the installation, users, Clients, quotas, and
 service health. Administrative access must remain local to the physical
-machine. Administration rights alone must not grant access to users' encrypted
-private data.
+machine. During the current development phase, the Node host and its
+administrator/root are trusted and the Node may access plaintext user data when
+storage, refinement, search, or AI processing requires it. Protecting data from
+a malicious Node administrator is a future hardening goal, not a current
+requirement. Pairing, authenticated network access, user separation, encrypted
+storage where practical, and prevention of unintended external access remain
+current requirements.
 
 ## Data, backup, and synchronization
 
-Clients should back up as much user data as practical to a trusted Node. A Node
-may therefore hold a more complete history than any one Client. In the other
-direction, Clients synchronize the subset needed for responsive daily and
-offline use.
+Bronze originates on Clients and is synchronized to the profile's authoritative
+Node as needed for backup and processing. That Node may therefore hold a more
+complete Bronze history than any one Client. Its persistent Silver is
+authoritative, and Clients synchronize and cache the relevant subset for
+responsive daily and offline use.
 
 Backup and synchronization are separate concerns. Versioning, retention,
 conflict resolution, and selective synchronization require explicit contracts
 as those features are implemented; they are not fixed by this vision.
+Node-to-Node synchronization, failover, and Silver reconciliation are future
+work. A profile may eventually replace or migrate to another authoritative Node
+through an explicit operation, but implicit authority changes are not part of
+the current foundation.
 
 ## Knowledge architecture
 
@@ -92,12 +116,15 @@ layers:
 
 1. **Bronze — source material.** Canonical imported or created data such as
    photos, recordings, notes, messages, documents, files, and metadata.
-   Originals are preserved when practical. Automated processing may flag
-   duplicates, corruption, or low-value material, but should not destroy source
-   material without the user's decision.
+   Bronze originates on Clients and is synchronized to a Node when backup or
+   refinement needs it. Originals are preserved when practical. Automated
+   processing may flag duplicates, corruption, or low-value material, but
+   should not destroy source material without the user's decision.
 2. **Silver — derived knowledge.** Source's revisable understanding of the
    material: entities, observations, claims, relationships, and semantic
-   indexes. It is a knowledge graph, not a fixed ontology or absolute truth.
+   indexes. Persistent Silver is produced only by the Node and synchronized to
+   Clients as an offline-capable cache. It is a knowledge graph, not a fixed
+   ontology or absolute truth.
 3. **Gold — use-specific projections.** Rebuildable views of Silver for a
    particular capability, such as a timeline, a person's collected information,
    related notes, search results, or context for an AI request. Gold is data for
@@ -118,11 +145,14 @@ material with better tools. Knowledge may conflict, expire, be recomputed, or
 be replaced. Entities may be merged when evidence connects them or split when
 earlier resolution was wrong.
 
-Processing should consist of small, independent processors that can run on a
-Client or Node according to capability and data locality. They may extract
-metadata or text, transcribe audio, describe images, create embeddings, detect
-duplicates, infer relationships, or resolve observations to entities. New
-processors must not require redesigning the underlying model.
+Processing should consist of small, independent processors. Node processors own
+the persistent Bronze-to-Silver refinement path and may extract metadata or
+text, transcribe audio, describe images, create embeddings, detect duplicates,
+infer relationships, or resolve observations to entities. Local Client AI may
+still provide immediate or offline assistance, but its results are transient or
+otherwise outside authoritative Silver; it must not create a competing
+persistent Silver history. New processors must not require redesigning the
+underlying model.
 
 The user-facing ingestion model should stay simple: add something to Source.
 The system identifies and processes it without requiring the user to understand
@@ -154,6 +184,10 @@ A local terminal interface is the preferred long-term administration surface;
 the current localhost-only web interface is an implementation step. A dedicated
 Node should not expose public internet services and should communicate only with
 trusted devices on the local network.
+
+Multiple Nodes remain a long-term direction for resilience, migration, and
+larger installations. Cross-Node coordination and multi-Node authority need an
+explicit design and must not complicate the current one-Node-per-profile model.
 
 ## Current specifications
 

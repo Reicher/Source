@@ -13,7 +13,44 @@ Source Node never receives the client's vault key. It can manage accounts,
 quotas, retention, metadata, and ciphertext, but it cannot read an encrypted
 snapshot. Text explicitly sent to chat exists in plaintext in the model
 process during that request. The current version never reads snapshots or adds
-stored personal data to model context.
+stored personal data to model context. These are facts about the implemented
+snapshot API, not a zero-knowledge requirement for the architecture.
+
+## Current trust model and data responsibility
+
+During development, a paired Source Node, its host, and its administrator/root
+are trusted. Node services may access plaintext Bronze and derived data when
+required to store, refine, search, or run AI over it. Protecting that data from
+a malicious Node administrator is a future hardening goal, not a current
+requirement.
+
+The current operational relationship is:
+
+```text
+one profile -> multiple Clients -> one authoritative Node
+```
+
+Multiple Clients may belong to the same profile, but only one Node is
+authoritative for it at a time. Bronze originates on those Clients and is
+synchronized to that Node as needed. The authoritative Node owns all persistent
+Silver and server-side processing for the profile, then synchronizes Silver
+back to its Clients as a responsive and offline cache. A disconnected Client
+remains usable with local Bronze and cached Silver, while new Silver refinement
+waits for that Node. Local Client AI may run, but it does not create persistent
+Silver.
+
+Discovery and reconnect target the authoritative Node's persisted identity;
+Clients do not choose another Node because it responds first. Automatic Node
+failover, Node-to-Node synchronization, Silver reconciliation across Nodes, and
+concurrent multi-Node authority are not supported. A future explicit operation
+may replace or migrate the authoritative Node. Long-term multi-Node support must
+not add coordination paths to the current foundation before that design exists.
+
+Trusting the Node administrator does not relax the boundaries against other
+actors. Pairing and authentication, user separation, local-only administration,
+restricted LAN exposure, encrypted storage where practical, safe logs and
+backups, and prevention of unintended external access remain current security
+requirements.
 
 ## Repository and host responsibility
 
@@ -29,7 +66,7 @@ repository.
 ## Trust zones
 
 ```text
-Source-compatible client on a trusted LAN
+Source-compatible Client for one profile
                  |
                  | HTTPS, local CA, :8443
                  v
@@ -37,10 +74,11 @@ Source-compatible client on a trusted LAN
                  |
                  | internal HTTP
                  v
-            Source Node -------- inference -------- llama.cpp
+       authoritative Source Node -------- inference -------- llama.cpp
                  |
                  +-- user/client identity state and metadata
-                 +-- opaque client-encrypted snapshots
+                 +-- Client-originated Bronze and snapshots
+                 +-- Node-authoritative Silver
 
 Node owner on the physical machine
                  |
@@ -76,9 +114,12 @@ either Source port.
 - Snapshots are written atomically and may be checked against a SHA-256 header.
 - llama.cpp has no published port or normal outbound network.
 
-Stored snapshots are zero-knowledge with respect to the normal Source Node
-service. This does not protect plaintext chat from a malicious host
-administrator during an explicit AI request.
+The currently implemented snapshot API stores client-encrypted blobs and gives
+the normal Node service no decryption key. That defense-in-depth property must
+not be described or relied on as protection from the trusted Node host or its
+administrator, and the storage contract may evolve to give Node the plaintext
+access required for authoritative Silver refinement. Future protection from a
+malicious/root Node administrator requires a separate design.
 
 ## Installation
 

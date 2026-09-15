@@ -2,6 +2,39 @@
 
 ## Lifecycle and trust boundary
 
+The current pairing model is:
+
+```text
+one profile -> multiple Clients -> one authoritative Node
+```
+
+Only one Node may be authoritative for a profile at a time, while multiple
+Clients may belong to that profile. The authoritative Node owns persistent
+Silver and server-side processing. Pairing and reconnect therefore identify
+that specific Node; a Client must not choose between multiple trusted Nodes or
+accept Silver from whichever discovered Node responds first. Any transitional
+Client representation capable of holding multiple Node records does not grant
+them concurrent authority.
+
+Automatic Node failover, Node-to-Node synchronization, Silver reconciliation,
+and multi-Node authority are not supported by this protocol. Replacing or
+migrating a profile to another Node may be introduced later as an explicit
+operation. Multiple Nodes remain a long-term goal, but do not change this
+foundation.
+
+Pairing establishes the identity of a specific Client and Node and authorizes
+that Client's network access. It protects against unpaired Clients, other LAN
+peers, cross-user access, and unintended external access; it does not attest the
+Node software or isolate data from the Node host administrator.
+
+During the current development phase, the paired Node host and its
+administrator/root are trusted. The Node may access plaintext Bronze and
+derived data when required for storage, authoritative Silver refinement,
+search, or AI. Protecting data from a malicious Node administrator is future
+hardening, while authenticated pairing, per-user separation, encrypted storage
+where practical, local-only administration, and restricted network exposure
+remain current requirements.
+
 A fresh database has no `node_state` row. `POST /admin/api/initialize`
 validates the display name and repeated admin password, derives an Argon2id
 password hash, creates an Ed25519 Node key pair, and commits all permanent
@@ -174,7 +207,9 @@ untrusted hints: `v=1`, `id=NODE_ID`, `name=NODE_DISPLAY_NAME`, and
 trust. Container deployments use the small host-network `discovery` sidecar so
 multicast originates on the physical LAN interface.
 
-After finding a previously paired Node, the client sends an authenticated
+Discovery reconnects only to the profile's specifically paired authoritative
+Node. Advertisements for other Nodes remain untrusted and are not failover
+candidates. After finding that Node, the client sends an authenticated
 `POST /api/v1/identity/challenge` request containing `protocol: 1` and a fresh
 256-bit base64url `nonce`. The Node returns its public identity, the client ID,
 display name, nonce, exact signing payload, and an Ed25519 signature. The
