@@ -6,6 +6,7 @@ require (
 	github.com/grandcat/zeroconf v1.0.0
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	golang.org/x/crypto v0.41.0
+	golang.org/x/text v0.29.0
 	modernc.org/sqlite v1.38.2
 )
 

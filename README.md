@@ -67,9 +67,11 @@ backup, and restore guidance.
 
 The canonical cross-Client storage, synchronization, conflict, and deletion
 semantics are specified in
-[`docs/STORAGE_AND_SYNC.md`](docs/STORAGE_AND_SYNC.md). The prototype's current
-whole-snapshot synchronization is a compatibility path pending implementation
-of that model.
+[`docs/STORAGE_AND_SYNC.md`](docs/STORAGE_AND_SYNC.md). The Node and Android
+Client implement its canonical revision, journal, cursor, conflict, and receipt
+model for conversations and Library manifests. Whole snapshots and the
+feature-specific Library blob transport remain compatibility paths during the
+incremental migration; persistent Silver migration is owned by #41.
 
 ## Development
 

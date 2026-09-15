@@ -6,16 +6,22 @@ data class SourceDataDescriptor(
     val remoteAppId: String,
     val snapshotFormat: String,
     val formatVersion: Int,
+    /** Collection used by canonical sync. Null keeps an explicitly transitional compatibility path. */
+    val canonicalCollection: String? = null,
 ) {
     init {
         require(id.matches(IDENTIFIER_PATTERN)) { "Invalid local dataset identifier" }
         require(remoteAppId.matches(IDENTIFIER_PATTERN)) { "Invalid remote storage application identifier" }
         require(snapshotFormat.isNotBlank()) { "Snapshot format is required" }
         require(formatVersion > 0) { "Dataset format version must be positive" }
+        canonicalCollection?.let {
+            require(it.matches(CANONICAL_COLLECTION_PATTERN)) { "Invalid canonical collection identifier" }
+        }
     }
 
     private companion object {
         val IDENTIFIER_PATTERN = Regex("^[a-z][a-z0-9-]{1,31}$")
+        val CANONICAL_COLLECTION_PATTERN = Regex("^[a-z][a-z0-9-]{1,63}$")
     }
 }
 
@@ -38,7 +44,8 @@ interface SourceData<T> {
 
 internal enum class SourceDataResolution { USE_REMOTE, MATCH, KEEP_LOCAL }
 
-internal fun resolveSourceData(
+/** Timestamp resolution is retained only for datasets still on the legacy whole-snapshot transport. */
+internal fun resolveLegacySourceData(
     local: SourceDataVersion,
     remote: SourceDataVersion,
 ): SourceDataResolution = when {

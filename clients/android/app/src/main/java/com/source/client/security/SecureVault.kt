@@ -6,6 +6,9 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import com.source.client.R
 import com.source.client.storage.SourceDataDescriptor
+import com.source.client.storage.CanonicalSyncState
+import com.source.client.storage.decodeCanonicalSyncState
+import com.source.client.storage.encodeCanonicalSyncState
 import com.source.client.model.LocalIdentity
 import com.source.client.model.TrustedNode
 import com.source.client.model.UnlockedVault
@@ -153,6 +156,75 @@ class SecureVault(
             .putString(profileKey(session.profileId, dataKey(data.id, KEY_DATA_NONCE)), SourceCrypto.base64Url(nonce))
             .putString(profileKey(session.profileId, dataKey(data.id, KEY_DATA_VALUE)), SourceCrypto.base64Url(ciphertext))
             .commit()) { "Could not persist encrypted Source data" }
+    }
+
+    internal fun loadSyncState(session: VaultSession, data: SourceDataDescriptor): CanonicalSyncState? {
+        check(!session.closed)
+        val nonce = preferences.getString(
+            profileKey(session.profileId, dataKey(data.id, KEY_SYNC_NONCE)),
+            null,
+        ) ?: return null
+        val ciphertext = preferences.getString(
+            profileKey(session.profileId, dataKey(data.id, KEY_SYNC_VALUE)),
+            null,
+        ) ?: return null
+        val plaintext = SourceCrypto.decrypt(
+            session.key,
+            SourceCrypto.base64UrlDecode(ciphertext),
+            SourceCrypto.base64UrlDecode(nonce),
+        )
+        return try {
+            decodeCanonicalSyncState(plaintext)
+        } finally {
+            plaintext.fill(0)
+        }
+    }
+
+    internal fun saveSyncState(session: VaultSession, data: SourceDataDescriptor, state: CanonicalSyncState) {
+        check(!session.closed)
+        val plaintext = encodeCanonicalSyncState(state)
+        try {
+            saveEncryptedSyncState(session, data, plaintext, preferences.edit()).commitOrThrow()
+        } finally {
+            plaintext.fill(0)
+        }
+    }
+
+    internal fun saveDataAndSyncState(
+        session: VaultSession,
+        data: SourceDataDescriptor,
+        plaintext: ByteArray,
+        state: CanonicalSyncState,
+    ) {
+        check(!session.closed)
+        val dataNonce = randomBytes(12)
+        val dataCiphertext = SourceCrypto.encrypt(session.key, plaintext, dataNonce)
+        val statePlaintext = encodeCanonicalSyncState(state)
+        try {
+            val editor = preferences.edit()
+                .putString(profileKey(session.profileId, dataKey(data.id, KEY_DATA_NONCE)), SourceCrypto.base64Url(dataNonce))
+                .putString(profileKey(session.profileId, dataKey(data.id, KEY_DATA_VALUE)), SourceCrypto.base64Url(dataCiphertext))
+            saveEncryptedSyncState(session, data, statePlaintext, editor).commitOrThrow()
+        } finally {
+            statePlaintext.fill(0)
+        }
+    }
+
+    private fun saveEncryptedSyncState(
+        session: VaultSession,
+        data: SourceDataDescriptor,
+        plaintext: ByteArray,
+        editor: android.content.SharedPreferences.Editor,
+    ): android.content.SharedPreferences.Editor {
+        val nonce = randomBytes(12)
+        val ciphertext = SourceCrypto.encrypt(session.key, plaintext, nonce)
+        return editor
+            .putString(profileKey(session.profileId, dataKey(data.id, KEY_SYNC_NONCE)), SourceCrypto.base64Url(nonce))
+            .putString(profileKey(session.profileId, dataKey(data.id, KEY_SYNC_VALUE)), SourceCrypto.base64Url(ciphertext))
+    }
+
+    private fun android.content.SharedPreferences.Editor.commitOrThrow() {
+        check(commit()) { "Could not persist canonical Source sync state" }
     }
 
     internal fun createDataSnapshot(
@@ -355,6 +427,8 @@ class SecureVault(
         private const val KEY_VAULT_DATA = "vault_data"
         private const val KEY_DATA_NONCE = "nonce"
         private const val KEY_DATA_VALUE = "data"
+        private const val KEY_SYNC_NONCE = "sync_nonce"
+        private const val KEY_SYNC_VALUE = "sync_data"
         private const val KEY_CONVERSATION_NONCE = "conversation_nonce"
         private const val KEY_CONVERSATION_DATA = "conversation_data"
         private const val LEGACY_PROFILE_ID = "legacy-v1"

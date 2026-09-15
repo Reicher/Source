@@ -96,7 +96,9 @@ internal class ChatController(
         )
         scope.launch {
             conversationSync.persist(activeSession, conversations)
-            conversationSync.backupIfNeeded(session(), connectedNode(), conversations)
+            conversationSync.backupIfNeeded(
+                session(), connectedNode(), conversations, ::applySynchronizedConversations,
+            )
             onStateChanged(state)
         }
     }
@@ -167,7 +169,9 @@ internal class ChatController(
                 )
             } finally {
                 if (activeRunId == runId) activeRunId = null
-                conversationSync.backupIfNeeded(session(), connectedNode(), conversations)
+                conversationSync.backupIfNeeded(
+                    session(), connectedNode(), conversations, ::applySynchronizedConversations,
+                )
                 onStateChanged(state)
                 onInteractiveInferenceFinished()
             }

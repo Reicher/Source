@@ -14,8 +14,9 @@ Source monorepo. It intentionally implements only the first vertical slices:
    reconnect as explicit connection states;
 7. keep one encrypted conversation and run it either through a local on-device
    model or the authenticated Source Node chat API;
-8. store, version, reconcile, back up, and restore chat through a generic
-   encrypted Source-data path that additional datasets can reuse;
+8. store chat and Library manifests through the shared canonical revision and
+   synchronization path, with a durable encrypted outgoing journal, scoped
+   cursors, explicit concurrent heads, and one-time legacy snapshot import;
 9. import generic files into a per-user encrypted Library, deduplicate them by
    SHA-256 content identity, and reliably sync raw encrypted items and deletion
    tombstones to a paired Node.
@@ -58,7 +59,9 @@ when `This device` is selected for AI.
 - Each paired Node gets a client-generated recovery key and data key. The app
   shows the recovery key while connected; an administrator-approved recovery
   QR plus that key can attach a replacement client to the existing Node user
-  and decrypt its snapshots.
+  and decrypt its legacy snapshots and Library blobs. Canonical conversation
+  and manifest payloads are sent over authenticated TLS as Node-readable
+  logical bytes, matching the current trusted-Node architecture.
 - The Ed25519 Client private key and trusted-Node credentials live only in the
   encrypted local vault. A random vault key is password-wrapped and then wrapped
   again by a non-exportable Android Keystore AES key.
@@ -136,7 +139,9 @@ The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 7. Select **This device**, turn off Wi-Fi, and send a message. Restart the app,
    unlock it, and confirm that both messages remain.
 8. Reconnect, select the Node (or **Auto**), send another message, and confirm
-   that a `source-client` snapshot appears on the Node.
+   that a `conversations` canonical revision appears on the Node. Existing
+   installations may read their last `source-client` snapshot once and migrate
+   it into that revision history.
 
 The Compose `discovery` service uses host networking so mDNS can reach the LAN.
 On Docker Desktop, host networking must be enabled; native Linux supports it

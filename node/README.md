@@ -14,7 +14,9 @@ the Node deployment.
 - `internal/security` owns random tokens, Argon2id, Ed25519 keys, and signing.
 - `internal/auth` authenticates client credentials.
 - `internal/pairing` implements pairing and recovery state machines.
-- `internal/storage` stores opaque encrypted snapshots and streamed Library items.
+- `internal/syncmodel` defines canonical object/revision identity and validation.
+- `internal/storage` commits hash-verified canonical payloads and retains the
+  transitional opaque snapshot and streamed Library-item paths.
 - `internal/httpapi` implements the versioned Source API.
 - `internal/admin` implements localhost administration and its embedded UI.
 - `internal/discovery` advertises `_source._tcp` over DNS-SD/mDNS.
@@ -45,6 +47,8 @@ go run ./cmd/source-node status
 go run ./cmd/source-node list
 go run ./cmd/source-node discovery
 go run ./cmd/source-node healthcheck
+# Only after restoring a point-in-time rollback while the server is stopped:
+go run ./cmd/source-node rotate-sync-epochs --confirm-rollback
 ```
 
 ## State
@@ -52,8 +56,11 @@ go run ./cmd/source-node healthcheck
 SQLite state defaults to `/state/source-node.sqlite`. Snapshot bytes remain
 under `/vaults/<storage namespace>/<application>/snapshots`, separate from
 metadata. Client-encrypted Library items are stored atomically under
-`/vaults/<storage namespace>/library/items`; SQLite retains their content
-identities and deletion tombstones. Node identity is an Ed25519 key stored in SQLite as PKCS#8/SPKI DER.
+`/vaults/<storage namespace>/library/items`; canonical immutable revision
+payloads are stored under `/vaults/<storage namespace>/canonical`. SQLite owns
+the authoritative revision graph, current heads, operation idempotency records,
+profile change log, authority epoch, and Client cursors. Node identity is an
+Ed25519 key stored in SQLite as PKCS#8/SPKI DER.
 Administrator passwords and recovery keys use the existing Argon2id encoding.
 
 The schema is upgraded by ordered, transactional migrations tracked in the

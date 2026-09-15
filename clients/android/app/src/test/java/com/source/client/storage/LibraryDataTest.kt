@@ -1,11 +1,17 @@
 package com.source.client.storage
 
 import java.util.UUID
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LibraryDataTest {
+    @Test
+    fun `library manifest uses canonical sync collection`() {
+        assertEquals("library-manifests", LibraryData.descriptor.canonicalCollection)
+    }
+
     @Test
     fun `manifest version includes items and tombstones`() {
         val now = 1_700_000_000_000

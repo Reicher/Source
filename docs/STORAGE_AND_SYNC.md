@@ -18,9 +18,10 @@ refinement, search, or recovery requires it. Transport authentication, profile
 isolation, encrypted storage where practical, and protection from unintended
 network access remain required.
 
-The words MUST, MUST NOT, SHOULD, and MAY describe requirements on the future
-canonical implementation. The encrypted snapshot and Library endpoints that
-exist today are compatibility paths and do not redefine this contract.
+The words MUST, MUST NOT, SHOULD, and MAY describe requirements on the
+canonical implementation. Contract version 1 implements the shared identity,
+revision, mutation, cursor, and tombstone core. Encrypted snapshot and Library
+endpoints remain compatibility paths and do not redefine this contract.
 
 ## Core distinctions
 
@@ -200,6 +201,11 @@ is preserved by a continuity-safe restore. A restore that rolls the Node back,
 or an explicit future authority migration that cannot preserve the log, MUST
 create a new epoch and force reconciliation. A Node MUST never reuse a lower
 `commitSequence` in the same epoch.
+
+The implemented rollback procedure runs `source-node rotate-sync-epochs
+--confirm-rollback` while the serving process is stopped. It retains the
+restored heads, assigns a fresh epoch, resets the new epoch's commit sequence,
+and removes acknowledgements that belonged to the abandoned history.
 
 ## Idempotency and duplicates
 
@@ -449,12 +455,14 @@ carried forward as a conflict winner, a snapshot upload MUST NOT be treated as
 a canonical commit receipt, and Client-produced Silver MUST NOT be admitted to
 the authoritative Silver history.
 
-The implementation issue following this contract is responsible for versioned
-wire schemas, durable journals and cursors, Node storage tables, incremental
-migration, and compatibility reads. Migration must preserve existing Bronze,
-map existing Library tombstones without resurrection, and either rebuild or
-explicitly invalidate transitional Silver. This document does not require a
-big-bang migration or add Node-to-Node synchronization.
+The versioned wire schema, durable Client journals and scoped cursors, Node
+storage tables, and compatibility reads now provide incremental migration for
+conversation and Library-manifest data. Existing raw Library objects retain
+their idempotent feature transport until their streaming Client path moves to
+canonical mutations. Transitional Client-produced Silver remains on the legacy
+path and is migrated or invalidated by the Node-authoritative Silver work in
+#41. This document does not require a big-bang migration or add Node-to-Node
+synchronization.
 
 ## Required conformance scenarios
 

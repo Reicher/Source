@@ -11,6 +11,17 @@ import com.source.client.ai.SourceAiRequest
 import com.source.client.security.SourceCrypto
 import com.source.client.storage.EncryptedUploadPayload
 import com.source.client.storage.LibraryItem
+import com.source.client.storage.SOURCE_STORAGE_CONTRACT_VERSION
+import com.source.client.storage.StorageChanges
+import com.source.client.storage.StorageChange
+import com.source.client.storage.StorageCommitReceipt
+import com.source.client.storage.StorageCursor
+import com.source.client.storage.StorageMutation
+import com.source.client.storage.StorageRevision
+import com.source.client.storage.toJson
+import com.source.client.storage.toStorageCursor
+import com.source.client.storage.toStorageReceipt
+import com.source.client.storage.toStorageRevision
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -351,6 +362,143 @@ class SourceNodeApi {
         } finally {
             connection.disconnect()
         }
+    }
+
+    suspend fun commitStorageMutation(
+        apiBaseUrl: String,
+        trusted: TrustedNode,
+        mutation: StorageMutation,
+    ): Pair<StorageCommitReceipt, List<StorageRevision>> = withContext(Dispatchers.IO) {
+        val revision = mutation.revision
+        val connection = openConnection(
+            "${apiBaseUrl.removeSuffix("/")}/sync/mutations/${mutation.operationId}",
+            trusted.tlsCaCertificate,
+            trusted.clientCredential,
+        )
+        try {
+            connection.requestMethod = "POST"
+            connection.readTimeout = LIBRARY_TIMEOUT_MILLIS
+            connection.doOutput = true
+            connection.setFixedLengthStreamingMode(mutation.payloadBytes.size)
+            connection.setRequestProperty("Content-Type", "application/octet-stream")
+            connection.setRequestProperty("Accept", "application/json")
+            connection.setRequestProperty("X-Source-Contract-Version", SOURCE_STORAGE_CONTRACT_VERSION.toString())
+            connection.setRequestProperty("X-Source-Origin-Epoch", mutation.originEpoch)
+            connection.setRequestProperty("X-Source-Origin-Sequence", mutation.originSequence.toString())
+            mutation.expectedAuthorityEpoch?.let {
+                connection.setRequestProperty("X-Source-Authority-Epoch", it)
+            }
+            connection.setRequestProperty("X-Source-Collection", revision.objectKey.collection)
+            connection.setRequestProperty("X-Source-Object-Id", revision.objectKey.objectId)
+            connection.setRequestProperty("X-Source-Revision-Id", revision.revisionId)
+            connection.setRequestProperty("X-Source-Revision-Kind", revision.kind)
+            if (revision.parentRevisionIds.isNotEmpty()) {
+                connection.setRequestProperty("X-Source-Parent-Revisions", revision.parentRevisionIds.joinToString(","))
+            }
+            revision.createdAtMillis?.let {
+                connection.setRequestProperty("X-Source-Created-At-Millis", it.toString())
+            }
+            revision.payload?.let { payload ->
+                connection.setRequestProperty("X-Source-Payload-Format", payload.format)
+                connection.setRequestProperty("X-Source-Payload-Format-Version", payload.formatVersion.toString())
+                connection.setRequestProperty("X-Source-Byte-Count", payload.byteCount.toString())
+                connection.setRequestProperty("X-Source-Plaintext-SHA256", payload.plaintextSha256)
+            }
+            connection.outputStream.use { it.write(mutation.payloadBytes) }
+            val status = connection.responseCode
+            if (status !in 200..299) throw apiError(connection, status)
+            val response = connection.inputStream.bufferedReader(Charsets.UTF_8).use { JSONObject(it.readText()) }
+            if (response.getInt("contractVersion") != SOURCE_STORAGE_CONTRACT_VERSION) {
+                throw SourceApiException("unsupported_storage_contract", "The Node returned an unsupported storage contract.")
+            }
+            val heads = response.getJSONArray("heads")
+            response.getJSONObject("receipt").toStorageReceipt() to
+                List(heads.length()) { heads.getJSONObject(it).toStorageRevision() }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    suspend fun storageChanges(
+        apiBaseUrl: String,
+        trusted: TrustedNode,
+        collection: String,
+        objectId: String,
+        cursor: StorageCursor?,
+    ): StorageChanges = withContext(Dispatchers.IO) {
+        val response = postJson(
+            "${apiBaseUrl.removeSuffix("/")}/sync/changes",
+            JSONObject().apply {
+                put("contractVersion", SOURCE_STORAGE_CONTRACT_VERSION)
+                put("collection", collection)
+                put("objectId", objectId)
+                cursor?.let { put("cursor", it.toJson()) }
+            },
+            trusted.tlsCaCertificate,
+            trusted.clientCredential,
+        )
+        if (response.getInt("contractVersion") != SOURCE_STORAGE_CONTRACT_VERSION) {
+            throw SourceApiException("unsupported_storage_contract", "The Node returned an unsupported storage contract.")
+        }
+        val rawChanges = response.getJSONArray("changes")
+        val rawHeads = response.getJSONArray("heads")
+        StorageChanges(
+            cursor = response.getJSONObject("cursor").toStorageCursor(),
+            requiresManifest = response.getBoolean("requiresManifest"),
+            changes = List(rawChanges.length()) { index ->
+                rawChanges.getJSONObject(index).let {
+                    StorageChange(it.getJSONObject("receipt").toStorageReceipt(), it.getJSONObject("revision").toStorageRevision())
+                }
+            },
+            heads = List(rawHeads.length()) { rawHeads.getJSONObject(it).toStorageRevision() },
+        )
+    }
+
+    suspend fun storagePayload(
+        apiBaseUrl: String,
+        trusted: TrustedNode,
+        revision: StorageRevision,
+    ): ByteArray = withContext(Dispatchers.IO) {
+        val descriptor = revision.payload
+            ?: throw SourceApiException("payload_not_found", "The storage revision has no payload.")
+        val connection = openConnection(
+            "${apiBaseUrl.removeSuffix("/")}/sync/revisions/${revision.revisionId}/payload",
+            trusted.tlsCaCertificate,
+            trusted.clientCredential,
+        )
+        try {
+            connection.requestMethod = "GET"
+            connection.readTimeout = LIBRARY_TIMEOUT_MILLIS
+            connection.setRequestProperty("Accept", "application/octet-stream")
+            val status = connection.responseCode
+            if (status !in 200..299) throw apiError(connection, status)
+            val body = connection.inputStream.use { it.readBytes() }
+            if (body.size.toLong() != descriptor.byteCount || sha256Hex(body) != descriptor.plaintextSha256) {
+                throw SourceApiException("payload_hash_mismatch", "The Node returned corrupt storage payload bytes.")
+            }
+            body
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    suspend fun acknowledgeStorageCursor(
+        apiBaseUrl: String,
+        trusted: TrustedNode,
+        collection: String,
+        objectId: String,
+        cursor: StorageCursor,
+    ) = withContext(Dispatchers.IO) {
+        postJson(
+            "${apiBaseUrl.removeSuffix("/")}/sync/ack",
+            JSONObject()
+                .put("contractVersion", SOURCE_STORAGE_CONTRACT_VERSION)
+                .put("collection", collection)
+                .put("objectId", objectId)
+                .put("cursor", cursor.toJson()),
+            trusted.tlsCaCertificate,
+            trusted.clientCredential,
+        )
     }
 
     suspend fun uploadLibraryItem(

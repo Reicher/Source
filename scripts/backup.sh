@@ -17,7 +17,7 @@ timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 archive="$backup_root/source-node-$timestamp.tar.gz"
 
 printf '%s\n' "Stop Source Node before taking a consistency-sensitive backup."
-printf '%s\n' "The archive includes accounts, ciphertext, metadata, and the local CA."
+printf '%s\n' "The archive includes accounts, canonical payloads, compatibility ciphertext, metadata, and the local CA."
 printf '%s\n' "Downloaded model files are intentionally excluded."
 printf '%s' "Type BACKUP to continue: "
 read -r answer
