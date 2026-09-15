@@ -19,6 +19,7 @@ import com.source.client.model.DiscoveredNode
 import com.source.client.model.NodeConnectionState
 import com.source.client.model.NodeDisconnectReason
 import com.source.client.model.PairingInvitation
+import com.source.client.model.ProfileNodeAuthority
 import com.source.client.model.VaultProfile
 import com.source.client.protocol.PairingPayloadException
 import com.source.client.protocol.PairingPayloadError
@@ -456,12 +457,36 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             _screen.value = scanner.copy(error = message(R.string.error_qr_code_wrong_node))
             return
         }
+        val activeSession = session ?: return
+        when (val authority = activeSession.vault.nodeAuthority) {
+            is ProfileNodeAuthority.Authoritative -> if (authority.node.nodeId != invitation.nodeId) {
+                _screen.value = scanner.copy(error = message(R.string.error_profile_bound_to_another_node))
+                return
+            }
+            is ProfileNodeAuthority.AmbiguousLegacy -> {
+                val trusted = authority.nodes.firstOrNull { it.nodeId == invitation.nodeId }
+                if (trusted == null) {
+                    _screen.value = scanner.copy(error = message(R.string.error_node_authority_ambiguous))
+                    return
+                }
+                if (trusted.nodePublicKey != invitation.nodePublicKey ||
+                    trusted.tlsCaCertificate != invitation.tlsCaCertificate
+                ) {
+                    _screen.value = scanner.copy(error = message(R.string.error_qr_node_identity_mismatch))
+                    return
+                }
+                _screen.value = AppScreen.Pairing(invitation.nodeName)
+                nodeConnection.beginPairing(scanner.node, invitation.nodeName)
+                nodeConnection.selectLegacyAuthority(activeSession, scanner.node, trusted)
+                return
+            }
+            ProfileNodeAuthority.Unpaired -> Unit
+        }
         if (invitation.recovery) {
             _screen.value = AppScreen.Recovery(scanner.node, invitation)
             nodeConnection.beginRecovery(scanner.node, invitation.nodeName)
             return
         }
-        val activeSession = session ?: return
         _screen.value = AppScreen.Pairing(invitation.nodeName)
         nodeConnection.beginPairing(scanner.node, invitation.nodeName)
         pairingJob?.cancel()
@@ -475,7 +500,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
                     recovery.envelope,
                 )
                 val trusted = result.trustedNode.copy(dataKey = recovery.dataKey)
-                nodeConnection.saveTrustedNode(activeSession, trusted)
+                nodeConnection.saveAuthoritativeNode(activeSession, trusted)
                 nodeConnection.acceptConnection(scanner.node, trusted)
             } catch (error: CancellationException) {
                 throw error
@@ -517,7 +542,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
                 } finally {
                     dataKey.fill(0)
                 }
-                nodeConnection.saveTrustedNode(activeSession, trusted)
+                nodeConnection.saveAuthoritativeNode(activeSession, trusted)
                 conversationSync.beginRecoveryRestore()
                 chatController.beginRecoveryRestore()
                 nodeConnection.acceptConnection(recoveryScreen.node, trusted)

@@ -7,6 +7,7 @@ import android.security.keystore.KeyProperties
 import com.source.client.R
 import com.source.client.storage.SourceDataDescriptor
 import com.source.client.model.LocalIdentity
+import com.source.client.model.ProfileNodeAuthority
 import com.source.client.model.TrustedNode
 import com.source.client.model.UnlockedVault
 import com.source.client.model.VaultProfile
@@ -63,7 +64,7 @@ class SecureVault(
         val (deviceNonce, deviceEnvelope) = keystoreEncrypt(passwordEnvelope)
         passwordEnvelope.fill(0)
 
-        val session = VaultSession(profile.id, vaultKey, UnlockedVault(identity, emptyList()))
+        val session = VaultSession(profile.id, vaultKey, UnlockedVault(identity))
         persistVault(session)
         val updatedProfiles = profiles + profile
         val committed = preferences.edit()
@@ -292,7 +293,7 @@ class SecureVault(
     }
 
     private fun encode(vault: UnlockedVault): String = JSONObject().apply {
-        put("version", 1)
+        put("version", 2)
         put("identity", JSONObject().apply {
             put("userId", vault.identity.userId)
             put("userDisplayName", vault.identity.userDisplayName)
@@ -301,46 +302,79 @@ class SecureVault(
             put("clientPublicKey", vault.identity.clientPublicKey)
             put("clientPrivateKey", vault.identity.clientPrivateKey)
         })
-        put("trustedNodes", JSONArray().apply {
-            vault.trustedNodes.forEach { node ->
-                put(JSONObject().apply {
-                    put("nodeId", node.nodeId)
-                    put("nodePublicKey", node.nodePublicKey)
-                    put("tlsCaCertificate", node.tlsCaCertificate)
-                    put("displayName", node.displayName)
-                    put("clientCredential", node.clientCredential)
-                    put("userId", node.userId)
-                    put("clientId", node.clientId)
-                    node.recoveryKey?.let { put("recoveryKey", it) }
-                    node.dataKey?.let { put("dataKey", it) }
-                    if (node.recoverySetupPending) put("recoverySetupPending", true)
-                })
-            }
-        })
+        put("nodeAuthority", encodeNodeAuthority(vault.nodeAuthority))
     }.toString()
 
     private fun decode(raw: String): UnlockedVault {
         val root = JSONObject(raw)
-        require(root.getInt("version") == 1)
+        val version = root.getInt("version")
+        require(version == 1 || version == 2)
         val identity = root.getJSONObject("identity").let {
             LocalIdentity(
                 it.getString("userId"), it.getString("userDisplayName"), it.getString("clientId"),
                 it.getString("clientDisplayName"), it.getString("clientPublicKey"), it.getString("clientPrivateKey"),
             )
         }
-        val trusted = root.getJSONArray("trustedNodes")
-        return UnlockedVault(identity, List(trusted.length()) { index ->
-            trusted.getJSONObject(index).let {
-                TrustedNode(
-                    it.getString("nodeId"), it.getString("nodePublicKey"), it.getString("tlsCaCertificate"), it.getString("displayName"),
-                    it.getString("clientCredential"), it.getString("userId"), it.getString("clientId"),
-                    it.optString("recoveryKey").takeIf(String::isNotBlank),
-                    it.optString("dataKey").takeIf(String::isNotBlank),
-                    it.optBoolean("recoverySetupPending", false),
-                )
-            }
-        })
+        val authority = if (version == 1) {
+            decodeLegacyAuthority(root.getJSONArray("trustedNodes"))
+        } else {
+            decodeNodeAuthority(root.getJSONObject("nodeAuthority"))
+        }
+        return UnlockedVault(identity, authority)
     }
+
+    private fun encodeNodeAuthority(authority: ProfileNodeAuthority): JSONObject = JSONObject().apply {
+        when (authority) {
+            ProfileNodeAuthority.Unpaired -> put("status", "unpaired")
+            is ProfileNodeAuthority.Authoritative -> {
+                put("status", "authoritative")
+                put("node", encodeTrustedNode(authority.node))
+            }
+            is ProfileNodeAuthority.AmbiguousLegacy -> {
+                put("status", "ambiguous_legacy")
+                put("nodes", JSONArray().apply { authority.nodes.forEach { put(encodeTrustedNode(it)) } })
+            }
+        }
+    }
+
+    private fun decodeNodeAuthority(raw: JSONObject): ProfileNodeAuthority = when (raw.getString("status")) {
+        "unpaired" -> ProfileNodeAuthority.Unpaired
+        "authoritative" -> ProfileNodeAuthority.Authoritative(decodeTrustedNode(raw.getJSONObject("node")))
+        "ambiguous_legacy" -> decodeLegacyAuthority(raw.getJSONArray("nodes")).also {
+            require(it is ProfileNodeAuthority.AmbiguousLegacy)
+        }
+        else -> throw IllegalArgumentException("Unsupported Node authority status")
+    }
+
+    private fun decodeLegacyAuthority(raw: JSONArray): ProfileNodeAuthority {
+        val nodes = List(raw.length()) { decodeTrustedNode(raw.getJSONObject(it)) }
+        return when (nodes.size) {
+            0 -> ProfileNodeAuthority.Unpaired
+            1 -> ProfileNodeAuthority.Authoritative(nodes.single())
+            else -> ProfileNodeAuthority.AmbiguousLegacy(nodes)
+        }
+    }
+
+    private fun encodeTrustedNode(node: TrustedNode): JSONObject = JSONObject().apply {
+        put("nodeId", node.nodeId)
+        put("nodePublicKey", node.nodePublicKey)
+        put("tlsCaCertificate", node.tlsCaCertificate)
+        put("displayName", node.displayName)
+        put("clientCredential", node.clientCredential)
+        put("userId", node.userId)
+        put("clientId", node.clientId)
+        node.recoveryKey?.let { put("recoveryKey", it) }
+        node.dataKey?.let { put("dataKey", it) }
+        if (node.recoverySetupPending) put("recoverySetupPending", true)
+    }
+
+    private fun decodeTrustedNode(raw: JSONObject): TrustedNode = TrustedNode(
+        raw.getString("nodeId"), raw.getString("nodePublicKey"), raw.getString("tlsCaCertificate"), raw.getString("displayName"),
+        raw.getString("clientCredential"), raw.getString("userId"), raw.getString("clientId"),
+        raw.optString("recoveryKey").takeIf(String::isNotBlank),
+        raw.optString("dataKey").takeIf(String::isNotBlank),
+        raw.optBoolean("recoverySetupPending", false),
+    )
 
     private fun dataKey(dataId: String, suffix: String) = "${dataId}_$suffix"
 

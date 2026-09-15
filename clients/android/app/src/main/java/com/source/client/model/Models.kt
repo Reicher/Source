@@ -29,10 +29,35 @@ data class PairingResult(
     val recoveryEnvelope: String? = null,
 )
 
+sealed interface ProfileNodeAuthority {
+    data object Unpaired : ProfileNodeAuthority
+    data class Authoritative(val node: TrustedNode) : ProfileNodeAuthority
+    data class AmbiguousLegacy(val nodes: List<TrustedNode>) : ProfileNodeAuthority {
+        init {
+            require(nodes.map(TrustedNode::nodeId).distinct().size > 1) {
+                "Ambiguous Node authority requires multiple distinct Node identities"
+            }
+        }
+    }
+}
+
 data class UnlockedVault(
     val identity: LocalIdentity,
-    val trustedNodes: List<TrustedNode>,
+    val nodeAuthority: ProfileNodeAuthority = ProfileNodeAuthority.Unpaired,
 )
+
+val UnlockedVault.authoritativeNode: TrustedNode?
+    get() = (nodeAuthority as? ProfileNodeAuthority.Authoritative)?.node
+
+fun UnlockedVault.bindAuthoritativeNode(node: TrustedNode): UnlockedVault {
+    val canBind = when (val authority = nodeAuthority) {
+        ProfileNodeAuthority.Unpaired -> true
+        is ProfileNodeAuthority.Authoritative -> authority.node.nodeId == node.nodeId
+        is ProfileNodeAuthority.AmbiguousLegacy -> authority.nodes.any { it.nodeId == node.nodeId }
+    }
+    require(canBind) { "Moving a profile to another Node requires an explicit migration" }
+    return copy(nodeAuthority = ProfileNodeAuthority.Authoritative(node))
+}
 
 data class VaultProfile(
     val id: String,
