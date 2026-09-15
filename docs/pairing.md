@@ -2,6 +2,19 @@
 
 ## Lifecycle and trust boundary
 
+Pairing establishes the identity of a specific Client and Node and authorizes
+that Client's network access. It protects against unpaired Clients, other LAN
+peers, cross-user access, and unintended external access; it does not attest the
+Node software or isolate data from the Node host administrator.
+
+During the current development phase, the paired Node host and its
+administrator/root are trusted. The Node may access plaintext Bronze and
+derived data when required for storage, authoritative Silver refinement,
+search, or AI. Protecting data from a malicious Node administrator is future
+hardening, while authenticated pairing, per-user separation, encrypted storage
+where practical, local-only administration, and restricted network exposure
+remain current requirements.
+
 A fresh database has no `node_state` row. `POST /admin/api/initialize`
 validates the display name and repeated admin password, derives an Argon2id
 password hash, creates an Ed25519 Node key pair, and commits all permanent

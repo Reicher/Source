@@ -13,7 +13,28 @@ Source Node never receives the client's vault key. It can manage accounts,
 quotas, retention, metadata, and ciphertext, but it cannot read an encrypted
 snapshot. Text explicitly sent to chat exists in plaintext in the model
 process during that request. The current version never reads snapshots or adds
-stored personal data to model context.
+stored personal data to model context. These are facts about the implemented
+snapshot API, not a zero-knowledge requirement for the architecture.
+
+## Current trust model and data responsibility
+
+During development, a paired Source Node, its host, and its administrator/root
+are trusted. Node services may access plaintext Bronze and derived data when
+required to store, refine, search, or run AI over it. Protecting that data from
+a malicious Node administrator is a future hardening goal, not a current
+requirement.
+
+Bronze originates on Clients and is synchronized to Node as needed. Persistent
+Silver is produced only by Node and synchronized back to Clients as a cache for
+responsive and offline use. A disconnected Client remains usable with local
+Bronze and cached Silver, while new Silver refinement waits for Node. Local
+Client AI may run, but it does not create persistent Silver.
+
+Trusting the Node administrator does not relax the boundaries against other
+actors. Pairing and authentication, user separation, local-only administration,
+restricted LAN exposure, encrypted storage where practical, safe logs and
+backups, and prevention of unintended external access remain current security
+requirements.
 
 ## Repository and host responsibility
 
@@ -40,7 +61,8 @@ Source-compatible client on a trusted LAN
             Source Node -------- inference -------- llama.cpp
                  |
                  +-- user/client identity state and metadata
-                 +-- opaque client-encrypted snapshots
+                 +-- Client-originated Bronze and snapshots
+                 +-- Node-authoritative Silver
 
 Node owner on the physical machine
                  |
@@ -76,9 +98,12 @@ either Source port.
 - Snapshots are written atomically and may be checked against a SHA-256 header.
 - llama.cpp has no published port or normal outbound network.
 
-Stored snapshots are zero-knowledge with respect to the normal Source Node
-service. This does not protect plaintext chat from a malicious host
-administrator during an explicit AI request.
+The currently implemented snapshot API stores client-encrypted blobs and gives
+the normal Node service no decryption key. That defense-in-depth property must
+not be described or relied on as protection from the trusted Node host or its
+administrator, and the storage contract may evolve to give Node the plaintext
+access required for authoritative Silver refinement. Future protection from a
+malicious/root Node administrator requires a separate design.
 
 ## Installation
 
