@@ -13,11 +13,8 @@ import com.source.client.model.ChatConversation
 import com.source.client.model.ChatConversationTombstone
 import com.source.client.model.ChatConversations
 import com.source.client.model.ChatMessage
-import com.source.client.model.ProfileNodeAuthority
 import com.source.client.model.TrustedNode
-import com.source.client.model.authoritativeNode
 import com.source.client.model.bindAuthoritativeNode
-import org.json.JSONArray
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -302,33 +299,6 @@ class SecureVaultDeviceTest {
         password.fill('\u0000')
     }
 
-    @Test
-    fun legacyMultipleNodeTrustRemainsAmbiguousUntilOneKnownNodeIsExplicitlySelected() {
-        val vault = SecureVault(context, preferencesName, alias)
-        val password = "old password".toCharArray()
-        val created = vault.create("Robin", password)
-        val first = trustedNode("first-node")
-        val second = trustedNode("second-node")
-        replaceVaultPayloadWithLegacyVersion(created, listOf(first, second))
-        val profileId = created.profileId
-        created.close()
-
-        val ambiguous = vault.unlock(profileId, password)!!
-        val authority = ambiguous.vault.nodeAuthority as ProfileNodeAuthority.AmbiguousLegacy
-        assertEquals(listOf("first-node", "second-node"), authority.nodes.map { it.nodeId })
-        assertNull(ambiguous.vault.authoritativeNode)
-
-        ambiguous.vault = ambiguous.vault.bindAuthoritativeNode(second)
-        vault.save(ambiguous)
-        ambiguous.close()
-
-        val reopened = vault.unlock(profileId, password)!!
-        assertEquals("second-node", reopened.vault.authoritativeNode?.nodeId)
-        assertTrue(reopened.vault.nodeAuthority is ProfileNodeAuthority.Authoritative)
-        reopened.close()
-        password.fill('\u0000')
-    }
-
     private fun cleanup() {
         context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE).edit().clear().commit()
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -340,42 +310,6 @@ class SecureVaultDeviceTest {
     private fun conversations(messages: List<ChatMessage>): ChatConversations {
         val conversation = ChatConversation(id = "conversation-test", messages = messages)
         return ChatConversations(listOf(conversation), conversation.id)
-    }
-
-    private fun replaceVaultPayloadWithLegacyVersion(session: VaultSession, nodes: List<TrustedNode>) {
-        val identity = session.vault.identity
-        val plaintext = JSONObject().apply {
-            put("version", 1)
-            put("identity", JSONObject().apply {
-                put("userId", identity.userId)
-                put("userDisplayName", identity.userDisplayName)
-                put("clientId", identity.clientId)
-                put("clientDisplayName", identity.clientDisplayName)
-                put("clientPublicKey", identity.clientPublicKey)
-                put("clientPrivateKey", identity.clientPrivateKey)
-            })
-            put("trustedNodes", JSONArray().apply {
-                nodes.forEach { node ->
-                    put(JSONObject().apply {
-                        put("nodeId", node.nodeId)
-                        put("nodePublicKey", node.nodePublicKey)
-                        put("tlsCaCertificate", node.tlsCaCertificate)
-                        put("displayName", node.displayName)
-                        put("clientCredential", node.clientCredential)
-                        put("userId", node.userId)
-                        put("clientId", node.clientId)
-                    })
-                }
-            })
-        }.toString().toByteArray()
-        val nonce = ByteArray(12) { (it + 1).toByte() }
-        val ciphertext = SourceCrypto.encrypt(session.key, plaintext, nonce)
-        plaintext.fill(0)
-        val prefix = "profile.${session.profileId}."
-        assertTrue(context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE).edit()
-            .putString("${prefix}vault_nonce", SourceCrypto.base64Url(nonce))
-            .putString("${prefix}vault_data", SourceCrypto.base64Url(ciphertext))
-            .commit())
     }
 
     private fun trustedNode(nodeId: String) = TrustedNode(

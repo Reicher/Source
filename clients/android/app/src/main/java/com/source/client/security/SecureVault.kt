@@ -7,7 +7,6 @@ import android.security.keystore.KeyProperties
 import com.source.client.R
 import com.source.client.storage.SourceDataDescriptor
 import com.source.client.model.LocalIdentity
-import com.source.client.model.ProfileNodeAuthority
 import com.source.client.model.TrustedNode
 import com.source.client.model.UnlockedVault
 import com.source.client.model.VaultProfile
@@ -302,57 +301,22 @@ class SecureVault(
             put("clientPublicKey", vault.identity.clientPublicKey)
             put("clientPrivateKey", vault.identity.clientPrivateKey)
         })
-        put("nodeAuthority", encodeNodeAuthority(vault.nodeAuthority))
+        vault.authoritativeNode?.let { put("authoritativeNode", encodeTrustedNode(it)) }
     }.toString()
 
     private fun decode(raw: String): UnlockedVault {
         val root = JSONObject(raw)
-        val version = root.getInt("version")
-        require(version == 1 || version == 2)
+        require(root.getInt("version") == 2)
         val identity = root.getJSONObject("identity").let {
             LocalIdentity(
                 it.getString("userId"), it.getString("userDisplayName"), it.getString("clientId"),
                 it.getString("clientDisplayName"), it.getString("clientPublicKey"), it.getString("clientPrivateKey"),
             )
         }
-        val authority = if (version == 1) {
-            decodeLegacyAuthority(root.getJSONArray("trustedNodes"))
-        } else {
-            decodeNodeAuthority(root.getJSONObject("nodeAuthority"))
-        }
-        return UnlockedVault(identity, authority)
-    }
-
-    private fun encodeNodeAuthority(authority: ProfileNodeAuthority): JSONObject = JSONObject().apply {
-        when (authority) {
-            ProfileNodeAuthority.Unpaired -> put("status", "unpaired")
-            is ProfileNodeAuthority.Authoritative -> {
-                put("status", "authoritative")
-                put("node", encodeTrustedNode(authority.node))
-            }
-            is ProfileNodeAuthority.AmbiguousLegacy -> {
-                put("status", "ambiguous_legacy")
-                put("nodes", JSONArray().apply { authority.nodes.forEach { put(encodeTrustedNode(it)) } })
-            }
-        }
-    }
-
-    private fun decodeNodeAuthority(raw: JSONObject): ProfileNodeAuthority = when (raw.getString("status")) {
-        "unpaired" -> ProfileNodeAuthority.Unpaired
-        "authoritative" -> ProfileNodeAuthority.Authoritative(decodeTrustedNode(raw.getJSONObject("node")))
-        "ambiguous_legacy" -> decodeLegacyAuthority(raw.getJSONArray("nodes")).also {
-            require(it is ProfileNodeAuthority.AmbiguousLegacy)
-        }
-        else -> throw IllegalArgumentException("Unsupported Node authority status")
-    }
-
-    private fun decodeLegacyAuthority(raw: JSONArray): ProfileNodeAuthority {
-        val nodes = List(raw.length()) { decodeTrustedNode(raw.getJSONObject(it)) }
-        return when (nodes.size) {
-            0 -> ProfileNodeAuthority.Unpaired
-            1 -> ProfileNodeAuthority.Authoritative(nodes.single())
-            else -> ProfileNodeAuthority.AmbiguousLegacy(nodes)
-        }
+        return UnlockedVault(
+            identity,
+            root.optJSONObject("authoritativeNode")?.let(::decodeTrustedNode),
+        )
     }
 
     private fun encodeTrustedNode(node: TrustedNode): JSONObject = JSONObject().apply {

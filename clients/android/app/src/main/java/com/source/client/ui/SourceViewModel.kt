@@ -19,7 +19,6 @@ import com.source.client.model.DiscoveredNode
 import com.source.client.model.NodeConnectionState
 import com.source.client.model.NodeDisconnectReason
 import com.source.client.model.PairingInvitation
-import com.source.client.model.ProfileNodeAuthority
 import com.source.client.model.VaultProfile
 import com.source.client.protocol.PairingPayloadException
 import com.source.client.protocol.PairingPayloadError
@@ -458,29 +457,10 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         val activeSession = session ?: return
-        when (val authority = activeSession.vault.nodeAuthority) {
-            is ProfileNodeAuthority.Authoritative -> if (authority.node.nodeId != invitation.nodeId) {
-                _screen.value = scanner.copy(error = message(R.string.error_profile_bound_to_another_node))
-                return
-            }
-            is ProfileNodeAuthority.AmbiguousLegacy -> {
-                val trusted = authority.nodes.firstOrNull { it.nodeId == invitation.nodeId }
-                if (trusted == null) {
-                    _screen.value = scanner.copy(error = message(R.string.error_node_authority_ambiguous))
-                    return
-                }
-                if (trusted.nodePublicKey != invitation.nodePublicKey ||
-                    trusted.tlsCaCertificate != invitation.tlsCaCertificate
-                ) {
-                    _screen.value = scanner.copy(error = message(R.string.error_qr_node_identity_mismatch))
-                    return
-                }
-                _screen.value = AppScreen.Pairing(invitation.nodeName)
-                nodeConnection.beginPairing(scanner.node, invitation.nodeName)
-                nodeConnection.selectLegacyAuthority(activeSession, scanner.node, trusted)
-                return
-            }
-            ProfileNodeAuthority.Unpaired -> Unit
+        val authority = activeSession.vault.authoritativeNode
+        if (authority != null && authority.nodeId != invitation.nodeId) {
+            _screen.value = scanner.copy(error = message(R.string.error_profile_bound_to_another_node))
+            return
         }
         if (invitation.recovery) {
             _screen.value = AppScreen.Recovery(scanner.node, invitation)

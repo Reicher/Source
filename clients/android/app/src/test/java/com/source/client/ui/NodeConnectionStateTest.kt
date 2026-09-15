@@ -2,11 +2,10 @@ package com.source.client.ui
 
 import com.source.client.model.ConnectedNode
 import com.source.client.model.DiscoveredNode
+import com.source.client.model.LocalIdentity
 import com.source.client.model.NodeConnectionState
-import com.source.client.model.ProfileNodeAuthority
 import com.source.client.model.TrustedNode
 import com.source.client.model.UnlockedVault
-import com.source.client.model.LocalIdentity
 import com.source.client.model.bindAuthoritativeNode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -38,25 +37,23 @@ class NodeConnectionStateTest {
     @Test
     fun `automatic reconnect ignores discovery order and selects only the authoritative node`() {
         val other = discovered.copy(serviceName = "other", nodeIdHint = "other", displayName = "Other")
-        val authority = ProfileNodeAuthority.Authoritative(trusted)
 
-        val candidate = authority.automaticConnectionCandidate(listOf(other, discovered))
+        val candidate = trusted.automaticConnectionCandidate(listOf(other, discovered))
 
         assertEquals(discovered, candidate?.first)
         assertEquals(trusted, candidate?.second)
-        assertNull(authority.automaticConnectionCandidate(listOf(other)))
+        assertNull(trusted.automaticConnectionCandidate(listOf(other)))
     }
 
     @Test
-    fun `ambiguous legacy trust never produces an automatic reconnect candidate`() {
-        val otherTrusted = trusted.copy(nodeId = "other", displayName = "Other")
-        val authority = ProfileNodeAuthority.AmbiguousLegacy(listOf(otherTrusted, trusted))
+    fun `unpaired profiles expose every discovered node without selecting one automatically`() {
+        val other = discovered.copy(serviceName = "other", nodeIdHint = "other", displayName = "Other")
+        val discoveries = listOf(other, discovered)
+        val authority: TrustedNode? = null
 
-        assertNull(authority.automaticConnectionCandidate(listOf(discovered)))
-        assertEquals(listOf(discovered), authority.manuallySelectableNodes(listOf(
-            discovered.copy(nodeIdHint = "unrelated"),
-            discovered,
-        )))
+        assertNull(authority.automaticConnectionCandidate(discoveries))
+        assertEquals(discoveries, authority.manuallySelectableNodes(discoveries))
+        assertEquals(discoveries, NodeConnectionState.Found(discoveries).selectableNodes())
     }
 
     @Test
@@ -69,6 +66,6 @@ class NodeConnectionStateTest {
         }
         assertEquals(trusted.copy(displayName = "Renamed"), vault.bindAuthoritativeNode(
             trusted.copy(displayName = "Renamed"),
-        ).nodeAuthority.let { (it as ProfileNodeAuthority.Authoritative).node })
+        ).authoritativeNode)
     }
 }

@@ -6,9 +6,7 @@ import com.source.client.model.DiscoveredNode
 import com.source.client.model.NodeConnectionState
 import com.source.client.model.NodeDisconnectReason
 import com.source.client.model.NodeRecoveryPhase
-import com.source.client.model.ProfileNodeAuthority
 import com.source.client.model.TrustedNode
-import com.source.client.model.authoritativeNode
 import com.source.client.model.bindAuthoritativeNode
 import com.source.client.security.SourceCrypto
 import com.source.client.security.VaultSession
@@ -27,21 +25,18 @@ internal fun NodeConnectionState.isAuthenticating(node: DiscoveredNode): Boolean
     this is NodeConnectionState.Authenticating &&
         this.node.serviceName == node.serviceName && this.node.apiBaseUrl == node.apiBaseUrl
 
-internal fun ProfileNodeAuthority.automaticConnectionCandidate(
+internal fun TrustedNode?.automaticConnectionCandidate(
     nodes: List<DiscoveredNode>,
 ): Pair<DiscoveredNode, TrustedNode>? {
-    val trusted = (this as? ProfileNodeAuthority.Authoritative)?.node ?: return null
+    val trusted = this ?: return null
     return nodes.firstOrNull { it.nodeIdHint == trusted.nodeId }?.let { it to trusted }
 }
 
-internal fun ProfileNodeAuthority.manuallySelectableNodes(nodes: List<DiscoveredNode>): List<DiscoveredNode> = when (this) {
-    ProfileNodeAuthority.Unpaired -> nodes
-    is ProfileNodeAuthority.Authoritative -> emptyList()
-    is ProfileNodeAuthority.AmbiguousLegacy -> {
-        val legacyIds = this.nodes.mapTo(mutableSetOf(), TrustedNode::nodeId)
-        nodes.filter { it.nodeIdHint in legacyIds }
-    }
-}
+internal fun TrustedNode?.manuallySelectableNodes(nodes: List<DiscoveredNode>): List<DiscoveredNode> =
+    if (this == null) nodes else emptyList()
+
+internal fun NodeConnectionState.selectableNodes(): List<DiscoveredNode> =
+    (this as? NodeConnectionState.Found)?.nodes.orEmpty()
 
 internal class NodeConnection(
     private val app: SourceClientApplication,
@@ -135,12 +130,6 @@ internal class NodeConnection(
         app.secureVault.save(activeSession)
     }
 
-    fun selectLegacyAuthority(activeSession: VaultSession, discovered: DiscoveredNode, trusted: TrustedNode) {
-        saveAuthoritativeNode(activeSession, trusted)
-        transition(NodeConnectionState.Disconnected(trusted, NodeDisconnectReason.NOT_FOUND))
-        authenticate(discovered, trusted)
-    }
-
     suspend fun acceptConnection(discovered: DiscoveredNode, trusted: TrustedNode) {
         transition(NodeConnectionState.Connected(connectedNode(discovered, trusted)))
         onConnected()
@@ -148,12 +137,11 @@ internal class NodeConnection(
     }
 
     fun stateForCurrentNodes(): NodeConnectionState {
-        val authority = session()?.vault?.nodeAuthority ?: ProfileNodeAuthority.Unpaired
+        val authority = session()?.vault?.authoritativeNode
         val nodes = app.nodeDiscovery.nodes.value
         val selectable = authority.manuallySelectableNodes(nodes)
         return when {
-            authority is ProfileNodeAuthority.Authoritative ->
-                NodeConnectionState.Disconnected(authority.node, NodeDisconnectReason.NOT_FOUND)
+            authority != null -> NodeConnectionState.Disconnected(authority, NodeDisconnectReason.NOT_FOUND)
             selectable.isNotEmpty() -> NodeConnectionState.Found(selectable)
             else -> NodeConnectionState.Discovering
         }
@@ -186,7 +174,7 @@ internal class NodeConnection(
             return
         }
         app.nodeDiscovery.start()
-        val authority = activeSession.vault.nodeAuthority
+        val authority = activeSession.vault.authoritativeNode
         val candidate = authority.automaticConnectionCandidate(nodes)
         if (candidate != null) {
             val connected = current
@@ -202,8 +190,7 @@ internal class NodeConnection(
         val selectable = authority.manuallySelectableNodes(nodes)
         transition(
             when {
-                authority is ProfileNodeAuthority.Authoritative ->
-                    NodeConnectionState.Disconnected(authority.node, NodeDisconnectReason.NOT_FOUND)
+                authority != null -> NodeConnectionState.Disconnected(authority, NodeDisconnectReason.NOT_FOUND)
                 selectable.isNotEmpty() -> NodeConnectionState.Found(selectable)
                 else -> NodeConnectionState.Discovering
             },

@@ -387,10 +387,34 @@ private fun NodeConnectionSummary(
     retry: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val node = (status as? NodeConnectionState.Found)?.nodes?.firstOrNull()
+    val selectable = status.selectableNodes()
+    if (selectable.isNotEmpty()) {
+        Column(modifier) {
+            selectable.forEach { node ->
+                Row(
+                    Modifier.fillMaxWidth().heightIn(min = 32.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(Modifier.size(8.dp).background(Color(0xFF9A6A24), CircleShape))
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = node.displayName,
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = Ink.copy(alpha = .58f),
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    TextButton(onClick = { connect(node) }) { Text(stringResource(R.string.connect)) }
+                }
+            }
+        }
+        return
+    }
     val label = when (status) {
         NodeConnectionState.Discovering -> stringResource(R.string.this_device)
-        is NodeConnectionState.Found -> node?.displayName ?: stringResource(R.string.node)
+        is NodeConnectionState.Found -> stringResource(R.string.node)
         is NodeConnectionState.Pairing -> status.name
         is NodeConnectionState.Recovering -> status.name
         is NodeConnectionState.Authenticating -> status.trusted.displayName
@@ -426,11 +450,8 @@ private fun NodeConnectionSummary(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        when {
-            node != null -> TextButton(onClick = { connect(node) }) { Text(stringResource(R.string.connect)) }
-            status is NodeConnectionState.Failed && status.canRetry -> TextButton(onClick = retry) {
-                Text(stringResource(R.string.try_again))
-            }
+        if (status is NodeConnectionState.Failed && status.canRetry) {
+            TextButton(onClick = retry) { Text(stringResource(R.string.try_again)) }
         }
     }
 }
