@@ -7,6 +7,8 @@ Source currently believes about those observations.
 This document is the normative model for Silver. It defines data semantics, not
 a storage schema, processing protocol, or API wire format. The ownership rules
 below are nevertheless an architectural constraint on every implementation.
+The shared revision, synchronization, cache, and deletion behavior is defined
+by [`STORAGE_AND_SYNC.md`](STORAGE_AND_SYNC.md).
 
 ## Boundary
 
