@@ -26,10 +26,25 @@ debugging but are not shown by default.
 
 ## Ownership and availability
 
-Bronze originates on Clients. Clients keep their local Bronze and synchronize
-the material a trusted Node needs for backup or refinement. The Node is the only
-producer and authority for persistent Silver. It synchronizes relevant Silver
-back to Clients, which may cache it for responsive and offline use.
+The current authority model is:
+
+```text
+one profile -> multiple Clients -> one authoritative Node
+```
+
+Bronze originates on Clients. Multiple Clients may belong to one profile; they
+keep their local Bronze and synchronize the material that profile's
+authoritative Node needs for backup or refinement. Only one Node is authoritative
+for a profile at a time. It is the sole producer and authority for the profile's
+persistent Silver and synchronizes relevant Silver back to Clients, which may
+cache it for responsive and offline use.
+
+Clients MUST reconnect to the specific Node paired as authoritative for their
+profile. They MUST NOT select among multiple trusted Nodes or accept Silver from
+whichever Node is discovered first. Automatic failover, Node-to-Node
+synchronization, cross-Node Silver merging or reconciliation, and concurrent
+multi-Node authority are not supported by the current foundation. Replacing or
+migrating the authoritative Node may be added later as an explicit operation.
 
 A Client may run local AI or other local analysis, including while disconnected,
 but it MUST NOT add those results to a competing persistent Silver history. Such
@@ -37,13 +52,16 @@ results remain transient or use a representation outside authoritative Silver.
 Without a Node, the Client remains usable with local Bronze and cached Silver;
 new Silver refinement waits until the Node is available.
 
-This rule gives Source one refinement and synchronization history. It does not
-make the Node host a zero-knowledge party: during the current development phase,
-the Node host and administrator/root are trusted, and Node processing may access
-plaintext Bronze and derived data. Isolation from a malicious Node administrator
-is future hardening. Pairing, authenticated transport, separation between users,
-encrypted storage where practical, and protection from unintended network or
-external access remain current security requirements.
+This single-Node rule gives each profile one refinement and synchronization
+history. Long-term multi-Node support remains a goal, but its coordination model
+must be designed separately rather than weakening current Silver authority. The
+rule does not make the authoritative Node host a zero-knowledge party: during
+the current development phase, the Node host and administrator/root are trusted,
+and Node processing may access plaintext Bronze and derived data. Isolation from
+a malicious Node administrator is future hardening. Pairing, authenticated
+transport, separation between users, encrypted storage where practical, and
+protection from unintended network or external access remain current security
+requirements.
 
 ## Shared rules
 

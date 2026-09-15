@@ -37,7 +37,7 @@ Source has three primary parts:
 
 - **Source Client** is the user's application. It owns the local profile and
   keys, encrypted local storage, offline behavior, user interface, and
-  connections to trusted Nodes.
+  connection to the profile's authoritative Node.
 - **Source Node** is an optional, more capable local installation. It provides
   larger storage, backup, synchronization, search, processing, and AI over a
   trusted local network.
@@ -51,6 +51,17 @@ API permissions they need. Thoughts is the first intended Source-compatible
 application and remains a separate project.
 
 ## Client and Node
+
+The current foundation has one authority relationship:
+
+```text
+one profile -> multiple Clients -> one authoritative Node
+```
+
+A profile may have multiple Clients, but only one Node is authoritative for the
+profile at a time. That Node owns its persistent Silver and server-side
+processing. Clients do not choose between multiple trusted Nodes or accept
+Silver from whichever Node is discovered first.
 
 A Client must be installable and usable without a Node. It keeps the user's
 identity, private keys, Client-originated Bronze, and relevant cached Silver
@@ -67,9 +78,9 @@ A Node has a permanent cryptographic identity independent of its editable
 display name. It can be discovered on the local network, but accepts a new user
 or Client only through a short-lived, administrator-authorized pairing flow
 initiated locally at the Node. Pairing establishes mutual cryptographic trust;
-normal reconnection is automatic after that. The identity model must allow
-multiple Clients per user even when an early product version supports a simpler
-flow.
+normal reconnection targets that specific paired Node after that. The identity
+model must allow multiple Clients per profile even when an early product version
+supports a simpler flow. Automatic failover to another Node is not supported.
 
 Node administration controls the installation, users, Clients, quotas, and
 service health. Administrative access must remain local to the physical
@@ -83,15 +94,19 @@ current requirements.
 
 ## Data, backup, and synchronization
 
-Bronze originates on Clients and is synchronized to a trusted Node as needed
-for backup and processing. A Node may therefore hold a more complete Bronze
-history than any one Client. Persistent Silver is authoritative on the Node and
-Clients synchronize and cache the relevant subset for responsive daily and
-offline use.
+Bronze originates on Clients and is synchronized to the profile's authoritative
+Node as needed for backup and processing. That Node may therefore hold a more
+complete Bronze history than any one Client. Its persistent Silver is
+authoritative, and Clients synchronize and cache the relevant subset for
+responsive daily and offline use.
 
 Backup and synchronization are separate concerns. Versioning, retention,
 conflict resolution, and selective synchronization require explicit contracts
 as those features are implemented; they are not fixed by this vision.
+Node-to-Node synchronization, failover, and Silver reconciliation are future
+work. A profile may eventually replace or migrate to another authoritative Node
+through an explicit operation, but implicit authority changes are not part of
+the current foundation.
 
 ## Knowledge architecture
 
@@ -169,6 +184,10 @@ A local terminal interface is the preferred long-term administration surface;
 the current localhost-only web interface is an implementation step. A dedicated
 Node should not expose public internet services and should communicate only with
 trusted devices on the local network.
+
+Multiple Nodes remain a long-term direction for resilience, migration, and
+larger installations. Cross-Node coordination and multi-Node authority need an
+explicit design and must not complicate the current one-Node-per-profile model.
 
 ## Current specifications
 

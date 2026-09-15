@@ -24,11 +24,27 @@ required to store, refine, search, or run AI over it. Protecting that data from
 a malicious Node administrator is a future hardening goal, not a current
 requirement.
 
-Bronze originates on Clients and is synchronized to Node as needed. Persistent
-Silver is produced only by Node and synchronized back to Clients as a cache for
-responsive and offline use. A disconnected Client remains usable with local
-Bronze and cached Silver, while new Silver refinement waits for Node. Local
-Client AI may run, but it does not create persistent Silver.
+The current operational relationship is:
+
+```text
+one profile -> multiple Clients -> one authoritative Node
+```
+
+Multiple Clients may belong to the same profile, but only one Node is
+authoritative for it at a time. Bronze originates on those Clients and is
+synchronized to that Node as needed. The authoritative Node owns all persistent
+Silver and server-side processing for the profile, then synchronizes Silver
+back to its Clients as a responsive and offline cache. A disconnected Client
+remains usable with local Bronze and cached Silver, while new Silver refinement
+waits for that Node. Local Client AI may run, but it does not create persistent
+Silver.
+
+Discovery and reconnect target the authoritative Node's persisted identity;
+Clients do not choose another Node because it responds first. Automatic Node
+failover, Node-to-Node synchronization, Silver reconciliation across Nodes, and
+concurrent multi-Node authority are not supported. A future explicit operation
+may replace or migrate the authoritative Node. Long-term multi-Node support must
+not add coordination paths to the current foundation before that design exists.
 
 Trusting the Node administrator does not relax the boundaries against other
 actors. Pairing and authentication, user separation, local-only administration,
@@ -50,7 +66,7 @@ repository.
 ## Trust zones
 
 ```text
-Source-compatible client on a trusted LAN
+Source-compatible Client for one profile
                  |
                  | HTTPS, local CA, :8443
                  v
@@ -58,7 +74,7 @@ Source-compatible client on a trusted LAN
                  |
                  | internal HTTP
                  v
-            Source Node -------- inference -------- llama.cpp
+       authoritative Source Node -------- inference -------- llama.cpp
                  |
                  +-- user/client identity state and metadata
                  +-- Client-originated Bronze and snapshots
