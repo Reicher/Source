@@ -140,6 +140,13 @@ CREATE TABLE silver_refinement_operations(
     PRIMARY KEY(user_id,operation_id)
 ) STRICT;`,
 	},
+	{
+		version: 6,
+		up: `
+ALTER TABLE silver_refinement_operations ADD COLUMN operation_kind TEXT NOT NULL DEFAULT 'refinement' CHECK(operation_kind IN ('refinement','removal'));
+ALTER TABLE silver_refinement_operations ADD COLUMN requires_silver_change INTEGER NOT NULL DEFAULT 0 CHECK(requires_silver_change IN (0,1));
+ALTER TABLE silver_refinement_operations ADD COLUMN completed_at INTEGER;`,
+	},
 }
 
 const schemaVersionTable = `

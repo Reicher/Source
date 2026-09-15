@@ -14,7 +14,11 @@ import (
 	localai "source.local/node/internal/ai"
 )
 
-const maximumChunkBytes = 2400
+const (
+	maximumChunkBytes       = 2400
+	maximumRefinementChunks = 8
+	maximumRefinementBytes  = maximumChunkBytes * maximumRefinementChunks
+)
 
 type extractedGeneration struct {
 	Evidence     []Evidence

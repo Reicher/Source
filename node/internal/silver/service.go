@@ -123,6 +123,9 @@ func (s *Service) Refine(ctx context.Context, userID string, request RefineReque
 	if err != nil {
 		return RefineResult{}, err
 	}
+	if err = s.checkFinalQuota(userID, int64(len(payload))); err != nil {
+		return RefineResult{}, err
+	}
 	node, err := s.db.GetNodeState(false)
 	if err != nil {
 		return RefineResult{}, err
@@ -152,10 +155,13 @@ func (s *Service) Remove(userID string, request RemoveRequest) (RemoveResult, er
 	}
 	digest := sha256.Sum256(requestBytes)
 	now := s.now().UnixMilli()
-	removed, err := s.db.RemoveSilverRefinementSource(userID, request.OperationID,
+	removed, applySilver, err := s.db.RemoveSilverRefinementSource(userID, request.OperationID,
 		hex.EncodeToString(digest[:]), request.SourceID, now)
 	if err != nil {
 		return RemoveResult{}, mapDatabaseError(err)
+	}
+	if !applySilver {
+		return RemoveResult{BronzeRemoved: removed}, nil
 	}
 	dataset, err := s.currentDataset(userID)
 	if err != nil {
@@ -171,6 +177,9 @@ func (s *Service) Remove(userID string, request RemoveRequest) (RemoveResult, er
 		return RemoveResult{}, err
 	}
 	if string(before) == string(after) {
+		if err = s.db.MarkSilverRemovalComplete(userID, request.OperationID, now); err != nil {
+			return RemoveResult{}, err
+		}
 		return RemoveResult{BronzeRemoved: removed}, nil
 	}
 	node, err := s.db.GetNodeState(false)
@@ -182,6 +191,9 @@ func (s *Service) Remove(userID string, request RemoveRequest) (RemoveResult, er
 		DatasetFormatVersion, after, updated.ModifiedAtMillis, s.maximumBytes,
 	)
 	if err != nil {
+		return RemoveResult{}, err
+	}
+	if err = s.db.MarkSilverRemovalComplete(userID, request.OperationID, now); err != nil {
 		return RemoveResult{}, err
 	}
 	return RemoveResult{BronzeRemoved: removed, SilverChanged: created, Receipt: &receipt}, nil
@@ -208,6 +220,32 @@ func (s *Service) checkQuota(userID string, source Source) error {
 		return apperror.New(404, "user_not_found", "User storage namespace is unavailable.")
 	}
 	if legacyBytes+canonicalBytes+bronzeBytes+int64(len([]byte(source.Text))) > user.QuotaBytes {
+		return apperror.New(413, "storage_quota_exceeded", "User storage quota exceeded")
+	}
+	return nil
+}
+
+func (s *Service) checkFinalQuota(userID string, payloadBytes int64) error {
+	legacyBytes, err := s.db.TotalStorageBytes(userID)
+	if err != nil {
+		return err
+	}
+	canonicalBytes, err := s.db.CanonicalStorageBytes(userID)
+	if err != nil {
+		return err
+	}
+	bronzeBytes, err := s.db.SilverRefinementBytes(userID)
+	if err != nil {
+		return err
+	}
+	user, err := s.db.FindUser(userID)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return apperror.New(404, "user_not_found", "User storage namespace is unavailable.")
+	}
+	if legacyBytes+canonicalBytes+bronzeBytes+payloadBytes > user.QuotaBytes {
 		return apperror.New(413, "storage_quota_exceeded", "User storage quota exceeded")
 	}
 	return nil
@@ -457,6 +495,9 @@ func validateRequest(request RefineRequest) error {
 		!validOpenText(source.ID, 240) || !validOpenText(source.Name, 255) || !validOpenText(source.SourceType, 64) ||
 		!shaPattern.MatchString(source.ContentSHA256) || strings.TrimSpace(source.Text) == "" {
 		return apperror.New(400, "invalid_silver_refinement", "The Silver refinement request is invalid.")
+	}
+	if len([]byte(source.Text)) > maximumRefinementBytes {
+		return apperror.New(413, "silver_source_too_large", "The Bronze source is too large for one bounded refinement request.")
 	}
 	digest := sha256.Sum256([]byte(source.Text))
 	if hex.EncodeToString(digest[:]) != source.ContentSHA256 {

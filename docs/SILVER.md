@@ -445,6 +445,11 @@ as a Node-originated canonical revision. A lost response or disconnect may
 repeat the submission, but operation identity plus source/content identity make
 both Bronze acceptance and Silver generation idempotent.
 
+One refinement request is bounded to eight deterministic 2,400-byte chunks
+(19,200 UTF-8 bytes total). The Node rejects larger requests before accepting
+Bronze or invoking the model, preventing a single HTTP request from expanding
+into hundreds of sequential model calls without a durable checkpoint.
+
 Entity resolution remains deliberately separate: candidate Observations do not
 create global Entities by themselves. The Node owns the conservative resolution
 step, its opaque Entity UUIDs, and its evidence-backed Claims. Candidate excerpts may

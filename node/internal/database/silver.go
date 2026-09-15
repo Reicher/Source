@@ -67,8 +67,17 @@ WHERE user_id=? AND source_id=?`, source.Name, source.SourceType, userID, source
 	if err != nil {
 		return SilverRefinementSource{}, false, err
 	}
+	if changed {
+		// A newer accepted generation supersedes any interrupted removal for the
+		// previous generation. Replaying that removal must not delete this source.
+		if _, err = tx.Exec(`UPDATE silver_refinement_operations SET completed_at=?
+WHERE user_id=? AND source_id=? AND operation_kind='removal' AND completed_at IS NULL`,
+			source.AcceptedAt, userID, source.SourceID); err != nil {
+			return SilverRefinementSource{}, false, err
+		}
+	}
 	if _, err = tx.Exec(`INSERT INTO silver_refinement_operations(
-user_id,operation_id,request_digest,source_id) VALUES(?,?,?,?)`,
+user_id,operation_id,request_digest,source_id,operation_kind) VALUES(?,?,?,?,'refinement')`,
 		userID, operationID, requestDigest, source.SourceID); err != nil {
 		return SilverRefinementSource{}, false, err
 	}
@@ -115,33 +124,33 @@ WHERE user_id=? AND source_id=? AND content_sha256=?`,
 func (d *DB) RemoveSilverRefinementSource(
 	userID, operationID, requestDigest, sourceID string,
 	now int64,
-) (bool, error) {
+) (bool, bool, error) {
 	tx, err := d.sql.Begin()
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	defer tx.Rollback()
-	var priorDigest, priorSourceID string
-	err = tx.QueryRow(`SELECT request_digest,source_id FROM silver_refinement_operations
-WHERE user_id=? AND operation_id=?`, userID, operationID).Scan(&priorDigest, &priorSourceID)
+	var priorDigest, priorSourceID, priorKind string
+	var requiresSilverChange int
+	var completedAt *int64
+	err = tx.QueryRow(`SELECT request_digest,source_id,operation_kind,requires_silver_change,completed_at
+FROM silver_refinement_operations WHERE user_id=? AND operation_id=?`, userID, operationID).
+		Scan(&priorDigest, &priorSourceID, &priorKind, &requiresSilverChange, &completedAt)
 	if err == nil {
-		if priorDigest != requestDigest || priorSourceID != sourceID {
-			return false, SyncFailure{"idempotency_conflict", "The operation identifier was reused for a different Silver removal."}
+		if priorDigest != requestDigest || priorSourceID != sourceID || priorKind != "removal" {
+			return false, false, SyncFailure{"idempotency_conflict", "The operation identifier was reused for a different Silver removal."}
 		}
-		return false, tx.Commit()
+		return false, requiresSilverChange == 1 && completedAt == nil, tx.Commit()
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return false, err
+		return false, false, err
 	}
 	var removedAt *int64
 	err = tx.QueryRow(`SELECT removed_at FROM silver_refinement_sources
 WHERE user_id=? AND source_id=?`, userID, sourceID).Scan(&removedAt)
 	changed := errors.Is(err, sql.ErrNoRows) || removedAt == nil
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return false, err
-	}
-	if !changed {
-		return false, tx.Commit()
+		return false, false, err
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		_, err = tx.Exec(`INSERT INTO silver_refinement_sources(
@@ -153,14 +162,36 @@ refined_processor_version=NULL,refined_model_id=NULL,refined_at=NULL
 WHERE user_id=? AND source_id=?`, now, userID, sourceID)
 	}
 	if err != nil {
-		return false, err
+		return false, false, err
+	}
+	completedAt = nil
+	if !changed {
+		completedAt = &now
 	}
 	_, err = tx.Exec(`INSERT INTO silver_refinement_operations(
-user_id,operation_id,request_digest,source_id) VALUES(?,?,?,?)`, userID, operationID, requestDigest, sourceID)
+user_id,operation_id,request_digest,source_id,operation_kind,requires_silver_change,completed_at)
+VALUES(?,?,?,?,'removal',?,?)`, userID, operationID, requestDigest, sourceID, changed, completedAt)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
-	return changed, tx.Commit()
+	return changed, changed, tx.Commit()
+}
+
+func (d *DB) MarkSilverRemovalComplete(userID, operationID string, now int64) error {
+	result, err := d.sql.Exec(`UPDATE silver_refinement_operations SET completed_at=?
+WHERE user_id=? AND operation_id=? AND operation_kind='removal' AND completed_at IS NULL`,
+		now, userID, operationID)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count > 1 {
+		return errors.New("multiple Silver removal operations were completed")
+	}
+	return nil
 }
 
 func (d *DB) NextOriginSequence(userID, originID, originEpoch string) (int64, error) {
@@ -174,5 +205,12 @@ func (d *DB) SilverRefinementBytesExcept(userID, sourceID string) (int64, error)
 	var bytes int64
 	err := d.sql.QueryRow(`SELECT COALESCE(SUM(length(CAST(plaintext AS BLOB))),0)
 FROM silver_refinement_sources WHERE user_id=? AND source_id<>?`, userID, sourceID).Scan(&bytes)
+	return bytes, err
+}
+
+func (d *DB) SilverRefinementBytes(userID string) (int64, error) {
+	var bytes int64
+	err := d.sql.QueryRow(`SELECT COALESCE(SUM(length(CAST(plaintext AS BLOB))),0)
+FROM silver_refinement_sources WHERE user_id=?`, userID).Scan(&bytes)
 	return bytes, err
 }

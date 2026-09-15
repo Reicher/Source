@@ -697,6 +697,7 @@ class SourceNodeApi {
         "chat_rate_limited" -> "Too many AI requests. Wait a moment."
         "background_ai_rate_limited" -> "Too many background AI requests. Wait a moment."
         "storage_quota_exceeded" -> "The user storage space on the Node is full."
+        "silver_source_too_large" -> "This source is too large for one automatic knowledge refinement."
         "library_item_deleted" -> "The Node has already recorded this item as deleted."
         "library_item_identity_conflict", "library_content_exists" -> "The Node rejected a conflicting Library item."
         else -> "The Node could not complete the request."

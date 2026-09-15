@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"testing"
 	"time"
 
 	localai "source.local/node/internal/ai"
+	"source.local/node/internal/apperror"
 	"source.local/node/internal/database"
 	"source.local/node/internal/security"
 	"source.local/node/internal/storage"
@@ -124,6 +126,76 @@ func TestNodeRefinementIsAuthoritativeAndIdempotentAcrossReconnect(t *testing.T)
 	if err != nil || retryRemoval.SilverChanged {
 		t.Fatalf("removal retry = %#v error=%v", retryRemoval, err)
 	}
+
+	// A distinct no-op removal must still be durable. Replaying it after the
+	// source is re-added must not remove the newer generation.
+	noopRemoval := removal
+	noopRemoval.OperationID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+	if result, removeErr := service.Remove(user.ID, noopRemoval); removeErr != nil || result.BronzeRemoved || result.SilverChanged {
+		t.Fatalf("no-op removal = %#v error=%v", result, removeErr)
+	}
+	now = now.Add(time.Second)
+	readdedRequest := refinementRequest(t, "ffffffff-ffff-4fff-8fff-ffffffffffff", "Source is active again")
+	readded, err := service.Refine(context.Background(), user.ID, readdedRequest)
+	if err != nil || !readded.Refined || ai.calls != 3 {
+		t.Fatalf("re-added source = %#v calls=%d error=%v", readded, ai.calls, err)
+	}
+	if replayed, replayErr := service.Remove(user.ID, noopRemoval); replayErr != nil || replayed.BronzeRemoved || replayed.SilverChanged {
+		t.Fatalf("replayed no-op removal = %#v error=%v", replayed, replayErr)
+	}
+	heads, err = db.SyncHeads(user.ID, Collection, canonicalObjectID(Collection))
+	if err != nil || len(heads) != 1 || heads[0].RevisionID != readded.Receipt.RevisionID {
+		t.Fatalf("replayed no-op removal changed Silver = %#v error=%v", heads, err)
+	}
+
+	oversized := refinementRequest(t, "99999999-9999-4999-8999-999999999999", strings.Repeat("x", maximumRefinementBytes+1))
+	if _, refineErr := service.Refine(context.Background(), user.ID, oversized); errorCode(refineErr) != "silver_source_too_large" {
+		t.Fatalf("oversized refinement error = %v", refineErr)
+	}
+}
+
+func TestFinalQuotaIncludesAcceptedBronzeAndGeneratedSilver(t *testing.T) {
+	db, err := database.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	identity, err := security.GenerateNodeIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.InitializeNode("Node", identity, "password", 1); err != nil {
+		t.Fatal(err)
+	}
+	user, _, err := db.CreatePairedUser("Robin", 100, "recovery", "envelope", database.NewClient{
+		ID: "client-a", DisplayName: "Phone", PublicKey: "public", CredentialHash: "credential", ProtocolVersion: 1,
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = db.UpsertSnapshot(user.ID, "source-client", "snapshot", 30, strings.Repeat("a", 64), 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = db.AcceptSilverRefinementSource(user.ID, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", strings.Repeat("b", 64), database.SilverRefinementSource{
+		SourceID: "source-1", Name: "source.txt", SourceType: "file", ContentSHA256: strings.Repeat("c", 64), Plaintext: strings.Repeat("x", 40), AcceptedAt: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := New(db, nil, nil, 1024, time.Now)
+	if err = service.checkFinalQuota(user.ID, 31); errorCode(err) != "storage_quota_exceeded" {
+		t.Fatalf("combined quota error = %v", err)
+	}
+	if err = service.checkFinalQuota(user.ID, 30); err != nil {
+		t.Fatalf("exact combined quota rejected: %v", err)
+	}
+}
+
+func errorCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	_, code, _ := apperror.Details(err)
+	return code
 }
 
 func refinementRequest(t *testing.T, operationID, text string) RefineRequest {
