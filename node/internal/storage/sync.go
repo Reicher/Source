@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -31,6 +32,17 @@ func (s *Storage) CommitMutation(
 	if err := syncmodel.ValidateMutation(mutation); err != nil {
 		return syncmodel.CommitReceipt{}, nil, false, apperror.Wrap(400, "invalid_mutation", "The canonical storage mutation is invalid.", err)
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.commitMutationLocked(userID, nodeID, mutation, body, maximumBytes)
+}
+
+func (s *Storage) commitMutationLocked(
+	userID, nodeID string,
+	mutation syncmodel.Mutation,
+	body io.Reader,
+	maximumBytes int64,
+) (syncmodel.CommitReceipt, []syncmodel.Revision, bool, error) {
 	mutationDigest, err := syncmodel.MutationDigest(mutation)
 	if err != nil {
 		return syncmodel.CommitReceipt{}, nil, false, err
@@ -44,8 +56,6 @@ func (s *Storage) CommitMutation(
 	revisionDigestSum := sha256.Sum256(revisionDigestBytes)
 	revisionDigest := hex.EncodeToString(revisionDigestSum[:])
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if existing, digest, findErr := s.db.FindSyncOperation(userID, mutation.OperationID); findErr != nil {
 		return syncmodel.CommitReceipt{}, nil, false, findErr
 	} else if existing != nil {
@@ -113,6 +123,70 @@ func (s *Storage) CommitMutation(
 	}
 	heads, err := s.db.SyncHeads(userID, mutation.Revision.ObjectKey.Collection, mutation.Revision.ObjectKey.ObjectID)
 	return receipt, heads, created, err
+}
+
+// CommitNodeValue appends one Node-originated value to the profile's single
+// authoritative history. It is intentionally not exposed through the generic
+// Client mutation endpoint.
+func (s *Storage) CommitNodeValue(
+	userID, nodeID, collection, objectID, format string,
+	formatVersion int,
+	body []byte,
+	createdAt int64,
+	maximumBytes int64,
+) (syncmodel.CommitReceipt, []syncmodel.Revision, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	heads, err := s.db.SyncHeads(userID, collection, objectID)
+	if err != nil {
+		return syncmodel.CommitReceipt{}, nil, false, err
+	}
+	if len(heads) > 1 {
+		return syncmodel.CommitReceipt{}, heads, false, apperror.New(409, "silver_history_conflict", "The authoritative Silver history has multiple heads.")
+	}
+	sum := sha256.Sum256(body)
+	plaintextSHA := hex.EncodeToString(sum[:])
+	if len(heads) == 1 && heads[0].Kind == "content" && heads[0].Payload != nil &&
+		heads[0].Payload.PlaintextSHA256 == plaintextSHA && heads[0].Payload.Format == format &&
+		heads[0].Payload.FormatVersion == formatVersion {
+		return syncmodel.CommitReceipt{RevisionID: heads[0].RevisionID}, heads, false, nil
+	}
+	state, err := s.db.SyncState(userID, nodeID)
+	if err != nil {
+		return syncmodel.CommitReceipt{}, nil, false, mapSyncFailure(err)
+	}
+	sequence, err := s.db.NextOriginSequence(userID, nodeID, state.AuthorityEpoch)
+	if err != nil {
+		return syncmodel.CommitReceipt{}, nil, false, err
+	}
+	operationID, err := security.UUID()
+	if err != nil {
+		return syncmodel.CommitReceipt{}, nil, false, err
+	}
+	parents := make([]string, len(heads))
+	for index := range heads {
+		parents[index] = heads[index].RevisionID
+	}
+	revision := syncmodel.Revision{
+		ObjectKey: syncmodel.ObjectKey{ProfileID: userID, Collection: collection, ObjectID: objectID},
+		Kind:      "content", ParentRevisionIDs: parents,
+		Payload: &syncmodel.Payload{
+			Format: format, FormatVersion: formatVersion,
+			ByteCount: int64(len(body)), PlaintextSHA256: plaintextSHA,
+		},
+		CreatedAtMillis: &createdAt,
+	}
+	revision.RevisionID, err = syncmodel.RevisionID(revision)
+	if err != nil {
+		return syncmodel.CommitReceipt{}, nil, false, err
+	}
+	mutation := syncmodel.Mutation{
+		ContractVersion: syncmodel.ContractVersion, OperationID: operationID,
+		OriginID: nodeID, OriginEpoch: state.AuthorityEpoch, OriginSequence: sequence,
+		ExpectedAuthorityEpoch: state.AuthorityEpoch, Revision: revision,
+	}
+	return s.commitMutationLocked(userID, nodeID, mutation, bytes.NewReader(body), maximumBytes)
 }
 
 func (s *Storage) writeCanonicalPayload(userID string, revision syncmodel.Revision, body io.Reader) (bool, error) {

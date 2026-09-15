@@ -331,6 +331,53 @@ paths:
         "409": { $ref: "#/components/responses/Error" }
         "413": { $ref: "#/components/responses/Error" }
         "415": { $ref: "#/components/responses/Error" }
+  /silver/refinements:
+    post:
+      operationId: refineSilver
+      description: >-
+        Durably accept plaintext Client-originated Bronze, run refinement on the
+        authoritative Node, and atomically append the resulting Node-originated
+        Silver dataset revision. Repeated operations and unchanged Bronze are
+        idempotent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SilverRefinementRequest" }
+      responses:
+        "200":
+          description: Bronze and its authoritative Silver generation already exist.
+          content: { application/json: { schema: { $ref: "#/components/schemas/SilverRefinementResult" } } }
+        "201":
+          description: A new authoritative Silver revision was committed.
+          content: { application/json: { schema: { $ref: "#/components/schemas/SilverRefinementResult" } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "415": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /silver/removals:
+    post:
+      operationId: removeSilverSource
+      description: >-
+        Idempotently tombstone accepted Bronze refinement input and commit the
+        corresponding authoritative Silver invalidation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SilverRemovalRequest" }
+      responses:
+        "200":
+          description: The source was already absent from authoritative Silver.
+          content: { application/json: { schema: { $ref: "#/components/schemas/SilverRemovalResult" } } }
+        "201":
+          description: The authoritative Silver invalidation was committed.
+          content: { application/json: { schema: { $ref: "#/components/schemas/SilverRemovalResult" } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /sync/changes:
     post:
       operationId: readStorageChanges
@@ -408,6 +455,47 @@ components:
         application/octet-stream:
           schema: { type: string, format: binary }
   schemas:
+    SilverRefinementRequest:
+      type: object
+      additionalProperties: false
+      required: [contractVersion, operationId, source]
+      properties:
+        contractVersion: { type: integer, const: 1 }
+        operationId: { type: string, format: uuid }
+        source:
+          type: object
+          additionalProperties: false
+          required: [id, name, sourceType, contentSha256, text]
+          properties:
+            id: { type: string, minLength: 1, maxLength: 240 }
+            name: { type: string, minLength: 1, maxLength: 255 }
+            sourceType: { type: string, minLength: 1, maxLength: 64 }
+            contentSha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+            text: { type: string, minLength: 1 }
+    SilverRefinementResult:
+      type: object
+      additionalProperties: false
+      required: [bronzeAccepted, refined]
+      properties:
+        bronzeAccepted: { type: boolean }
+        refined: { type: boolean }
+        receipt: { $ref: "#/components/schemas/StorageReceipt" }
+    SilverRemovalRequest:
+      type: object
+      additionalProperties: false
+      required: [contractVersion, operationId, sourceId]
+      properties:
+        contractVersion: { type: integer, const: 1 }
+        operationId: { type: string, format: uuid }
+        sourceId: { type: string, minLength: 1, maxLength: 240 }
+    SilverRemovalResult:
+      type: object
+      additionalProperties: false
+      required: [bronzeRemoved, silverChanged]
+      properties:
+        bronzeRemoved: { type: boolean }
+        silverChanged: { type: boolean }
+        receipt: { $ref: "#/components/schemas/StorageReceipt" }
     StorageObjectKey:
       type: object
       additionalProperties: false

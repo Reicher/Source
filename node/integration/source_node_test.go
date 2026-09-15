@@ -40,6 +40,12 @@ func (f *fakeAI) Capabilities() map[string]any {
 }
 func (f *fakeAI) StreamChat(_ context.Context, m []localai.Message, yield func(localai.Event) error) error {
 	f.received = m
+	if len(m) == 1 && strings.Contains(m[0].Content, "Bronze text:") {
+		if e := yield(localai.Event{Type: "delta", Text: `{"entities":[{"key":"e1","name":"Source","type":"project"}],"claims":[{"subjectKey":"e1","predicate":"status","value":"active","confidence":0.9,"evidenceExcerpt":"Source is active"}]}`}); e != nil {
+			return e
+		}
+		return yield(localai.Event{Type: "completed", FinishReason: "stop"})
+	}
 	if e := yield(localai.Event{Type: "delta", Text: "Lokalt "}); e != nil {
 		return e
 	}
@@ -61,7 +67,7 @@ func TestSourceAPIEndToEnd(t *testing.T) {
 		SuggestedNodeName:        "test-node",
 		DatabasePath:             filepath.Join(root, "state", "source-node.sqlite"),
 		StorageRoot:              filepath.Join(root, "vaults"),
-		MaximumSnapshotBytes:     1024, SnapshotRetention: 20,
+		MaximumSnapshotBytes:     64 * 1024, SnapshotRetention: 20,
 		MaximumLibraryItemBytes: 1024,
 		AllowedStorageApps:      map[string]struct{}{"thoughts": {}, "source-client": {}},
 		AIModel:                 "source-qwen3.5-9b", AITimeout: time.Second,
@@ -181,6 +187,42 @@ func TestSourceAPIEndToEnd(t *testing.T) {
 		t.Fatalf("unexpected NDJSON stream: %s", streamBody)
 	}
 
+	bronzeText := "Source is active"
+	bronzeHash := sha256.Sum256([]byte(bronzeText))
+	refinementOperation, _ := security.UUID()
+	refinementBody := map[string]any{
+		"contractVersion": 1, "operationId": refinementOperation,
+		"source": map[string]any{
+			"id": "source-1", "name": "source.txt", "sourceType": "file",
+			"contentSha256": hex.EncodeToString(bronzeHash[:]), "text": bronzeText,
+		},
+	}
+	refined := jsonRequest(t, http.MethodPost, api.URL+"/api/v1/silver/refinements", map[string]string{"Authorization": "Bearer " + credential}, refinementBody)
+	wantStatus(t, refined, 201)
+	var refinedBody map[string]any
+	decode(t, refined.Body, &refinedBody)
+	if refinedBody["refined"] != true || refinedBody["bronzeAccepted"] != true {
+		t.Fatalf("unexpected Silver refinement result: %#v", refinedBody)
+	}
+	retriedRefinement := jsonRequest(t, http.MethodPost, api.URL+"/api/v1/silver/refinements", map[string]string{"Authorization": "Bearer " + credential}, refinementBody)
+	wantStatus(t, retriedRefinement, 200)
+	decode(t, retriedRefinement.Body, &refinedBody)
+	if refinedBody["refined"] != false {
+		t.Fatalf("Silver retry created a competing revision: %#v", refinedBody)
+	}
+	silverChanges := jsonRequest(t, http.MethodPost, api.URL+"/api/v1/sync/changes", map[string]string{"Authorization": "Bearer " + credential}, map[string]any{
+		"contractVersion": 1, "collection": "silver-datasets",
+		"objectId": "ab385774-7835-3e2c-afce-ad2702c8f8cb",
+	})
+	wantStatus(t, silverChanges, 200)
+	var silverManifest struct {
+		Heads []syncmodel.Revision `json:"heads"`
+	}
+	decode(t, silverChanges.Body, &silverManifest)
+	if len(silverManifest.Heads) != 1 {
+		t.Fatalf("authoritative Silver heads = %#v", silverManifest.Heads)
+	}
+
 	snapshotID, _ := security.UUID()
 	ciphertext := bytes.Repeat([]byte{7}, 96)
 	sum := sha256.Sum256(ciphertext)
@@ -245,7 +287,7 @@ func TestSourceAPIEndToEnd(t *testing.T) {
 		Heads   []syncmodel.Revision    `json:"heads"`
 	}
 	decode(t, canonicalCommit.Body, &commitResult)
-	if commitResult.Receipt.RevisionID != canonicalRevision.RevisionID || commitResult.Receipt.CommitSequence != 1 || len(commitResult.Heads) != 1 {
+	if commitResult.Receipt.RevisionID != canonicalRevision.RevisionID || commitResult.Receipt.CommitSequence != 2 || len(commitResult.Heads) != 1 {
 		t.Fatalf("unexpected canonical commit: %#v", commitResult)
 	}
 	canonicalRetry := request(t, http.MethodPost, canonicalURL, canonicalHeaders, canonicalBody)
@@ -258,7 +300,7 @@ func TestSourceAPIEndToEnd(t *testing.T) {
 	wantStatus(t, changes, 200)
 	var changesResult syncmodel.ChangesResponse
 	decode(t, changes.Body, &changesResult)
-	if !changesResult.RequiresManifest || changesResult.Cursor.CommitSequence != 1 || len(changesResult.Heads) != 1 {
+	if !changesResult.RequiresManifest || changesResult.Cursor.CommitSequence != 2 || len(changesResult.Heads) != 1 {
 		t.Fatalf("unexpected canonical manifest: %#v", changesResult)
 	}
 	canonicalPayload := request(t, http.MethodGet, api.URL+"/api/v1/sync/revisions/"+canonicalRevision.RevisionID+"/payload", map[string]string{"Authorization": "Bearer " + credential}, nil)

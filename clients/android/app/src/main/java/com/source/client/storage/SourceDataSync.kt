@@ -66,7 +66,11 @@ class SourceDataSync<T>(
 
     suspend fun persist(session: VaultSession, value: T) {
         mutex.withLock {
-            if (data.descriptor.canonicalCollection == null || !backupDirty) {
+            if (
+                data.descriptor.canonicalCollection == null ||
+                data.descriptor.authority == SourceDataAuthority.NODE ||
+                !backupDirty
+            ) {
                 withContext(Dispatchers.Default) { localStore.save(session, data, value) }
                 return@withLock
             }
@@ -110,6 +114,12 @@ class SourceDataSync<T>(
 
     suspend fun restoreRecovered(session: VaultSession?, connected: ConnectedNode?): T? = mutex.withLock {
         if (session == null || connected == null) return@withLock null
+        if (data.descriptor.authority == SourceDataAuthority.NODE) {
+            var restored: T? = null
+            nodeSynchronizeLocked(session, connected, data.emptyValue) { restored = it }
+            recoveryRestorePending = false
+            return@withLock restored
+        }
         if (data.descriptor.canonicalCollection == null) {
             return@withLock legacyRestoreRecovered(session, connected)
         }
@@ -177,6 +187,10 @@ class SourceDataSync<T>(
         applyRemote: (T) -> Unit,
     ) {
         if (session == null || connected == null) return
+        if (data.descriptor.authority == SourceDataAuthority.NODE) {
+            nodeSynchronizeLocked(session, connected, initialValue, applyRemote)
+            return
+        }
         lastError = null
         var localValue = initialValue
         val initialIdentity = data.version(initialValue).contentIdentity
@@ -348,6 +362,59 @@ class SourceDataSync<T>(
             throw error
         } catch (_: LocalDataChangedDuringSync) {
             lastError = null
+            backupDirty = true
+        } catch (error: Exception) {
+            lastError = error
+            backupDirty = true
+        }
+    }
+
+    /**
+     * Reconciles a Node-owned dataset without ever creating a Client mutation.
+     * A legacy local value stays readable until the first authoritative head is
+     * available, then it is explicitly replaced by the Node cache.
+     */
+    private suspend fun nodeSynchronizeLocked(
+        session: VaultSession,
+        connected: ConnectedNode,
+        initialValue: T,
+        applyRemote: (T) -> Unit,
+    ) {
+        lastError = null
+        val revisionBeforeSync = localRevision.get()
+        try {
+            val collection = checkNotNull(data.descriptor.canonicalCollection)
+            val objectId = canonicalObjectId(collection)
+            val previous = state(session)
+            val remote = readChanges(connected, collection, objectId, previous.cursor)
+            requireLocalRevision(revisionBeforeSync)
+            if (remote.heads.size > 1) {
+                throw SourceApiException("storage_conflict", "The Node returned competing authoritative revisions.")
+            }
+            val value = when {
+                remote.heads.isEmpty() -> initialValue
+                remote.heads.single().kind == "tombstone" -> data.emptyValue
+                else -> readRevision(connected, remote.heads.single())
+            }
+            val state = previous.copy(
+                cursor = remote.cursor,
+                heads = remote.heads.map(StorageRevision::revisionId).sorted(),
+                pending = emptyList(),
+                receipts = emptyList(),
+            )
+            previous.pending.forEach { it.payloadBytes.fill(0) }
+            canonicalState = state
+            withContext(Dispatchers.Default) { localStore.saveWithSyncState(session, data, value, state) }
+            requireLocalRevision(revisionBeforeSync)
+            val changed = data.version(value).contentIdentity != data.version(initialValue).contentIdentity
+            val publishedRevision = publishRemoteIfUnchanged(revisionBeforeSync, value, changed, applyRemote)
+            nodeApi.acknowledgeStorageCursor(
+                connected.discovered.apiBaseUrl, connected.trusted, collection, objectId, remote.cursor,
+            )
+            backupDirty = remote.heads.isEmpty() || localRevision.get() != publishedRevision
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: LocalDataChangedDuringSync) {
             backupDirty = true
         } catch (error: Exception) {
             lastError = error

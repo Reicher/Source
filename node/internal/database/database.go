@@ -114,7 +114,7 @@ func (d *DB) GetNodeState(includeSecrets bool) (NodeState, error) {
 }
 
 func (d *DB) ListUsers() ([]User, error) {
-	rows, err := d.sql.Query(`SELECT u.id,u.display_name,u.storage_namespace,u.quota_bytes,u.created_at,u.disabled_at,u.recovery_key_hash,u.recovery_envelope,(u.recovery_key_hash IS NOT NULL AND u.recovery_envelope IS NOT NULL),COALESCE((SELECT SUM(s.byte_count) FROM snapshots s WHERE s.user_id=u.id),0)+COALESCE((SELECT SUM(l.byte_count) FROM library_items l WHERE l.user_id=u.id AND l.deleted_at IS NULL),0)+COALESCE((SELECT SUM(r.byte_count) FROM storage_revisions r WHERE r.user_id=u.id AND r.kind='content'),0),(SELECT COUNT(*) FROM clients c WHERE c.user_id=u.id AND c.revoked_at IS NULL) FROM users u ORDER BY u.created_at,u.id`)
+	rows, err := d.sql.Query(`SELECT u.id,u.display_name,u.storage_namespace,u.quota_bytes,u.created_at,u.disabled_at,u.recovery_key_hash,u.recovery_envelope,(u.recovery_key_hash IS NOT NULL AND u.recovery_envelope IS NOT NULL),COALESCE((SELECT SUM(s.byte_count) FROM snapshots s WHERE s.user_id=u.id),0)+COALESCE((SELECT SUM(l.byte_count) FROM library_items l WHERE l.user_id=u.id AND l.deleted_at IS NULL),0)+COALESCE((SELECT SUM(r.byte_count) FROM storage_revisions r WHERE r.user_id=u.id AND r.kind='content'),0)+COALESCE((SELECT SUM(length(CAST(b.plaintext AS BLOB))) FROM silver_refinement_sources b WHERE b.user_id=u.id),0),(SELECT COUNT(*) FROM clients c WHERE c.user_id=u.id AND c.revoked_at IS NULL) FROM users u ORDER BY u.created_at,u.id`)
 	if err != nil {
 		return nil, err
 	}

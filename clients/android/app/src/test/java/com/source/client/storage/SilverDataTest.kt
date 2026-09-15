@@ -10,6 +10,8 @@ class SilverDataTest {
     fun `Silver accepts only its current snapshot format`() {
         assertEquals(1, SilverData.descriptor.formatVersion)
         assertEquals(setOf(1), SilverData.supportedFormatVersions)
+        assertEquals("silver-datasets", SilverData.descriptor.canonicalCollection)
+        assertEquals(SourceDataAuthority.NODE, SilverData.descriptor.authority)
     }
 
     @Test

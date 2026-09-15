@@ -114,6 +114,10 @@ class SourceDataTest {
             "User: Robin lives in Stockholm.\n\nUser: Robin created Source.",
             ChatData.refinementText(conversation),
         )
+        assertEquals(
+            "a33d2f2f85121bef9468266ea3d7866672790d5ba7a249e54be160a7ea178fff",
+            ChatData.refinementContentSha256(conversation),
+        )
     }
 
     private fun conversations(content: String, createdAtMillis: Long): ChatConversations {
