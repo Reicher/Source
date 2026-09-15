@@ -183,34 +183,17 @@ one durability unit. It returns a receipt containing:
 ```text
 CommitReceipt
   operationId
-  originId
-  originEpoch
-  originSequence
   revisionId
-  canonicalMutationSha256
   authorityNodeId
   authorityEpoch
   commitSequence
-  receiptSignature
 ```
 
 `commitSequence` is a strictly increasing integer within one profile and
 `authorityEpoch`. It orders change delivery and defines synchronization
 cursors; it does not make a later concurrent revision semantically newer. The
 Node MUST NOT acknowledge a revision before all data named by the receipt is
-durable under its storage contract. `receiptSignature` is the authoritative
-Node's signature over the canonical preceding receipt fields and profile
-identity. It lets the same Node verify a Client-held receipt after restoring an
-older backup; possession of an unsigned Client assertion never proves
-acceptance.
-
-Every delivered change entry and cursor checkpoint is likewise authenticated
-by the Node and binds the profile, authority epoch, commit sequence, and
-canonical entry digest. This lets recovery combine metadata held by different
-Clients, detect a missing sequence, and distinguish a deliberately omitted
-payload from a fabricated or incomplete history. A verified Silver entry can
-serve as a sequence marker during recovery even though its cached payload is
-discarded and rebuilt.
+durable under its storage contract.
 
 An `authorityEpoch` is created when the profile authority is established. It
 is preserved by a continuity-safe restore. A restore that rolls the Node back,
@@ -288,9 +271,9 @@ without changing the guarantees:
 1. Authenticate the paired Client and verify the profile's specific
    authoritative Node identity. Discovery is only a routing hint.
 2. Compare the authority epoch. If it changed or the cursor is below the
-   retained change-log floor, stop normal synchronization. A compacted-log
-   case starts full manifest reconciliation in the same epoch; an epoch change
-   follows the rollback recovery procedure below and is not ordinary sync.
+   retained change-log floor, start a full manifest reconciliation. Mutations
+   submitted against an earlier authority epoch are rejected until the Client
+   has reconciled with the current manifest.
 3. Replay the Client's pending Bronze mutations in durable journal order. The
    Node validates causal bases and returns the original or new commit receipt,
    an explicit conflict, or a permanent rejection.
@@ -426,64 +409,29 @@ Recovery follows these rules:
   duplication.
 - A continuity-safe Node restore preserves identity, authority epoch, log, and
   monotonically increasing sequence. A rollback restore changes the epoch and
-  enters the recovery procedure below before new writes are accepted.
+  uses the point-in-time recovery rule below.
 - If the authoritative Node and its backups are lost, Clients may contribute
   their accepted and pending Bronze through an explicit future authority
   recovery or migration flow. Silver is rebuilt by the new authority; cached
   Silver is not silently promoted. Automatic failover is out of scope.
 
-### Rollback recovery across authority epochs
+### Point-in-time rollback
 
-A Node backup can predate revisions or tombstones that the old epoch
-acknowledged. The restored backup is therefore only the recovery baseline; it
-MUST NOT silently become the complete authoritative history, and Client-held
-state MUST NOT be automatically copied into the new epoch. The profile enters
-`rollback recovery` and rejects normal writes and Silver refinement until an
-administrator finalizes recovery.
+Restoring an older Node backup is an explicit point-in-time rollback. The
+restored catalog, including the tombstones and Silver present in that backup,
+becomes authoritative in a new `authorityEpoch`. Accepted changes from the
+abandoned epoch are not automatically replayed from Clients. Consequently,
+data acknowledged only after the backup may be lost and deletions made after
+the backup may be undone; that is the normal and documented consequence of
+choosing an older restore point.
 
-The old epoch remains immutable. Each Client keeps Node-signed commit receipts
-for its acknowledged Bronze plus authenticated change metadata and cursor
-checkpoints for every change it has applied until the Node reports an
-operational-backup checkpoint that includes those change-log positions. During
-recovery, Clients submit that metadata and any payloads they still hold
-separately from unacknowledged local mutations. The Node verifies the old Node
-identity, profile, epoch, sequence, revision identity, signature, and payload
-hash before treating an item as an accepted-history candidate. Cached Silver
-payloads are never recovery candidates; their authenticated entries are only
-continuity evidence.
-
-The Node reconstructs the abandoned suffix from the restored backup's last
-commit sequence. Automatic replay is allowed only for a contiguous,
-cryptographically verified suffix through the highest sequence any
-participating Client reports:
-
-- exact old-epoch revisions and tombstones are replayed in their original
-  order and retain their revision identities;
-- a tombstone in that suffix remains terminal and is replayed before any later
-  stale content can be considered, preventing resurrection;
-- recovered commits receive new-epoch commit sequences and receipts, with an
-  audit link to their old-epoch positions; and
-- authoritative Silver from the abandoned epoch is discarded and rebuilt by
-  the Node from the recovered Bronze history.
-
-Every Client registered in the abandoned epoch must either contribute its
-recovery metadata, be proven covered by another complete copy of the suffix,
-or be explicitly revoked by the administrator. A sequence gap, missing payload,
-unavailable Client, conflicting high-water report, or unverifiable receipt
-blocks automatic replay. The Node reports the affected objects and keeps their
-candidate data quarantined. It MUST NOT choose between the backup and a Client
-copy by timestamp or availability.
-
-Resolving an incomplete suffix is an explicit data-loss decision. The
-administrator may retain the restored baseline, wait for another Client or
-backup, or export selected quarantined content for reviewed import under new
-object identifiers. Revoking a missing Client acknowledges that its later
-tombstones or content may be unrecoverable; it does not make unverified state
-authoritative. Only after the choice and its unresolved objects are recorded
-may the Node finalize the new epoch, publish a fresh manifest, and accept new
-writes. Clients then reset their old cursors, map replayed receipts, discard
-old Silver caches, and submit their still-pending unacknowledged Bronze against
-the recovered heads.
+Clients discard old-epoch cursors, receipts, and Silver caches and perform a
+full manifest reconciliation. Unacknowledged local Bronze remains local and
+may be submitted as new work after reconciliation. Bronze that existed only in
+the abandoned accepted history is not silently promoted over the restored
+authority; if still available locally, the user may explicitly import it as a
+new object. Node-originated sequences restart safely because they are scoped to
+the new authority epoch.
 
 ## Compatibility and migration boundary
 
@@ -523,10 +471,8 @@ Implementations of this contract MUST cover at least:
 9. rehydration and hash verification of evicted Bronze and cached Silver;
 10. repeated Node Silver delivery without duplicate records;
 11. Client recovery with accepted data but without lost pending data; and
-12. continuity-safe restore versus complete rollback replay into a new
-    authority epoch, including a Node origin-sequence restart; and
-13. incomplete rollback history with a missing payload, Client, or tombstone
-    remaining quarantined until an explicit administrator decision.
+12. continuity-safe restore versus point-in-time rollback with a new authority
+    epoch and Node origin-sequence restart.
 
 These scenarios are contract tests for the implementation, not permission to
 encode transport- or database-specific details into the domain model.
