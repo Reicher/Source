@@ -47,6 +47,11 @@ func (h *Handler) streamAI(w http.ResponseWriter, r *http.Request, session *auth
 	}
 	inferenceContext, cancelInference := context.WithTimeout(r.Context(), time.Duration(body.TimeoutMillis)*time.Millisecond)
 	defer cancelInference()
+	workload := localai.WorkloadInteractive
+	if body.Workload == "background" {
+		workload = localai.WorkloadBackground
+	}
+	inferenceContext = localai.WithWorkload(inferenceContext, workload)
 	runtime := h.ai.State(inferenceContext)
 	if runtime.Availability != "ready" && runtime.Availability != "inference_failed" {
 		code := "model_load_failed"

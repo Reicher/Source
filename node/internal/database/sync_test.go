@@ -1,8 +1,10 @@
 package database
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -84,6 +86,16 @@ func TestScopedCursorAcknowledgementsAndEpochPrecondition(t *testing.T) {
 	}
 	if err = db.AcknowledgeSyncCursor(user.ID, client.ID, "library-manifests", "66666666-6666-4666-8666-666666666666", cursor, 12); err != nil {
 		t.Fatal(err)
+	}
+	caughtUp, err := db.SyncChanges(
+		user.ID, "conversations", "55555555-5555-4555-8555-555555555555", state.AuthorityEpoch, receipt.CommitSequence,
+	)
+	if err != nil || caughtUp == nil || len(caughtUp) != 0 {
+		t.Fatalf("caught-up changes must encode as an empty JSON array, got %#v error=%v", caughtUp, err)
+	}
+	encodedChanges, err := json.Marshal(syncmodel.ChangesResponse{Changes: caughtUp})
+	if err != nil || !bytes.Contains(encodedChanges, []byte(`"changes":[]`)) {
+		t.Fatalf("caught-up response encoded a nullable changes field: %s error=%v", encodedChanges, err)
 	}
 	var cursorCount int
 	if err = db.sql.QueryRow(`SELECT COUNT(*) FROM client_sync_cursors WHERE user_id=? AND client_id=?`, user.ID, client.ID).Scan(&cursorCount); err != nil || cursorCount != 2 {

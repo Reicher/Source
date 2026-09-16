@@ -52,20 +52,21 @@ type RemoveResult struct {
 }
 
 type Service struct {
-	db            *database.DB
-	storage       *storage.Storage
-	ai            localai.Backend
-	maximumBytes  int64
-	now           func() time.Time
-	mu            sync.Mutex
-	workerCtx     context.Context
-	stopWorker    context.CancelFunc
-	wake          chan struct{}
-	workerDone    chan struct{}
-	runningMu     sync.Mutex
-	runningUserID string
-	runningJobID  string
-	runningStop   context.CancelFunc
+	db              *database.DB
+	storage         *storage.Storage
+	ai              localai.Backend
+	maximumBytes    int64
+	now             func() time.Time
+	mu              sync.Mutex
+	workerCtx       context.Context
+	stopWorker      context.CancelFunc
+	wake            chan struct{}
+	workerDone      chan struct{}
+	runningMu       sync.Mutex
+	runningUserID   string
+	runningJobID    string
+	runningSourceID string
+	runningStop     context.CancelFunc
 }
 
 func New(db *database.DB, storage *storage.Storage, ai localai.Backend, maximumBytes int64, now func() time.Time) *Service {
@@ -128,6 +129,9 @@ func (s *Service) Remove(userID string, request RemoveRequest) (RemoveResult, er
 	if err != nil {
 		return RemoveResult{}, mapDatabaseError(err)
 	}
+	if removed {
+		s.cancelRunningSource(userID, request.SourceID)
+	}
 	if !applySilver {
 		return RemoveResult{BronzeRemoved: removed}, nil
 	}
@@ -165,6 +169,14 @@ func (s *Service) Remove(userID string, request RemoveRequest) (RemoveResult, er
 		return RemoveResult{}, err
 	}
 	return RemoveResult{BronzeRemoved: removed, SilverChanged: created, Receipt: &receipt}, nil
+}
+
+func (s *Service) cancelRunningSource(userID, sourceID string) {
+	s.runningMu.Lock()
+	defer s.runningMu.Unlock()
+	if s.runningUserID == userID && s.runningSourceID == sourceID && s.runningStop != nil {
+		s.runningStop()
+	}
 }
 
 func (s *Service) checkQuota(userID string, source Source) error {

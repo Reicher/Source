@@ -106,7 +106,7 @@ internal class SilverController(
                         connected.discovered.apiBaseUrl,
                         connected.trusted,
                         sourceId,
-                        UUID.randomUUID().toString(),
+                        silverRemovalOperationId(sourceId),
                     )
                 }
             } catch (error: Exception) {
@@ -344,4 +344,8 @@ internal fun needsSilverRefinement(
 }
 
 private const val NODE_EXTRACTION_PROCESSOR_ID = "source.node.silver-extraction"
-private const val NODE_EXTRACTION_PROCESSOR_VERSION = "1"
+internal const val NODE_EXTRACTION_PROCESSOR_VERSION = "3"
+
+internal fun silverRemovalOperationId(sourceId: String): String = UUID.nameUUIDFromBytes(
+    "source-silver-removal\u0000$sourceId".toByteArray(Charsets.UTF_8),
+).toString()

@@ -386,7 +386,7 @@ ORDER BY commit_sequence`, userID, collection, objectID, authorityEpoch, after)
 		return nil, err
 	}
 	defer rows.Close()
-	var changes []syncmodel.Change
+	changes := make([]syncmodel.Change, 0)
 	for rows.Next() {
 		var revisionID, collectionValue, objectValue, kind, parentsJSON, digest string
 		var format sql.NullString

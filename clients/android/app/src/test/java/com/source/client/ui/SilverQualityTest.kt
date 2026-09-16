@@ -17,14 +17,24 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.UUID
 
 class SilverQualityTest {
+    @Test
+    fun `Silver removal retries reuse one idempotent operation`() {
+        val first = silverRemovalOperationId("source-a")
+
+        assertEquals(first, silverRemovalOperationId("source-a"))
+        assertTrue(first != silverRemovalOperationId("source-b"))
+        UUID.fromString(first)
+    }
+
     @Test
     fun `source revision processor version and model identity select new work`() {
         val evidence = testEvidence("source", "a".repeat(64))
         val observation = testObservation(
             evidence,
-            processorVersion = "2",
+            processorVersion = NODE_EXTRACTION_PROCESSOR_VERSION,
             modelId = "model-4b",
             kind = SILVER_EXTRACTION_COMPLETE_KIND,
         )
@@ -32,10 +42,10 @@ class SilverQualityTest {
         val sameSource = BronzeTextSource("source", "file", "file", "a".repeat(64), "text")
         val changedSource = sameSource.copy(contentSha256 = "b".repeat(64))
 
-        assertFalse(needsSilverRefinement(dataset, sameSource, AiModelMetadata("model-4b", 4_000_000_000), "2"))
-        assertTrue(needsSilverRefinement(dataset, changedSource, AiModelMetadata("model-4b", 4_000_000_000), "2"))
-        assertTrue(needsSilverRefinement(dataset, sameSource, AiModelMetadata("model-4b", 4_000_000_000), "3"))
-        assertTrue(needsSilverRefinement(dataset, sameSource, AiModelMetadata("model-9b", 9_000_000_000), "2"))
+        assertFalse(needsSilverRefinement(dataset, sameSource, AiModelMetadata("model-4b", 4_000_000_000), NODE_EXTRACTION_PROCESSOR_VERSION))
+        assertTrue(needsSilverRefinement(dataset, changedSource, AiModelMetadata("model-4b", 4_000_000_000), NODE_EXTRACTION_PROCESSOR_VERSION))
+        assertTrue(needsSilverRefinement(dataset, sameSource, AiModelMetadata("model-4b", 4_000_000_000), "next-version"))
+        assertTrue(needsSilverRefinement(dataset, sameSource, AiModelMetadata("model-9b", 9_000_000_000), NODE_EXTRACTION_PROCESSOR_VERSION))
     }
 
     @Test

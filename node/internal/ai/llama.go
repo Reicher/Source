@@ -20,10 +20,11 @@ type Message struct {
 	Content string `json:"content"`
 }
 type ChatOptions struct {
-	Temperature float64
-	TopP        float64
-	Reasoning   bool
-	JSONSchema  map[string]any
+	Temperature           float64
+	TopP                  float64
+	Reasoning             bool
+	ReasoningBudgetTokens int
+	JSONSchema            map[string]any
 }
 type Event struct {
 	Type, Text, FinishReason                  string
@@ -100,7 +101,7 @@ func (c *Client) StreamChat(ctx context.Context, messages []Message, options Cha
 	defer func() {
 		c.stateMu.Lock()
 		defer c.stateMu.Unlock()
-		if resultErr == nil {
+		if resultErr == nil || errors.Is(resultErr, ErrStreamComplete) || errors.Is(context.Cause(ctx), ErrBackgroundPreempted) {
 			c.lastFailure = nil
 			return
 		}
@@ -131,6 +132,9 @@ func (c *Client) StreamChat(ctx context.Context, messages []Message, options Cha
 	}
 	if options.JSONSchema != nil {
 		requestBody["json_schema"] = options.JSONSchema
+	}
+	if options.Reasoning && options.ReasoningBudgetTokens > 0 {
+		requestBody["reasoning_budget_tokens"] = options.ReasoningBudgetTokens
 	}
 	body, e := json.Marshal(requestBody)
 	if e != nil {
@@ -199,6 +203,9 @@ func (c *Client) StreamChat(ctx context.Context, messages []Message, options Cha
 		if text, ok := choice.Delta.Content.(string); ok && text != "" {
 			visible += len(text)
 			if e = yield(Event{Type: "delta", Text: text}); e != nil {
+				if errors.Is(e, ErrStreamComplete) {
+					return nil
+				}
 				return e
 			}
 		}

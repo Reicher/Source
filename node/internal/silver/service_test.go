@@ -34,6 +34,37 @@ type resumableAI struct {
 	release chan struct{}
 }
 
+type priorityAI struct {
+	backgroundCalls    int
+	backgroundStarted  chan int
+	interactiveStarted chan struct{}
+	releaseInteractive chan struct{}
+}
+
+func (a *priorityAI) Status(context.Context) bool { return true }
+func (a *priorityAI) State(context.Context) localai.RuntimeState {
+	return localai.RuntimeState{Availability: "ready", Capabilities: a.Capabilities()}
+}
+func (a *priorityAI) Capabilities() map[string]any { return map[string]any{"modelId": "test-model"} }
+func (a *priorityAI) StreamChat(ctx context.Context, _ []localai.Message, options localai.ChatOptions, yield func(localai.Event) error) error {
+	if options.JSONSchema == nil {
+		close(a.interactiveStarted)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-a.releaseInteractive:
+			return yield(localai.Event{Type: "delta", Text: "answer"})
+		}
+	}
+	a.backgroundCalls++
+	a.backgroundStarted <- a.backgroundCalls
+	if a.backgroundCalls == 1 {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return yield(localai.Event{Type: "delta", Text: `{"entities":[],"claims":[]}`})
+}
+
 func (a *resumableAI) Status(context.Context) bool { return true }
 func (a *resumableAI) State(context.Context) localai.RuntimeState {
 	return localai.RuntimeState{Availability: "ready", Capabilities: a.Capabilities()}
@@ -401,6 +432,105 @@ func TestNodeRunsOneQueuedRefinementAtATimeAndCancelIsTerminal(t *testing.T) {
 	retried, err := service.Retry(user.ID, first.Job.ID)
 	if err != nil || retried.State != "cancelled" {
 		t.Fatalf("terminal cancel was retried: %#v error=%v", retried, err)
+	}
+}
+
+func TestRemovingRunningSourceCancelsInferenceAndUnblocksQueue(t *testing.T) {
+	db, user := refinementTestDatabase(t)
+	defer db.Close()
+	ai := &resumableAI{blockAt: 1, started: make(chan int, 4)}
+	now := time.UnixMilli(1_800_000_000_000)
+	service := New(db, storage.New(db, t.TempDir(), 20, func() time.Time { return now }), ai, 1024*1024, func() time.Time { return now })
+	defer service.Close()
+
+	first, err := service.Refine(context.Background(), user.ID,
+		refinementRequest(t, "aaaaaaaa-1111-4111-8111-111111111111", "removed source"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ai.started:
+	case <-time.After(time.Second):
+		t.Fatal("running source did not start")
+	}
+	secondRequest := refinementRequest(t, "bbbbbbbb-2222-4222-8222-222222222222", "next source")
+	secondRequest.Source.ID = "source-2"
+	second, err := service.Refine(context.Background(), user.ID, secondRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	removed, err := service.Remove(user.ID, RemoveRequest{
+		ContractVersion: 1,
+		OperationID:     "cccccccc-3333-4333-8333-333333333333",
+		SourceID:        first.Job.SourceID,
+	})
+	if err != nil || !removed.BronzeRemoved {
+		t.Fatalf("remove result = %#v error=%v", removed, err)
+	}
+	if job := waitForJob(t, service, user.ID, first.Job.ID, "cancelled"); job.State != "cancelled" {
+		t.Fatalf("removed job = %#v", job)
+	}
+	if job := waitForJob(t, service, user.ID, second.Job.ID, "completed"); job.State != "completed" {
+		t.Fatalf("next job = %#v", job)
+	}
+}
+
+func TestInteractiveChatPreemptsAndAutomaticallyResumesSilver(t *testing.T) {
+	db, user := refinementTestDatabase(t)
+	defer db.Close()
+	backend := &priorityAI{
+		backgroundStarted:  make(chan int, 2),
+		interactiveStarted: make(chan struct{}),
+		releaseInteractive: make(chan struct{}),
+	}
+	coordinator := localai.NewCoordinator(backend)
+	now := time.UnixMilli(1_800_000_000_000)
+	service := New(db, storage.New(db, t.TempDir(), 20, func() time.Time { return now }), coordinator, 1024*1024, func() time.Time { return now })
+	defer service.Close()
+
+	accepted, err := service.Refine(context.Background(), user.ID,
+		refinementRequest(t, "dddddddd-4444-4444-8444-444444444444", "background source"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case call := <-backend.backgroundStarted:
+		if call != 1 {
+			t.Fatalf("first Silver call = %d", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Silver inference did not start")
+	}
+
+	chatResult := make(chan error, 1)
+	go func() {
+		chatResult <- coordinator.StreamChat(context.Background(), []localai.Message{{Role: "user", Content: "Hello"}}, localai.ChatOptions{}, func(localai.Event) error { return nil })
+	}()
+	select {
+	case <-backend.interactiveStarted:
+	case <-time.After(time.Second):
+		t.Fatal("chat did not preempt Silver")
+	}
+	select {
+	case call := <-backend.backgroundStarted:
+		t.Fatalf("Silver call %d resumed while chat still held the runtime", call)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(backend.releaseInteractive)
+	if err = <-chatResult; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case call := <-backend.backgroundStarted:
+		if call != 2 {
+			t.Fatalf("resumed Silver call = %d", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Silver did not resume after chat completed")
+	}
+	completed := waitForJob(t, service, user.ID, accepted.Job.ID, "completed")
+	if completed.CompletedBatches != completed.TotalBatches {
+		t.Fatalf("resumed job = %#v", completed)
 	}
 }
 

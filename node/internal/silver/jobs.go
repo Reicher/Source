@@ -9,6 +9,7 @@ import (
 	"errors"
 	"time"
 
+	localai "source.local/node/internal/ai"
 	"source.local/node/internal/apperror"
 	"source.local/node/internal/database"
 	"source.local/node/internal/syncmodel"
@@ -115,13 +116,13 @@ func (s *Service) waitForWork() bool {
 func (s *Service) runJob(job database.SilverRefinementJob) {
 	jobCtx, stop := context.WithCancel(s.workerCtx)
 	s.runningMu.Lock()
-	s.runningUserID, s.runningJobID, s.runningStop = job.UserID, job.JobID, stop
+	s.runningUserID, s.runningJobID, s.runningSourceID, s.runningStop = job.UserID, job.JobID, job.SourceID, stop
 	s.runningMu.Unlock()
 	defer func() {
 		stop()
 		s.runningMu.Lock()
 		if s.runningUserID == job.UserID && s.runningJobID == job.JobID {
-			s.runningUserID, s.runningJobID, s.runningStop = "", "", nil
+			s.runningUserID, s.runningJobID, s.runningSourceID, s.runningStop = "", "", "", nil
 		}
 		s.runningMu.Unlock()
 	}()
@@ -175,12 +176,18 @@ func (s *Service) runJob(job database.SilverRefinementJob) {
 		if outputs[index] != "" {
 			continue
 		}
-		output, extractErr := extractBatch(jobCtx, s.ai, chunk)
-		if extractErr != nil {
+		var output string
+		for {
+			output, err = extractBatch(jobCtx, s.ai, chunk)
+			if !errors.Is(err, localai.ErrBackgroundPreempted) {
+				break
+			}
+		}
+		if err != nil {
 			if jobCtx.Err() != nil {
 				return
 			}
-			s.failJob(job, apperror.Wrap(503, "silver_refinement_failed", "The Node could not refine the Bronze source.", extractErr))
+			s.failJob(job, apperror.Wrap(503, "silver_refinement_failed", "The Node could not refine the Bronze source.", err))
 			return
 		}
 		now := s.now().UnixMilli()

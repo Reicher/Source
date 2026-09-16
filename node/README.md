@@ -71,12 +71,15 @@ and interrupted `running` jobs recover after Node restart. Successful batches
 are checkpointed internally; retries and resubmissions reuse safe checkpoints.
 Clients read lifecycle and progress from `GET /api/v1/silver/refinements` or
 `GET /api/v1/silver/refinements/{job}`, and may `cancel` or `retry` jobs through
-the action endpoint. Only a fully successful job
-atomically commits the sole `silver-datasets` head with the Node identity as
-origin; staged batch output is never authoritative Silver. Publication rejects
-jobs superseded by newer Bronze, and checkpoint reuse requires the accepted
-processor ID/version and model ID to match the running Node. Clients synchronize
-that head through the canonical change API and store only an offline cache.
+the action endpoint. Interactive Chat has priority over the one-slot runtime:
+it preempts the current incomplete Silver batch, which resumes automatically
+after Chat finishes without losing completed checkpoints. Only a fully
+successful job atomically commits the sole `silver-datasets` head with the Node
+identity as origin; staged batch output is never authoritative Silver.
+Publication rejects jobs superseded by newer Bronze, and checkpoint reuse
+requires the accepted processor ID/version and model ID to match the running
+Node. Clients synchronize that head through the canonical change API and store
+only an offline cache.
 Client-side Bronze deletion is submitted to `POST /api/v1/silver/removals`;
 the Node persists the tombstone and commits the dependent Silver invalidation.
 

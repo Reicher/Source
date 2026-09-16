@@ -15,6 +15,25 @@ type extractionAI struct {
 	output   string
 }
 
+type trailingWhitespaceAI struct{ yielded int }
+
+func (a *trailingWhitespaceAI) Status(context.Context) bool { return true }
+func (a *trailingWhitespaceAI) State(context.Context) localai.RuntimeState {
+	return localai.RuntimeState{Availability: "ready", Capabilities: a.Capabilities()}
+}
+func (a *trailingWhitespaceAI) Capabilities() map[string]any {
+	return map[string]any{"modelId": "test-model"}
+}
+func (a *trailingWhitespaceAI) StreamChat(_ context.Context, _ []localai.Message, _ localai.ChatOptions, yield func(localai.Event) error) error {
+	for _, text := range []string{`{"entities":[],"claims":[]}`, " ", " ", " "} {
+		a.yielded++
+		if err := yield(localai.Event{Type: "delta", Text: text}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (a *extractionAI) Status(context.Context) bool { return true }
 func (a *extractionAI) State(context.Context) localai.RuntimeState {
 	return localai.RuntimeState{Availability: "ready", Capabilities: a.Capabilities()}
@@ -62,7 +81,7 @@ func TestExtractionPreservesClearReferencesWithoutGuessingAmbiguousOnes(t *testi
 			t.Fatalf("extraction prompt is missing %q", instruction)
 		}
 	}
-	if !ai.options.Reasoning || ai.options.Temperature != 0.1 || ai.options.TopP != 0.8 || ai.options.JSONSchema == nil {
+	if !ai.options.Reasoning || ai.options.ReasoningBudgetTokens != 256 || ai.options.Temperature != 0.1 || ai.options.TopP != 0.8 || ai.options.JSONSchema == nil {
 		t.Fatalf("unexpected extraction options: %#v", ai.options)
 	}
 
@@ -121,5 +140,16 @@ func TestTextChunksUseBoundedOverlap(t *testing.T) {
 	}
 	if got := len(textChunks(strings.Repeat("x", maximumRefinementBytes), maximumChunkBytes, chunkOverlapBytes)); got > maximumRefinementChunks {
 		t.Fatalf("maximum-size refinement produced %d chunks, limit is %d", got, maximumRefinementChunks)
+	}
+}
+
+func TestExtractionStopsAsSoonAsCompleteJSONArrives(t *testing.T) {
+	ai := &trailingWhitespaceAI{}
+	output, err := extractBatch(context.Background(), ai, "No facts here.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output != `{"entities":[],"claims":[]}` || ai.yielded != 1 {
+		t.Fatalf("output=%q yielded=%d", output, ai.yielded)
 	}
 }
