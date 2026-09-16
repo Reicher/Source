@@ -7,6 +7,7 @@ import com.source.client.storage.SilverClaim
 import com.source.client.storage.SilverClaimState
 import com.source.client.storage.SilverDataset
 import com.source.client.storage.SilverEntity
+import com.source.client.storage.SilverEvidence
 import com.source.client.storage.SilverJsonObject
 import com.source.client.storage.SilverJsonString
 import com.source.client.storage.SilverObservation
@@ -14,7 +15,6 @@ import com.source.client.storage.SilverProducer
 import com.source.client.storage.testEvidence
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -130,18 +130,66 @@ class KnowledgeScreenTest {
     }
 
     @Test
-    fun `entity colors are distinct and reused by relationship facts`() {
+    fun `entity types select recognizable icons for entities and relationship targets`() {
         val observation = relationshipCandidate()
         val base = dataset(listOf(observation))
         val silver = base.with(resolver.resolve(base, listOf(observation), 200))
 
         val source = buildKnowledgeUiState(silver, library()).sources.single()
-        val colorsByName = source.entities.associate { it.name to it.colorIndex }
+        val entitiesByName = source.entities.associateBy(SilverInspectorEntityUi::name)
         val fact = source.claims.single()
 
-        assertNotEquals(colorsByName.getValue("Robin"), colorsByName.getValue("Cozy place"))
-        assertEquals(colorsByName.getValue("Robin"), fact.subjectColorIndex)
-        assertEquals(colorsByName.getValue("Cozy place"), fact.objectColorIndex)
+        assertEquals(SilverInspectorEntityIcon.GENERIC, entitiesByName.getValue("Robin").icon)
+        assertEquals(SilverInspectorEntityIcon.LOCATION, entitiesByName.getValue("Cozy place").icon)
+        assertEquals(SilverInspectorEntityIcon.LOCATION, fact.objectEntityIcon)
+    }
+
+    @Test
+    fun `entity detail contains only claims about the selected entity`() {
+        val observation = relationshipCandidate()
+        val base = dataset(listOf(observation))
+        val silver = base.with(resolver.resolve(base, listOf(observation), 200))
+
+        val source = buildKnowledgeUiState(silver, library()).sources.single()
+        val entitiesByName = source.entities.associateBy(SilverInspectorEntityUi::name)
+        val robin = entitiesByName.getValue("Robin")
+        val place = entitiesByName.getValue("Cozy place")
+
+        assertEquals(listOf("rests-at"), source.claimsFor(robin.id).map(SilverInspectorClaimUi::predicate))
+        assertTrue(source.claimsFor(place.id).isEmpty())
+    }
+
+    @Test
+    fun `entity detail claims remain attributable to their Bronze source`() {
+        val firstEvidence = testEvidence()
+        val secondEvidence = testEvidence("source-2", "b".repeat(64))
+        val observations = listOf(
+            candidate("status", "active", evidence = firstEvidence),
+            candidate("purpose", "archive", evidence = secondEvidence),
+        )
+        val base = SilverDataset(
+            evidence = listOf(firstEvidence, secondEvidence),
+            observations = observations,
+            modifiedAtMillis = 100,
+        )
+        val silver = base.with(resolver.resolve(base, observations, 200))
+
+        val sources = buildKnowledgeUiState(silver, library()).sources.associateBy(SilverInspectorSourceUi::id)
+        val firstSource = sources.getValue("source-1")
+        val secondSource = sources.getValue("source-2")
+
+        assertEquals(listOf("status"), firstSource.claimsFor(firstSource.entities.single().id).map { it.predicate })
+        assertEquals(listOf("purpose"), secondSource.claimsFor(secondSource.entities.single().id).map { it.predicate })
+    }
+
+    @Test
+    fun `common entity types have stable presentation icons`() {
+        assertEquals(SilverInspectorEntityIcon.PERSON, entityIcon("person"))
+        assertEquals(SilverInspectorEntityIcon.LOCATION, entityIcon("city"))
+        assertEquals(SilverInspectorEntityIcon.ORGANIZATION, entityIcon("company"))
+        assertEquals(SilverInspectorEntityIcon.EVENT, entityIcon("conference"))
+        assertEquals(SilverInspectorEntityIcon.DOCUMENT, entityIcon("article"))
+        assertEquals(SilverInspectorEntityIcon.GENERIC, entityIcon("idea"))
     }
 
     @Test
@@ -173,8 +221,12 @@ class KnowledgeScreenTest {
         modifiedAtMillis = modifiedAtMillis + 1,
     )
 
-    private fun candidate(predicate: String, value: String, confidence: Double = .9): SilverObservation {
-        val evidence = testEvidence()
+    private fun candidate(
+        predicate: String,
+        value: String,
+        confidence: Double = .9,
+        evidence: SilverEvidence = testEvidence(),
+    ): SilverObservation {
         return SilverObservation.create(
             kind = SILVER_ATTRIBUTE_CANDIDATE_KIND,
             payload = SilverJsonObject(mapOf(

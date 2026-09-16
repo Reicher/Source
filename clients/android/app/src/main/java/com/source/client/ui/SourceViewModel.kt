@@ -26,6 +26,7 @@ import com.source.client.protocol.PairingPayloadParser
 import com.source.client.protocol.SourceApiException
 import com.source.client.security.SourceCrypto
 import com.source.client.security.VaultSession
+import com.source.client.security.VaultUnlockResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -229,28 +230,35 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             val chars = password.toCharArray()
             try {
-                val unlocked = withContext(Dispatchers.Default) {
-                    app.secureVault.unlock(locked.profile.id, chars)
+                val unlockResult = withContext(Dispatchers.Default) {
+                    app.secureVault.unlockDetailed(locked.profile.id, chars)
                 }
-                if (unlocked == null) {
-                    _screen.value = locked.copy(error = message(R.string.error_incorrect_password))
-                } else {
-                    session = unlocked
-                    val conversations = withContext(Dispatchers.Default) {
-                        sourceDataStore.load(unlocked, ChatData)
+                when (unlockResult) {
+                    VaultUnlockResult.IncorrectPassword -> {
+                        _screen.value = locked.copy(error = message(R.string.error_incorrect_password))
                     }
-                    conversationSync.reset()
-                    val activeConversations = chatController.reset(
-                        conversations,
-                        startFreshConversation = app.shouldStartFreshConversationOnLogin(),
-                    )
-                    withContext(Dispatchers.Default) {
-                        sourceDataStore.save(unlocked, ChatData, activeConversations)
+                    VaultUnlockResult.Unreadable -> {
+                        _screen.value = locked.copy(error = message(R.string.error_source_data_unreadable))
                     }
-                    libraryController.reset(unlocked)
-                    silverController.reset(unlocked)
-                    app.markLoginConversationStarted()
-                    openMain()
+                    is VaultUnlockResult.Success -> {
+                        val unlocked = unlockResult.session
+                        session = unlocked
+                        val conversations = withContext(Dispatchers.Default) {
+                            sourceDataStore.load(unlocked, ChatData)
+                        }
+                        conversationSync.reset()
+                        val activeConversations = chatController.reset(
+                            conversations,
+                            startFreshConversation = app.shouldStartFreshConversationOnLogin(),
+                        )
+                        withContext(Dispatchers.Default) {
+                            sourceDataStore.save(unlocked, ChatData, activeConversations)
+                        }
+                        libraryController.reset(unlocked)
+                        silverController.reset(unlocked)
+                        app.markLoginConversationStarted()
+                        openMain()
+                    }
                 }
             } catch (_: Exception) {
                 session?.close()

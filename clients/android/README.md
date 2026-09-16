@@ -89,9 +89,10 @@ Run that command from the repository root to build and deploy the debug Client
 to one authorized USB-connected Android device. It reads the expected model
 identity from `models/source-ai-models.json`. The first deployment, or a model
 mismatch, provisions and transfers the complete install-time model packs.
-Later deployments with the same `versionCode` update only the base Client APK
-and retain the verified model packs, avoiding another approximately 3 GB
-transfer. Android requires every split APK to have the same version, so a
+Later deployments with the same `versionCode` update the base and all
+device-specific configuration APKs together while retaining the verified model
+packs, avoiding another approximately 3 GB transfer. Android requires every
+split APK to have the same version, so a
 `versionCode` change rebuilds and installs the complete APK set while preserving
 app data. If more than one device is connected, select one with
 `ANDROID_SERIAL=<serial>`.
