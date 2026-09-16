@@ -58,7 +58,25 @@ class LocalAiRuntime(context: Context) : SourceAiRuntime {
             native.cancel(request.runId)
         }
         val generation = launch(Dispatchers.IO) {
-            inferenceMutex.withLock {
+            runQueuedLocalInference(
+                inferenceMutex,
+                timedOut,
+                onTimedOut = {
+                    runtimeState = SourceAiRuntimeState(
+                        SourceAiAvailability.INFERENCE_FAILED,
+                        LOCAL_AI_MODEL,
+                        localCapabilities,
+                        SourceAiFailureCode.TIMEOUT.wireValue,
+                    )
+                    trySendBlocking(SourceAiEvent.Failed(
+                        request.runId,
+                        SourceAiFailureCode.TIMEOUT.wireValue,
+                        SourceAiFailureCode.TIMEOUT.retryable,
+                    ))
+                    timeout.cancel()
+                    close()
+                },
+            ) {
                 try {
                     val result = native.generate(
                         request = request,
@@ -166,6 +184,15 @@ class LocalAiRuntime(context: Context) : SourceAiRuntime {
         const val INFERENCE_THREADS = 4
         const val MAXIMUM_MESSAGES = 64
     }
+}
+
+internal suspend fun runQueuedLocalInference(
+    mutex: Mutex,
+    timedOut: AtomicBoolean,
+    onTimedOut: () -> Unit,
+    generate: () -> Unit,
+) = mutex.withLock {
+    if (timedOut.get()) onTimedOut() else generate()
 }
 
 internal const val LOCAL_AI_EVENT_BUFFER_CAPACITY = 64

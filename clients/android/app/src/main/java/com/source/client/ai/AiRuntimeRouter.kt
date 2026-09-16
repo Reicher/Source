@@ -34,6 +34,11 @@ private val NODE_FALLBACK_CODES = setOf(
     "http_504",
 )
 
+private val NODE_TRANSPORT_FAILURE_CODES = setOf(
+    SourceAiFailureCode.NODE_UNAVAILABLE.wireValue,
+    SourceAiFailureCode.STREAM_INTERRUPTED.wireValue,
+)
+
 /** Routes one shared AI stream contract to the selected inference runtime. */
 class AiRuntimeRouter internal constructor(
     private val local: SourceAiRuntime,
@@ -97,6 +102,13 @@ class AiRuntimeRouter internal constructor(
         return flow {
             var responseStarted = false
             var pendingStarted: SourceAiEvent.Started? = null
+            var nodeUnavailableReported = false
+            fun reportNodeUnavailable(code: String?) {
+                if (!nodeUnavailableReported && code != null && code in NODE_TRANSPORT_FAILURE_CODES) {
+                    nodeUnavailableReported = true
+                    onNodeUnavailable(connected)
+                }
+            }
             try {
                 nodeRuntime(connected).stream(request).collect { event ->
                     when (event) {
@@ -113,15 +125,13 @@ class AiRuntimeRouter internal constructor(
                             emit(event)
                         }
                         is SourceAiEvent.Failed -> {
+                            reportNodeUnavailable(event.code)
                             val failure = SourceApiException(
                                 event.code,
                                 "The Node AI could not complete the response.",
                                 responseStarted,
                             )
                             if (selected == AiSelection.AUTO && canFallbackFromNode(failure)) throw failure
-                            if (event.code == SourceAiFailureCode.NODE_UNAVAILABLE.wireValue) {
-                                onNodeUnavailable(connected)
-                            }
                             pendingStarted?.let { emit(it) }
                             pendingStarted = null
                             emit(event)
@@ -131,15 +141,24 @@ class AiRuntimeRouter internal constructor(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                if (selected != AiSelection.AUTO || !canFallbackFromNode(error)) {
+                val failure = error as? SourceApiException ?: SourceApiException(
+                    if (responseStarted) {
+                        SourceAiFailureCode.STREAM_INTERRUPTED.wireValue
+                    } else {
+                        SourceAiFailureCode.NODE_UNAVAILABLE.wireValue
+                    },
+                    "The Node AI connection was interrupted.",
+                    responseStarted,
+                )
+                reportNodeUnavailable(failure.code)
+                if (selected != AiSelection.AUTO || !canFallbackFromNode(failure)) {
                     emit(SourceAiEvent.Failed(
                         request.runId,
-                        (error as? SourceApiException)?.code ?: SourceAiFailureCode.NODE_UNAVAILABLE.wireValue,
+                        failure.code,
                         retryable = true,
                     ))
                     return@flow
                 }
-                if (error !is SourceApiException) onNodeUnavailable(connected)
                 emitAll(local.stream(request))
             }
         }

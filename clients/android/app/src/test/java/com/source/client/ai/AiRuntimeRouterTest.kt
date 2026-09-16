@@ -59,6 +59,57 @@ class AiRuntimeRouterTest {
     }
 
     @Test
+    fun `auto marks node unavailable before falling back from a transport failure`() = runBlocking {
+        var unavailableSignals = 0
+        val unavailable = object : SourceAiRuntime {
+            override val runtimeState = readyState("node-model")
+            override fun stream(request: SourceAiRequest): Flow<SourceAiEvent> = flowOf(
+                SourceAiEvent.Started(request.runId),
+                SourceAiEvent.Failed(request.runId, SourceAiFailureCode.NODE_UNAVAILABLE.wireValue, true),
+            )
+        }
+        val router = AiRuntimeRouter(
+            runtime("local"),
+            { connected },
+            { unavailableSignals += 1 },
+            { unavailable },
+        )
+        router.select(AiSelection.AUTO)
+
+        val events = router.stream(request).toList()
+
+        assertEquals(1, unavailableSignals)
+        assertEquals("local", (events.last { it is SourceAiEvent.Delta } as SourceAiEvent.Delta).text)
+    }
+
+    @Test
+    fun `interrupted node stream marks node unavailable without starting a local answer`() = runBlocking {
+        var unavailableSignals = 0
+        val interrupted = object : SourceAiRuntime {
+            override val runtimeState = readyState("node-model")
+            override fun stream(request: SourceAiRequest): Flow<SourceAiEvent> = flowOf(
+                SourceAiEvent.Started(request.runId),
+                SourceAiEvent.Delta(request.runId, 0, "partial"),
+                SourceAiEvent.Failed(request.runId, SourceAiFailureCode.STREAM_INTERRUPTED.wireValue, true),
+            )
+        }
+        val router = AiRuntimeRouter(
+            runtime("local"),
+            { connected },
+            { unavailableSignals += 1 },
+            { interrupted },
+        )
+        router.select(AiSelection.AUTO)
+
+        val events = router.stream(request).toList()
+
+        assertEquals(1, unavailableSignals)
+        assertEquals(listOf("partial"), events.filterIsInstance<SourceAiEvent.Delta>().map { it.text })
+        assertEquals(SourceAiFailureCode.STREAM_INTERRUPTED.wireValue,
+            (events.last() as SourceAiEvent.Failed).code)
+    }
+
+    @Test
     fun `explicit node selection never silently falls back to the client`() = runBlocking {
         val disconnected = connected.copy(
             aiRuntimeState = SourceAiRuntimeState(SourceAiAvailability.MODEL_NOT_INSTALLED),

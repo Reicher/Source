@@ -32,7 +32,9 @@ Discovering -> Found -> Pairing/Recovering
 - `Failed`: a user-driven connection flow failed and may optionally be retried.
 
 `nodeStorageUsable()` is true only for `Ready` and `Degraded`.
-`nodeAiUsable()` is true only for `Ready` with an AI runtime state of `ready`.
+`nodeAiUsable()` is true for `Ready` when the AI runtime is `ready`, or when it
+retains model capabilities after a retryable `inference_failed` result. A prior
+generation failure is diagnostic state and does not permanently disable retries.
 Callers must not infer either property from DNS-SD, network availability, a
 stored credential, or a non-null endpoint.
 
