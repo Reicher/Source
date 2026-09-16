@@ -30,3 +30,7 @@ version permits only explicit user and assistant messages and fixes the prompt
 policy to `none-v1` and advertises `reasoning: off`: runtimes apply the GGUF model's official chat template and
 must not inject a Source system prompt. Content is represented as parts so
 future `vision` support can be advertised without replacing the contract.
+Runtime availability, streaming termination, cancellation, timeouts, and stable
+failure semantics are defined in [`../docs/AI_RUNTIME.md`](../docs/AI_RUNTIME.md).
+Client delegation, service readiness, retry, and fallback behavior are defined
+in [`../docs/CLIENT_NODE_CONNECTION.md`](../docs/CLIENT_NODE_CONNECTION.md).

@@ -1,5 +1,8 @@
 package com.source.client.model
 
+import com.source.client.ai.SourceAiAvailability
+import com.source.client.ai.SourceAiRuntimeState
+
 import java.util.UUID
 
 data class LocalIdentity(
@@ -115,8 +118,11 @@ data class DiscoveredNode(
 data class ConnectedNode(
     val discovered: DiscoveredNode,
     val trusted: TrustedNode,
-    val aiModel: AiModelMetadata? = null,
-)
+    val aiRuntimeState: SourceAiRuntimeState = SourceAiRuntimeState(SourceAiAvailability.MODEL_NOT_INSTALLED),
+) {
+    val aiModel: AiModelMetadata?
+        get() = aiRuntimeState.takeIf { it.isUsable }?.model
+}
 
 data class AiModelMetadata(
     val modelId: String,
@@ -143,6 +149,8 @@ data class PairingInvitation(
 
 enum class NodeDisconnectReason { BACKGROUND, NETWORK_UNAVAILABLE, NOT_FOUND, LOST, AUTHENTICATION_FAILED }
 
+enum class NodeDegradedReason { AI_UNAVAILABLE }
+
 enum class NodeRecoveryPhase { REPLACING_CLIENT, CONFIGURING_DATA_KEY }
 
 sealed interface NodeConnectionState {
@@ -159,7 +167,18 @@ sealed interface NodeConnectionState {
         val trusted: TrustedNode,
         val attempt: Int,
     ) : NodeConnectionState
-    data class Connected(val connection: ConnectedNode) : NodeConnectionState
+    data class Retrying(
+        val node: DiscoveredNode,
+        val trusted: TrustedNode,
+        val attempt: Int,
+        val retryInMillis: Long,
+        val reason: NodeDisconnectReason,
+    ) : NodeConnectionState
+    data class Ready(val connection: ConnectedNode) : NodeConnectionState
+    data class Degraded(
+        val connection: ConnectedNode,
+        val reason: NodeDegradedReason,
+    ) : NodeConnectionState
     data class Disconnected(
         val trusted: TrustedNode?,
         val reason: NodeDisconnectReason,

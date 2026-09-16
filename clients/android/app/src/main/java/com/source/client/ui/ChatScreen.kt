@@ -218,7 +218,7 @@ internal fun MainScreen(
     if (settingsOpen) {
         SettingsDialog(
             userDisplayName = state.userDisplayName,
-            recoveryKey = (state.status as? NodeConnectionState.Connected)?.connection?.trusted?.recoveryKey,
+            recoveryKey = state.status.connectedNodeOrNull()?.trusted?.recoveryKey,
             onShowRecoveryKey = {
                 settingsOpen = false
                 recoveryKeyToShow = it
@@ -418,12 +418,15 @@ private fun NodeConnectionSummary(
         is NodeConnectionState.Pairing -> status.name
         is NodeConnectionState.Recovering -> status.name
         is NodeConnectionState.Authenticating -> status.trusted.displayName
-        is NodeConnectionState.Connected -> status.connection.trusted.displayName
+        is NodeConnectionState.Retrying -> status.trusted.displayName
+        is NodeConnectionState.Ready -> status.connection.trusted.displayName
+        is NodeConnectionState.Degraded -> status.connection.trusted.displayName
         is NodeConnectionState.Disconnected -> stringResource(R.string.this_device)
         is NodeConnectionState.Failed -> stringResource(R.string.this_device)
     }
     val indicatorColor = when (status) {
-        is NodeConnectionState.Connected -> Moss
+        is NodeConnectionState.Ready -> Moss
+        is NodeConnectionState.Degraded -> Color(0xFF9A6A24)
         is NodeConnectionState.Failed -> MaterialTheme.colorScheme.error
         is NodeConnectionState.Found -> Color(0xFF9A6A24)
         else -> Ink.copy(alpha = .34f)
@@ -434,7 +437,8 @@ private fun NodeConnectionSummary(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (status is NodeConnectionState.Discovering || status is NodeConnectionState.Authenticating ||
-            status is NodeConnectionState.Pairing || status is NodeConnectionState.Recovering
+            status is NodeConnectionState.Retrying || status is NodeConnectionState.Pairing ||
+            status is NodeConnectionState.Recovering
         ) {
             CircularProgressIndicator(Modifier.size(9.dp), strokeWidth = 1.5.dp, color = Moss)
         } else {
@@ -445,7 +449,7 @@ private fun NodeConnectionSummary(
             text = label,
             modifier = Modifier.weight(1f),
             style = MaterialTheme.typography.labelLarge,
-            color = if (status is NodeConnectionState.Connected) Moss else Ink.copy(alpha = .58f),
+            color = if (status is NodeConnectionState.Ready) Moss else Ink.copy(alpha = .58f),
             fontWeight = FontWeight.Medium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,

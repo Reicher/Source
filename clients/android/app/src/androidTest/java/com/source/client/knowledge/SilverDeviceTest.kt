@@ -10,6 +10,8 @@ import com.source.client.ai.SourceAiCapability
 import com.source.client.ai.SourceAiEvent
 import com.source.client.ai.SourceAiRequest
 import com.source.client.ai.SourceAiRuntime
+import com.source.client.ai.SourceAiRuntimeState
+import com.source.client.ai.SourceAiAvailability
 import com.source.client.model.AiModelMetadata
 import com.source.client.storage.SilverBatchCheckpoint
 import com.source.client.storage.SilverBatchResult
@@ -129,8 +131,10 @@ class SilverDeviceTest {
     fun ExtractionStoresLocalCandidatesWithoutCreatingGlobalEntities() = runBlocking {
         val model = AiModelMetadata("test-model", 9_000_000_000)
         val runtime = object : SourceAiRuntime {
-            override val capabilities = SourceAiCapabilities(
-                setOf(SourceAiCapability.TEXT), true, true, 8_192,
+            override val runtimeState = SourceAiRuntimeState(
+                SourceAiAvailability.READY,
+                model,
+                SourceAiCapabilities(setOf(SourceAiCapability.TEXT), true, true, 8_192),
             )
 
             override fun stream(request: SourceAiRequest): Flow<SourceAiEvent> = flowOf(

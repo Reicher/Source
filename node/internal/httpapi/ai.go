@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"regexp"
 	"strings"
@@ -25,7 +27,8 @@ type aiRequest struct {
 			Text string `json:"text"`
 		} `json:"content"`
 	} `json:"messages"`
-	Workload string `json:"workload"`
+	Workload      string `json:"workload"`
+	TimeoutMillis int    `json:"timeoutMillis"`
 }
 
 func (h *Handler) streamAI(w http.ResponseWriter, r *http.Request, session *auth.Session) {
@@ -34,9 +37,26 @@ func (h *Handler) streamAI(w http.ResponseWriter, r *http.Request, session *auth
 		h.fail(w, err)
 		return
 	}
+	if body.TimeoutMillis == 0 {
+		body.TimeoutMillis = 300_000
+	}
 	messages, err := validateAI(body)
 	if err != nil {
 		h.fail(w, err)
+		return
+	}
+	inferenceContext, cancelInference := context.WithTimeout(r.Context(), time.Duration(body.TimeoutMillis)*time.Millisecond)
+	defer cancelInference()
+	runtime := h.ai.State(inferenceContext)
+	if runtime.Availability != "ready" && runtime.Availability != "inference_failed" {
+		code := "model_load_failed"
+		retryable := true
+		if runtime.Failure != nil {
+			code = runtime.Failure.Code
+			retryable = runtime.Failure.Retryable
+		}
+		h.fail(w, apperror.New(http.StatusServiceUnavailable, code, "The Node AI runtime is unavailable."))
+		h.logger.Printf("AI request rejected availability=%s retryable=%t", runtime.Availability, retryable)
 		return
 	}
 	limiter := h.chat
@@ -62,7 +82,7 @@ func (h *Handler) streamAI(w http.ResponseWriter, r *http.Request, session *auth
 		}
 		return err
 	}
-	capabilities := h.ai.Capabilities()
+	capabilities := runtime.Capabilities
 	_ = emit(map[string]any{
 		"type": "started", "runId": body.RunID,
 		"modelId": capabilities["modelId"], "parameterCount": capabilities["parameterCount"],
@@ -76,7 +96,7 @@ func (h *Handler) streamAI(w http.ResponseWriter, r *http.Request, session *auth
 	inputTokens := 0
 	outputTokens := 0
 	reasoningBytes := 0
-	err = h.ai.StreamChat(r.Context(), messages, func(event localai.Event) error {
+	err = h.ai.StreamChat(inferenceContext, messages, func(event localai.Event) error {
 		if event.Type == "delta" {
 			defer func() { sequence++ }()
 			return emit(map[string]any{"type": "delta", "runId": body.RunID, "sequence": sequence, "text": event.Text})
@@ -95,7 +115,11 @@ func (h *Handler) streamAI(w http.ResponseWriter, r *http.Request, session *auth
 	})
 	if err != nil && r.Context().Err() == nil {
 		h.logger.Printf("streaming local model request failed: %v", err)
-		_ = emit(map[string]any{"type": "failed", "runId": body.RunID, "code": "model_unavailable", "retryable": true})
+		code := "inference_failed"
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			code = "timeout"
+		}
+		_ = emit(map[string]any{"type": "failed", "runId": body.RunID, "code": code, "retryable": true})
 	}
 	h.logger.Printf(
 		"AI request finished workload=%s duration=%s inputBytes=%d inputTokens=%d outputTokens=%d reasoningBytes=%d error=%t",
@@ -104,7 +128,7 @@ func (h *Handler) streamAI(w http.ResponseWriter, r *http.Request, session *auth
 }
 
 func validateAI(body aiRequest) ([]localai.Message, error) {
-	if body.ContractVersion != 1 || !uuid.MatchString(body.RunID) || len(body.ConversationID) < 1 || len(body.ConversationID) > 200 || body.Messages == nil {
+	if body.ContractVersion != 1 || !uuid.MatchString(body.RunID) || len(body.ConversationID) < 1 || len(body.ConversationID) > 200 || body.Messages == nil || body.TimeoutMillis < 1_000 || body.TimeoutMillis > 600_000 {
 		return nil, apperror.New(400, "invalid_ai_request", "The AI request is invalid.")
 	}
 	if len(body.Messages) < 1 || len(body.Messages) > 20 {

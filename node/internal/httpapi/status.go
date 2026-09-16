@@ -7,10 +7,10 @@ func (h *Handler) health(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
+	runtime := h.ai.State(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
-		"service":      "source-node",
-		"apiVersion":   1,
-		"llmAvailable": h.ai.Status(r.Context()),
-		"ai":           h.ai.Capabilities(),
+		"service":    "source-node",
+		"apiVersion": 1,
+		"aiRuntime":  runtime,
 	})
 }

@@ -6,8 +6,14 @@ import com.source.client.model.PairingInvitation
 import com.source.client.model.PairingResult
 import com.source.client.model.TrustedNode
 import com.source.client.ai.SOURCE_AI_CONTRACT_VERSION
+import com.source.client.ai.PROMPT_POLICY_NONE_V1
+import com.source.client.ai.SourceAiAvailability
+import com.source.client.ai.SourceAiCapabilities
+import com.source.client.ai.SourceAiCapability
 import com.source.client.ai.SourceAiEvent
+import com.source.client.ai.SourceAiReasoning
 import com.source.client.ai.SourceAiRequest
+import com.source.client.ai.SourceAiRuntimeState
 import com.source.client.security.SourceCrypto
 import com.source.client.storage.EncryptedUploadPayload
 import com.source.client.storage.LibraryItem
@@ -187,7 +193,7 @@ class SourceNodeApi {
         trusted.copy(displayName = displayName)
     }
 
-    suspend fun availableAiModel(apiBaseUrl: String, trusted: TrustedNode): AiModelMetadata? =
+    suspend fun aiRuntimeState(apiBaseUrl: String, trusted: TrustedNode): SourceAiRuntimeState =
         withContext(Dispatchers.IO) {
             val connection = openConnection(
                 "${apiBaseUrl.removeSuffix("/")}/status",
@@ -201,17 +207,60 @@ class SourceNodeApi {
                 val status = connection.responseCode
                 if (status !in 200..299) throw apiError(connection, status)
                 val response = connection.inputStream.bufferedReader(Charsets.UTF_8).use { JSONObject(it.readText()) }
-                if (!response.optBoolean("llmAvailable", false) || response.isNull("ai")) return@withContext null
-                response.getJSONObject("ai").let { ai ->
-                    AiModelMetadata(
-                        modelId = ai.requiredString("modelId"),
-                        parameterCount = ai.getLong("parameterCount"),
+                val runtime = response.getJSONObject("aiRuntime")
+                val availability = runCatching {
+                    SourceAiAvailability.valueOf(runtime.requiredString("availability").uppercase())
+                }.getOrElse {
+                    throw SourceApiException("invalid_response", "The Node returned an unknown AI runtime state.")
+                }
+                val capabilitiesJson = runtime.optJSONObject("capabilities")
+                val model = capabilitiesJson?.let { ai ->
+                    AiModelMetadata(ai.requiredString("modelId"), ai.getLong("parameterCount"))
+                }
+                val capabilities = capabilitiesJson?.let { ai ->
+                    val modalities = ai.getJSONArray("modalities")
+                    SourceAiCapabilities(
+                        capabilities = (0 until modalities.length()).mapTo(mutableSetOf()) { index ->
+                            when (modalities.getString(index)) {
+                                "text" -> SourceAiCapability.TEXT
+                                "vision" -> SourceAiCapability.VISION
+                                else -> throw SourceApiException(
+                                    "invalid_response",
+                                    "The Node returned an unknown AI capability.",
+                                )
+                            }
+                        },
+                        streaming = ai.getBoolean("streaming"),
+                        cancellation = ai.getBoolean("cancellation"),
+                        maximumContextTokens = ai.getInt("maximumContextTokens"),
+                        promptPolicy = ai.requiredString("promptPolicy").also {
+                            if (it != PROMPT_POLICY_NONE_V1) throw SourceApiException(
+                                "unsupported_ai_contract",
+                                "The Node uses an unsupported AI prompt policy.",
+                            )
+                        },
+                        reasoning = when (ai.requiredString("reasoning")) {
+                            "off" -> SourceAiReasoning.OFF
+                            else -> throw SourceApiException(
+                                "unsupported_ai_contract",
+                                "The Node uses unsupported AI reasoning.",
+                            )
+                        },
                     )
                 }
+                SourceAiRuntimeState(
+                    availability = availability,
+                    model = model,
+                    capabilities = capabilities,
+                    failureCode = runtime.optJSONObject("failure")?.optString("code")?.takeIf(String::isNotBlank),
+                )
             } finally {
                 connection.disconnect()
             }
         }
+
+    suspend fun availableAiModel(apiBaseUrl: String, trusted: TrustedNode): AiModelMetadata? =
+        aiRuntimeState(apiBaseUrl, trusted).takeIf { it.isUsable }?.model
 
     fun streamAi(
         apiBaseUrl: String,
@@ -226,7 +275,7 @@ class SourceNodeApi {
         val worker = launch(Dispatchers.IO) {
             try {
                 connection.requestMethod = "POST"
-                connection.readTimeout = CHAT_TIMEOUT_MILLIS
+                connection.readTimeout = (request.timeoutMillis + STREAM_TIMEOUT_GRACE_MILLIS).toInt()
                 connection.doOutput = true
                 connection.setRequestProperty("Content-Type", "application/json")
                 connection.setRequestProperty("Accept", "application/x-ndjson")
@@ -235,6 +284,7 @@ class SourceNodeApi {
                     put("runId", request.runId)
                     put("conversationId", request.conversationId)
                     put("workload", request.workload.name.lowercase())
+                    put("timeoutMillis", request.timeoutMillis)
                     put("messages", JSONArray().apply {
                         request.messages.forEach { message ->
                             put(JSONObject().apply {
@@ -691,7 +741,10 @@ class SourceNodeApi {
         "invalid_recovery_key" -> "The recovery key is incorrect."
         "recovery_not_configured" -> "The user does not have a recovery key."
         "authentication_required" -> "The Node no longer recognizes this client."
-        "model_unavailable" -> "The local AI model on the Node is unavailable."
+        "model_unavailable", "model_not_installed", "model_load_failed", "node_unavailable" ->
+            "The local AI model on the Node is unavailable."
+        "inference_failed" -> "The AI runtime could not complete the response."
+        "timeout" -> "The AI runtime timed out."
         "silver_model_unavailable", "silver_refinement_failed" ->
             "The Node could not refine knowledge from this source."
         "chat_rate_limited" -> "Too many AI requests. Wait a moment."
@@ -709,7 +762,7 @@ class SourceNodeApi {
 
     private companion object {
         const val NETWORK_TIMEOUT_MILLIS = 8_000
-        const val CHAT_TIMEOUT_MILLIS = 310_000
+        const val STREAM_TIMEOUT_GRACE_MILLIS = 10_000L
         const val LIBRARY_TIMEOUT_MILLIS = 10 * 60_000
         const val LIBRARY_BUFFER_BYTES = 64 * 1024
         val STORAGE_APP_PATTERN = Regex("^[a-z][a-z0-9-]{1,31}$")

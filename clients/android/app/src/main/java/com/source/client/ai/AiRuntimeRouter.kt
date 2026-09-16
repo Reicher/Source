@@ -10,17 +10,34 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 
-internal enum class AiRuntimeTarget { THIS_DEVICE, NODE }
+internal enum class AiRuntimeTarget { THIS_DEVICE, NODE, UNAVAILABLE }
 
-internal fun resolveAiRuntime(selection: AiSelection, nodeConnected: Boolean): AiRuntimeTarget = when (selection) {
-    AiSelection.AUTO -> if (nodeConnected) AiRuntimeTarget.NODE else AiRuntimeTarget.THIS_DEVICE
+internal fun resolveAiRuntime(selection: AiSelection, nodeAiUsable: Boolean): AiRuntimeTarget = when (selection) {
+    AiSelection.AUTO -> if (nodeAiUsable) AiRuntimeTarget.NODE else AiRuntimeTarget.THIS_DEVICE
     AiSelection.THIS_DEVICE -> AiRuntimeTarget.THIS_DEVICE
-    AiSelection.NODE -> if (nodeConnected) AiRuntimeTarget.NODE else AiRuntimeTarget.THIS_DEVICE
+    AiSelection.NODE -> if (nodeAiUsable) AiRuntimeTarget.NODE else AiRuntimeTarget.UNAVAILABLE
 }
 
 internal fun canFallbackFromNode(error: Exception): Boolean =
     error !is SourceApiException ||
-        (!error.responseStarted && error.code in setOf("model_unavailable", "http_502", "http_503", "http_504"))
+        (!error.responseStarted && error.code in NODE_FALLBACK_CODES)
+
+private val NODE_FALLBACK_CODES = setOf(
+    "model_not_installed",
+    "model_unavailable",
+    "model_load_failed",
+    "inference_failed",
+    "timeout",
+    "node_unavailable",
+    "http_502",
+    "http_503",
+    "http_504",
+)
+
+private val NODE_TRANSPORT_FAILURE_CODES = setOf(
+    SourceAiFailureCode.NODE_UNAVAILABLE.wireValue,
+    SourceAiFailureCode.STREAM_INTERRUPTED.wireValue,
+)
 
 /** Routes one shared AI stream contract to the selected inference runtime. */
 class AiRuntimeRouter internal constructor(
@@ -38,12 +55,30 @@ class AiRuntimeRouter internal constructor(
         local,
         connectedNode,
         onNodeUnavailable,
-        { connected -> NodeAiRuntime(nodeApi, connected.discovered.apiBaseUrl, connected.trusted) },
+        { connected ->
+            NodeAiRuntime(
+                nodeApi,
+                connected.discovered.apiBaseUrl,
+                connected.trusted,
+                connected.aiRuntimeState,
+            )
+        },
     )
 
     private var selection = AiSelection.AUTO
 
-    override val capabilities: SourceAiCapabilities = local.capabilities
+    override val runtimeState: SourceAiRuntimeState
+        get() {
+            val connected = connectedNode()
+            return when (resolveAiRuntime(selection, connected?.aiRuntimeState?.isUsable == true)) {
+                AiRuntimeTarget.THIS_DEVICE -> local.runtimeState
+                AiRuntimeTarget.NODE -> checkNotNull(connected).aiRuntimeState
+                AiRuntimeTarget.UNAVAILABLE -> SourceAiRuntimeState(
+                    SourceAiAvailability.MODEL_LOAD_FAILED,
+                    failureCode = SourceAiFailureCode.NODE_UNAVAILABLE.wireValue,
+                )
+            }
+        }
 
     fun select(selection: AiSelection) {
         this.selection = selection
@@ -52,12 +87,28 @@ class AiRuntimeRouter internal constructor(
     override fun stream(request: SourceAiRequest): Flow<SourceAiEvent> {
         val selected = selection
         val connected = connectedNode()
-        if (resolveAiRuntime(selected, connected != null) == AiRuntimeTarget.THIS_DEVICE || connected == null) {
-            return local.stream(request)
+        when (resolveAiRuntime(selected, connected?.aiRuntimeState?.isUsable == true)) {
+            AiRuntimeTarget.THIS_DEVICE -> return local.stream(request)
+            AiRuntimeTarget.UNAVAILABLE -> return flow {
+                emit(SourceAiEvent.Failed(
+                    request.runId,
+                    SourceAiFailureCode.NODE_UNAVAILABLE.wireValue,
+                    SourceAiFailureCode.NODE_UNAVAILABLE.retryable,
+                ))
+            }
+            AiRuntimeTarget.NODE -> Unit
         }
+        checkNotNull(connected)
         return flow {
             var responseStarted = false
             var pendingStarted: SourceAiEvent.Started? = null
+            var nodeUnavailableReported = false
+            fun reportNodeUnavailable(code: String?) {
+                if (!nodeUnavailableReported && code != null && code in NODE_TRANSPORT_FAILURE_CODES) {
+                    nodeUnavailableReported = true
+                    onNodeUnavailable(connected)
+                }
+            }
             try {
                 nodeRuntime(connected).stream(request).collect { event ->
                     when (event) {
@@ -74,12 +125,13 @@ class AiRuntimeRouter internal constructor(
                             emit(event)
                         }
                         is SourceAiEvent.Failed -> {
+                            reportNodeUnavailable(event.code)
                             val failure = SourceApiException(
                                 event.code,
                                 "The Node AI could not complete the response.",
                                 responseStarted,
                             )
-                            if (canFallbackFromNode(failure)) throw failure
+                            if (selected == AiSelection.AUTO && canFallbackFromNode(failure)) throw failure
                             pendingStarted?.let { emit(it) }
                             pendingStarted = null
                             emit(event)
@@ -89,8 +141,24 @@ class AiRuntimeRouter internal constructor(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                if (!canFallbackFromNode(error)) throw error
-                if (error !is SourceApiException) onNodeUnavailable(connected)
+                val failure = error as? SourceApiException ?: SourceApiException(
+                    if (responseStarted) {
+                        SourceAiFailureCode.STREAM_INTERRUPTED.wireValue
+                    } else {
+                        SourceAiFailureCode.NODE_UNAVAILABLE.wireValue
+                    },
+                    "The Node AI connection was interrupted.",
+                    responseStarted,
+                )
+                reportNodeUnavailable(failure.code)
+                if (selected != AiSelection.AUTO || !canFallbackFromNode(failure)) {
+                    emit(SourceAiEvent.Failed(
+                        request.runId,
+                        failure.code,
+                        retryable = true,
+                    ))
+                    return@flow
+                }
                 emitAll(local.stream(request))
             }
         }

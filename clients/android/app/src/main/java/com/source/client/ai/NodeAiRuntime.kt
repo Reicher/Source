@@ -10,19 +10,14 @@ import kotlinx.coroutines.flow.flow
 
 class NodeAiRuntime internal constructor(
     private val source: (SourceAiRequest) -> Flow<SourceAiEvent>,
+    override val runtimeState: SourceAiRuntimeState,
 ) : SourceAiRuntime {
     constructor(
         api: SourceNodeApi,
         apiBaseUrl: String,
         trusted: TrustedNode,
-    ) : this({ request -> api.streamAi(apiBaseUrl, trusted, request) })
-
-    override val capabilities = SourceAiCapabilities(
-        capabilities = setOf(SourceAiCapability.TEXT),
-        streaming = true,
-        cancellation = true,
-        maximumContextTokens = NODE_CONTEXT_TOKENS,
-    )
+        runtimeState: SourceAiRuntimeState,
+    ) : this({ request -> api.streamAi(apiBaseUrl, trusted, request) }, runtimeState)
 
     override fun stream(request: SourceAiRequest): Flow<SourceAiEvent> = flow {
         var emittedOutput = false
@@ -37,25 +32,18 @@ class NodeAiRuntime internal constructor(
                 emit(event)
             }
             if (!terminated) {
-                throw SourceApiException("model_unavailable", "The Node returned an incomplete AI response.")
+                emit(SourceAiEvent.Failed(request.runId, SourceAiFailureCode.INFERENCE_FAILED.wireValue, true))
             }
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
             val apiError = error as? SourceApiException
-            if (emittedOutput && apiError?.responseStarted != true && apiError?.code != STREAM_INTERRUPTED_CODE) {
-                throw SourceApiException(
-                    STREAM_INTERRUPTED_CODE,
-                    "The connection to the Node was interrupted during the response.",
-                    responseStarted = true,
-                )
+            val code = if (emittedOutput) {
+                SourceAiFailureCode.STREAM_INTERRUPTED.wireValue
+            } else {
+                apiError?.code ?: SourceAiFailureCode.NODE_UNAVAILABLE.wireValue
             }
-            throw error
+            emit(SourceAiEvent.Failed(request.runId, code, retryable = true))
         }
-    }
-
-    private companion object {
-        const val NODE_CONTEXT_TOKENS = 8_192
-        const val STREAM_INTERRUPTED_CODE = "node_stream_interrupted_after_output"
     }
 }

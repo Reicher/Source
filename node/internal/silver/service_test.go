@@ -17,7 +17,10 @@ import (
 
 type testAI struct{ calls int }
 
-func (a *testAI) Status(context.Context) bool  { return true }
+func (a *testAI) Status(context.Context) bool { return true }
+func (a *testAI) State(context.Context) localai.RuntimeState {
+	return localai.RuntimeState{Availability: "ready", Capabilities: a.Capabilities()}
+}
 func (a *testAI) Capabilities() map[string]any { return map[string]any{"modelId": "test-model"} }
 func (a *testAI) StreamChat(_ context.Context, _ []localai.Message, yield func(localai.Event) error) error {
 	a.calls++

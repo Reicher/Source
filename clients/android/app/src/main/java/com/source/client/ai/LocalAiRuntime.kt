@@ -8,31 +8,75 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.channels.trySendBlocking
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicBoolean
 
 class LocalAiRuntime(context: Context) : SourceAiRuntime {
-    private val native = LlamaCppNative(context.applicationContext)
+    private val applicationContext = context.applicationContext
+    private val native = LlamaCppNative(applicationContext)
     private val inferenceMutex = Mutex()
     private val runtimeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    override val capabilities = SourceAiCapabilities(
+    private val localCapabilities = SourceAiCapabilities(
         capabilities = setOf(SourceAiCapability.TEXT),
         streaming = true,
         cancellation = true,
         maximumContextTokens = CONTEXT_TOKENS,
     )
 
+    @Volatile
+    override var runtimeState = if (BundledModelAssets.areInstalled(applicationContext.assets)) {
+        SourceAiRuntimeState(SourceAiAvailability.MODEL_PRESENT, LOCAL_AI_MODEL, localCapabilities)
+    } else {
+        SourceAiRuntimeState(SourceAiAvailability.MODEL_NOT_INSTALLED)
+    }
+        private set
+
     override fun stream(request: SourceAiRequest): Flow<SourceAiEvent> = callbackFlow {
         validate(request)
+        if (runtimeState.availability == SourceAiAvailability.MODEL_NOT_INSTALLED) {
+            trySendBlocking(SourceAiEvent.Failed(
+                request.runId,
+                SourceAiFailureCode.MODEL_NOT_INSTALLED.wireValue,
+                SourceAiFailureCode.MODEL_NOT_INSTALLED.retryable,
+            ))
+            close()
+            return@callbackFlow
+        }
         trySendBlocking(SourceAiEvent.Started(request.runId, LOCAL_AI_MODEL))
         var sequence = 0L
+        val timedOut = AtomicBoolean(false)
+        val timeout = launch {
+            delay(request.timeoutMillis)
+            timedOut.set(true)
+            native.cancel(request.runId)
+        }
         val generation = launch(Dispatchers.IO) {
-            inferenceMutex.withLock {
+            runQueuedLocalInference(
+                inferenceMutex,
+                timedOut,
+                onTimedOut = {
+                    runtimeState = SourceAiRuntimeState(
+                        SourceAiAvailability.INFERENCE_FAILED,
+                        LOCAL_AI_MODEL,
+                        localCapabilities,
+                        SourceAiFailureCode.TIMEOUT.wireValue,
+                    )
+                    trySendBlocking(SourceAiEvent.Failed(
+                        request.runId,
+                        SourceAiFailureCode.TIMEOUT.wireValue,
+                        SourceAiFailureCode.TIMEOUT.retryable,
+                    ))
+                    timeout.cancel()
+                    close()
+                },
+            ) {
                 try {
                     val result = native.generate(
                         request = request,
@@ -46,7 +90,24 @@ class LocalAiRuntime(context: Context) : SourceAiRuntime {
                             }
                         },
                     )
-                    if (result.finishReason != "cancelled") {
+                    if (result.finishReason == "cancelled" && timedOut.get()) {
+                        runtimeState = SourceAiRuntimeState(
+                            SourceAiAvailability.INFERENCE_FAILED,
+                            LOCAL_AI_MODEL,
+                            localCapabilities,
+                            SourceAiFailureCode.TIMEOUT.wireValue,
+                        )
+                        trySendBlocking(SourceAiEvent.Failed(
+                            request.runId,
+                            SourceAiFailureCode.TIMEOUT.wireValue,
+                            SourceAiFailureCode.TIMEOUT.retryable,
+                        ))
+                    } else if (result.finishReason != "cancelled") {
+                        runtimeState = SourceAiRuntimeState(
+                            SourceAiAvailability.READY,
+                            LOCAL_AI_MODEL,
+                            localCapabilities,
+                        )
                         trySendBlocking(
                             SourceAiEvent.Completed(
                                 runId = request.runId,
@@ -60,14 +121,18 @@ class LocalAiRuntime(context: Context) : SourceAiRuntime {
                 } catch (_: CancellationException) {
                     close()
                 } catch (error: Exception) {
+                    val failure = runtimeFailure(error)
+                    runtimeState = failure
                     trySendBlocking(
                         SourceAiEvent.Failed(
                             runId = request.runId,
-                            code = errorCode(error),
-                            retryable = false,
+                            code = checkNotNull(failure.failureCode),
+                            retryable = failure.failureCode != SourceAiFailureCode.MODEL_NOT_INSTALLED.wireValue,
                         ),
                     )
-                    close(error)
+                    close()
+                } finally {
+                    timeout.cancel()
                 }
             }
         }
@@ -92,11 +157,25 @@ class LocalAiRuntime(context: Context) : SourceAiRuntime {
         }) { "The local runtime supports non-empty text messages only" }
     }
 
-    private fun errorCode(error: Exception): String = when {
-        error.message?.contains("token budget", ignoreCase = true) == true -> "context_exhausted"
-        error.message?.contains("output budget", ignoreCase = true) == true -> "output_exhausted"
-        error.message?.contains("model part", ignoreCase = true) == true -> "model_missing"
-        else -> "inference_failed"
+    private fun runtimeFailure(error: Exception): SourceAiRuntimeState {
+        val message = error.message.orEmpty()
+        val availability = when {
+            message.contains("model part", ignoreCase = true) -> SourceAiAvailability.MODEL_NOT_INSTALLED
+            message.contains("load", ignoreCase = true) || message.contains("engine", ignoreCase = true) ->
+                SourceAiAvailability.MODEL_LOAD_FAILED
+            else -> SourceAiAvailability.INFERENCE_FAILED
+        }
+        val code = when (availability) {
+            SourceAiAvailability.MODEL_NOT_INSTALLED -> SourceAiFailureCode.MODEL_NOT_INSTALLED
+            SourceAiAvailability.MODEL_LOAD_FAILED -> SourceAiFailureCode.MODEL_LOAD_FAILED
+            else -> SourceAiFailureCode.INFERENCE_FAILED
+        }
+        return SourceAiRuntimeState(
+            availability,
+            model = LOCAL_AI_MODEL.takeUnless { availability == SourceAiAvailability.MODEL_NOT_INSTALLED },
+            capabilities = localCapabilities.takeUnless { availability == SourceAiAvailability.MODEL_NOT_INSTALLED },
+            failureCode = code.wireValue,
+        )
     }
 
     private companion object {
@@ -105,6 +184,15 @@ class LocalAiRuntime(context: Context) : SourceAiRuntime {
         const val INFERENCE_THREADS = 4
         const val MAXIMUM_MESSAGES = 64
     }
+}
+
+internal suspend fun runQueuedLocalInference(
+    mutex: Mutex,
+    timedOut: AtomicBoolean,
+    onTimedOut: () -> Unit,
+    generate: () -> Unit,
+) = mutex.withLock {
+    if (timedOut.get()) onTimedOut() else generate()
 }
 
 internal const val LOCAL_AI_EVENT_BUFFER_CAPACITY = 64

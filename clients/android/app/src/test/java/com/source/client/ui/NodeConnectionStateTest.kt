@@ -7,6 +7,11 @@ import com.source.client.model.NodeConnectionState
 import com.source.client.model.TrustedNode
 import com.source.client.model.UnlockedVault
 import com.source.client.model.bindAuthoritativeNode
+import com.source.client.ai.SourceAiAvailability
+import com.source.client.ai.SourceAiCapabilities
+import com.source.client.ai.SourceAiCapability
+import com.source.client.ai.SourceAiRuntimeState
+import com.source.client.model.AiModelMetadata
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
@@ -19,19 +24,48 @@ class NodeConnectionStateTest {
 
     @Test
     fun `connected node exists only in the connected state`() {
-        val connected = ConnectedNode(discovered, trusted)
+        val connected = ConnectedNode(discovered, trusted, readyAi())
+        val degraded = connected.copy(
+            aiRuntimeState = SourceAiRuntimeState(SourceAiAvailability.MODEL_NOT_INSTALLED),
+        )
 
-        assertEquals(connected, NodeConnectionState.Connected(connected).connectedNodeOrNull())
+        assertEquals(connected, NodeConnectionState.Ready(connected).connectedNodeOrNull())
+        assertEquals(degraded, NodeConnectionState.Degraded(
+            degraded,
+            com.source.client.model.NodeDegradedReason.AI_UNAVAILABLE,
+        ).connectedNodeOrNull())
         assertNull(NodeConnectionState.Discovering.connectedNodeOrNull())
         assertNull(NodeConnectionState.Authenticating(discovered, trusted, 0).connectedNodeOrNull())
+        assertTrue(NodeConnectionState.Ready(connected).nodeStorageUsable())
+        assertTrue(NodeConnectionState.Ready(connected).nodeAiUsable())
+        assertTrue(NodeConnectionState.Degraded(
+            degraded,
+            com.source.client.model.NodeDegradedReason.AI_UNAVAILABLE,
+        ).nodeStorageUsable())
+        assertTrue(!NodeConnectionState.Degraded(
+            degraded,
+            com.source.client.model.NodeDegradedReason.AI_UNAVAILABLE,
+        ).nodeAiUsable())
     }
 
     @Test
     fun `authentication state identifies its discovery endpoint explicitly`() {
         val state = NodeConnectionState.Authenticating(discovered, trusted, 2)
 
-        assertTrue(state.isAuthenticating(discovered))
+        assertTrue(state.isConnectingTo(discovered))
         assertEquals(2, state.attempt)
+
+        val retry = NodeConnectionState.Retrying(
+            discovered,
+            trusted,
+            attempt = 3,
+            retryInMillis = 4_000,
+            reason = com.source.client.model.NodeDisconnectReason.AUTHENTICATION_FAILED,
+        )
+        assertTrue(retry.isConnectingTo(discovered))
+        assertEquals(4_000, retry.retryInMillis)
+        assertEquals(listOf(1_000L, 2_000L, 4_000L, 8_000L, 16_000L, 16_000L),
+            (0..5).map(::reconnectDelayMillis))
     }
 
     @Test
@@ -68,4 +102,10 @@ class NodeConnectionStateTest {
             trusted.copy(displayName = "Renamed"),
         ).authoritativeNode)
     }
+
+    private fun readyAi() = SourceAiRuntimeState(
+        SourceAiAvailability.READY,
+        AiModelMetadata("model", 1),
+        SourceAiCapabilities(setOf(SourceAiCapability.TEXT), true, true, 1_024),
+    )
 }
