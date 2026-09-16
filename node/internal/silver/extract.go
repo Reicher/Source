@@ -52,17 +52,24 @@ func extract(ctx context.Context, ai localai.Backend, source Source, modelID str
 
 func extractBatch(ctx context.Context, ai localai.Backend, chunk string, authoredBySelf bool) (string, error) {
 	var output strings.Builder
-	err := ai.StreamChat(ctx, []localai.Message{{Role: "user", Content: extractionPrompt(chunk, authoredBySelf)}}, localai.ChatOptions{
-		Temperature: 0.1,
-		TopP:        0.8,
-		Reasoning:   true,
-		JSONSchema:  extractionJSONSchema(),
+	err := ai.StreamChat(localai.WithWorkload(ctx, localai.WorkloadBackground), []localai.Message{{Role: "user", Content: extractionPrompt(chunk, authoredBySelf)}}, localai.ChatOptions{
+		Temperature:           0.1,
+		TopP:                  0.8,
+		Reasoning:             true,
+		ReasoningBudgetTokens: 256,
+		JSONSchema:            extractionJSONSchema(),
 	}, func(event localai.Event) error {
 		if event.Type == "delta" {
 			output.WriteString(event.Text)
+			if _, parseErr := parseExtraction(output.String(), chunk); parseErr == nil {
+				return localai.ErrStreamComplete
+			}
 		}
 		return nil
 	})
+	if errors.Is(err, localai.ErrStreamComplete) {
+		err = nil
+	}
 	if err != nil {
 		return "", err
 	}

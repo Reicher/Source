@@ -41,7 +41,7 @@ func run() error {
 	}
 	defer db.Close()
 	logger := log.New(os.Stdout, "", log.LstdFlags)
-	ai := localai.New(cfg)
+	ai := localai.NewCoordinator(localai.New(cfg))
 	pairs := pairing.New(db, cfg)
 	if len(os.Args) > 1 {
 		switch os.Args[1] {

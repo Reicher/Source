@@ -435,10 +435,10 @@ Candidates from verified profile-authored sources additionally carry
 `"authoredBySelf": true`. The flag records source context and is not inferred
 from pronouns.
 
-Silver extraction uses low-randomness sampling, enables the model's internal
-reasoning, and constrains visible output to the candidate JSON schema. These
-settings are private to background refinement; normal chat continues to run
-with reasoning disabled.
+Silver extraction uses low-randomness sampling, enables a bounded amount of the
+model's internal reasoning, and constrains visible output to the candidate JSON
+schema. These settings are private to background refinement; normal chat
+continues to run with reasoning disabled.
 
 The subject and object are local mentions, not Entity identities. An attribute
 candidate has a scalar `value`; a relationship candidate has an
@@ -464,7 +464,10 @@ Each successful inference batch is checkpointed before the next batch starts.
 After interruption or retry, the Node validates those checkpoints against the
 input, processor, model, batch index, and batch-content hash and resumes at the
 first incomplete batch. Processing continues automatically; `cancel` is
-terminal for that job.
+terminal for that job. The Node serializes access to its one-slot model runtime.
+Interactive Chat preempts an active refinement batch; the durable job remains
+running, waits while Chat owns the runtime, and automatically retries that
+incomplete batch after Chat finishes. Completed batch checkpoints are retained.
 The accepted processor ID, processor version, and model ID must still match the
 running Node before any checkpoint is reused. Lifecycle and completed-versus-total
 progress are durable as `queued`, `running`, `completed`, `failed`, or
@@ -479,6 +482,10 @@ checkpoints where possible. Immediately before publication, the Node also
 verifies that the job's Bronze content hash is still the current accepted
 generation for that source. A stale retry can therefore never replace
 Silver produced from a newer source generation.
+
+Removing a Bronze source cancels any inference currently running for that
+source as well as its durable job, so a deleted source cannot continue holding
+the runtime or block later FIFO work.
 
 One refinement request is bounded to 19,200 UTF-8 bytes. The Node processes it
 in deterministic chunks of up to 6,000 bytes with up to 600 bytes of preceding

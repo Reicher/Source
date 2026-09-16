@@ -75,10 +75,11 @@ func TestLlamaStreamsOnlyVisibleContent(t *testing.T) {
 
 	schema := map[string]any{"type": "object", "additionalProperties": false}
 	e = client.StreamChat(context.Background(), []Message{{Role: "user", Content: "Extract facts"}}, ChatOptions{
-		Temperature: 0.1,
-		TopP:        0.9,
-		Reasoning:   true,
-		JSONSchema:  schema,
+		Temperature:           0.1,
+		TopP:                  0.9,
+		Reasoning:             true,
+		ReasoningBudgetTokens: 256,
+		JSONSchema:            schema,
 	}, func(Event) error { return nil })
 	if e != nil {
 		t.Fatal(e)
@@ -89,6 +90,21 @@ func TestLlamaStreamsOnlyVisibleContent(t *testing.T) {
 	}
 	if !reflect.DeepEqual(request["json_schema"], schema) {
 		t.Fatalf("unexpected extraction JSON schema: %#v", request["json_schema"])
+	}
+	if request["reasoning_budget_tokens"] != float64(256) {
+		t.Fatalf("unexpected extraction reasoning budget: %#v", request)
+	}
+
+	deltas := 0
+	e = client.StreamChat(context.Background(), []Message{{Role: "user", Content: "Stop after the result"}}, ChatOptions{}, func(event Event) error {
+		if event.Type == "delta" {
+			deltas++
+			return ErrStreamComplete
+		}
+		return nil
+	})
+	if e != nil || deltas != 1 || client.State(context.Background()).Availability != "ready" {
+		t.Fatalf("early completed stream error=%v deltas=%d state=%#v", e, deltas, client.State(context.Background()))
 	}
 }
 
