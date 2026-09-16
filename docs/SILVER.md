@@ -407,9 +407,8 @@ Gothenburg`.
 Earlier Android builds persisted Client-produced Evidence, Observation, Entity,
 and Claim records. Those snapshots remain readable offline only as a migration
 cache: they are never uploaded to the canonical Silver namespace, and the first
-Node-produced `silver-datasets` head replaces them. Old Android refinement
-checkpoints are discarded while the user's paused/refinement preference is
-preserved.
+Node-produced `silver-datasets` head replaces them. Refinement working state and
+retry checkpoints live only on the Node.
 
 The Node `source.node.silver-extraction` processor version `1` emits one
 `attribute-candidate` or `relationship-candidate` Observation for each valid
@@ -440,19 +439,18 @@ processed repeatedly.
 
 The Client submits plaintext text Bronze to its authenticated authoritative
 Node. Acceptance creates a durable Node-owned job with an immutable input
-snapshot. The initiating Client is only an observer and controller after the
+snapshot. The initiating Client is only an observer after the
 Node responds: disconnecting it does not stop the job. One refinement job runs
 per Node and additional accepted jobs remain in FIFO order.
 
 Each successful inference batch is checkpointed before the next batch starts.
 After interruption or retry, the Node validates those checkpoints against the
 input, processor, model, batch index, and batch-content hash and resumes at the
-first incomplete batch. `pause` takes effect after the current batch and is
-resumable only through an explicit Node `resume` action; an observing Client
-never resumes a paused job automatically. `cancel` is terminal for that job.
+first incomplete batch. Processing continues automatically; `cancel` is
+terminal for that job.
 The accepted processor ID, processor version, and model ID must still match the
 running Node before any checkpoint is reused. Lifecycle and completed-versus-total
-progress are durable as `queued`, `running`, `paused`, `completed`, `failed`, or
+progress are durable as `queued`, `running`, `completed`, `failed`, or
 `cancelled` and can be read by any reconnecting Client for the profile.
 
 Checkpoints are internal staged state. They never appear in canonical storage
@@ -462,7 +460,7 @@ dataset as a Node-originated canonical revision. A lost response, disconnect,
 restart, retry, or resubmission reuses the same accepted job or safe generation
 checkpoints where possible. Immediately before publication, the Node also
 verifies that the job's Bronze content hash is still the current accepted
-generation for that source. A stale retry or resume can therefore never replace
+generation for that source. A stale retry can therefore never replace
 Silver produced from a newer source generation.
 
 One refinement request is bounded to eight deterministic 2,400-byte chunks

@@ -3,7 +3,6 @@ package com.source.client.ui
 import android.os.SystemClock
 import android.util.Log
 import com.source.client.knowledge.BronzeTextSource
-import com.source.client.knowledge.sha256Hex
 import com.source.client.knowledge.SILVER_EXTRACTION_PROCESSOR_ID
 import com.source.client.knowledge.SILVER_EXTRACTION_COMPLETE_KIND
 import com.source.client.model.AiModelMetadata
@@ -11,13 +10,9 @@ import com.source.client.model.ConnectedNode
 import com.source.client.protocol.SourceApiException
 import com.source.client.protocol.SilverRefinementJob
 import com.source.client.security.VaultSession
-import com.source.client.storage.SilverBatchCheckpoint
-import com.source.client.storage.SilverCheckpointData
-import com.source.client.storage.SilverCheckpointDataset
 import com.source.client.storage.SilverData
 import com.source.client.storage.SilverDataset
 import com.source.client.storage.SilverObservation
-import com.source.client.storage.SilverRefinementCheckpoint
 import com.source.client.storage.SourceDataStore
 import com.source.client.storage.SourceDataSync
 import kotlinx.coroutines.CancellationException
@@ -32,8 +27,6 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.UUID
 
-enum class SilverProcessingState { QUEUED, PROCESSING }
-
 data class SilverBatchProgress(
     val completedBatches: Int,
     val totalBatches: Int,
@@ -45,12 +38,8 @@ data class SilverBatchProgress(
 
 data class SilverUiState(
     val dataset: SilverDataset = SilverDataset(),
-    val processing: Map<String, SilverProcessingState> = emptyMap(),
-    val progress: Map<String, SilverBatchProgress> = emptyMap(),
-    val refinementPaused: Boolean = false,
-    val pendingSync: Set<String> = emptySet(),
-    val syncing: Set<String> = emptySet(),
-    val syncFailed: Set<String> = emptySet(),
+    val jobs: Map<String, SilverRefinementJob> = emptyMap(),
+    val syncErrors: Set<String> = emptySet(),
 )
 
 internal class SilverController(
@@ -66,13 +55,6 @@ internal class SilverController(
     private val sync = SourceDataSync(SilverData, localStore, nodeApi)
     private var worker: Job? = null
     private var retryWorker: Job? = null
-    private var pausedForInteraction = false
-    private var pausedForBackground = false
-    private var pausedByUser = false
-    private var pausedByNode = false
-    private var checkpoints = SilverCheckpointDataset()
-    private val activeNodeJobs = mutableMapOf<String, String>()
-    private val checkpointStoreMutex = Mutex()
     // A refinement commit and a remote reconciliation both replace the complete persisted snapshot.
     // Keep their read/merge/persist/state transitions atomic so neither can publish stale Silver state.
     private val datasetMutex = Mutex()
@@ -87,11 +69,6 @@ internal class SilverController(
         retryWorker = null
         previousWorker?.cancelAndJoin()
         previousRetryWorker?.cancelAndJoin()
-        pausedForInteraction = false
-        pausedForBackground = false
-        pausedByUser = false
-        pausedByNode = false
-        activeNodeJobs.clear()
         datasetMutex.withLock {
             sync.reset()
             val dataset = if (activeSession == null) {
@@ -99,101 +76,31 @@ internal class SilverController(
             } else {
                 localStore.load(activeSession, SilverData)
             }
-            checkpoints = if (activeSession == null) {
-                SilverCheckpointDataset()
-            } else {
-                checkpointStoreMutex.withLock {
-                    withContext(Dispatchers.Default) {
-                        val legacy = localStore.load(activeSession, SilverCheckpointData)
-                        if (legacy.checkpoints.isEmpty()) {
-                            legacy
-                        } else {
-                            legacy.copy(checkpoints = emptyList()).also {
-                                localStore.save(activeSession, SilverCheckpointData, it)
-                            }
-                        }
-                    }
-                }
-            }
-            pausedByUser = checkpoints.refinementPaused
-            state = SilverUiState(
-                dataset = dataset,
-                refinementPaused = pausedByUser,
-                pendingSync = emptySet(),
-            )
+            state = SilverUiState(dataset = dataset)
             publish()
         }
         if (activeSession != null) refresh()
     }
 
     fun refresh() {
+        if (session() == null || worker?.isCompleted == false) return
         retryWorker?.cancel()
         retryWorker = null
-        if (refinementIsPaused() || session() == null || worker?.isCompleted == false) return
         worker = scope.launch { refineAvailableSources() }
-    }
-
-    fun pauseForInteraction() {
-        pausedForInteraction = true
-        cancelWorker()
-    }
-
-    fun resumeAfterInteraction() {
-        pausedForInteraction = false
-        resumeWhenReady()
-    }
-
-    fun pauseForBackground() {
-        pausedForBackground = true
-        cancelWorker()
-    }
-
-    fun resumeAfterBackground() {
-        pausedForBackground = false
-        resumeWhenReady()
-    }
-
-    fun pauseRefinement() {
-        if (pausedByUser) return
-        pausedByUser = true
-        checkpoints = checkpoints.copy(refinementPaused = true)
-        state = state.copy(refinementPaused = true)
-        cancelWorker()
-        publish()
-        val activeSession = session()
-        val snapshot = checkpoints
-        scope.launch { persistCheckpoints(activeSession, snapshot) }
-        controlActiveNodeJobs("pause")
-    }
-
-    fun resumeRefinement() {
-        if (!pausedByUser && !pausedByNode) return
-        pausedByUser = false
-        pausedByNode = false
-        checkpoints = checkpoints.copy(refinementPaused = false)
-        state = state.copy(refinementPaused = false)
-        publish()
-        val activeSession = session()
-        val snapshot = checkpoints
-        scope.launch { persistCheckpoints(activeSession, snapshot) }
-        controlActiveNodeJobs("resume")
-        resumeWhenReady()
     }
 
     suspend fun synchronize() {
         val activeSession = session() ?: return
         val connected = connectedNode() ?: return
         datasetMutex.withLock {
-            val affected = state.pendingSync
             val syncStartedAt = SystemClock.elapsedRealtime()
-            if (affected.isNotEmpty()) {
-                Log.i(SILVER_LOG_TAG, "Silver sync started items=${affected.size}")
-            }
-            if (affected.isNotEmpty()) {
-                state = state.copy(syncing = affected, syncFailed = state.syncFailed - affected)
-                publish()
-            }
             try {
+                val jobs = nodeApi.silverRefinementJobs(
+                    connected.discovered.apiBaseUrl,
+                    connected.trusted,
+                ).associateBy(SilverRefinementJob::sourceId)
+                state = state.copy(jobs = jobs, syncErrors = emptySet())
+                publish()
                 state.dataset.removedSourceIds.keys.forEach { sourceId ->
                     nodeApi.removeSilver(
                         connected.discovered.apiBaseUrl,
@@ -203,7 +110,8 @@ internal class SilverController(
                     )
                 }
             } catch (error: Exception) {
-                state = state.copy(syncing = emptySet(), syncFailed = state.syncFailed + affected)
+                val awaiting = state.jobs.values.filter { it.state == "completed" }.mapTo(mutableSetOf()) { it.sourceId }
+                state = state.copy(syncErrors = state.syncErrors + awaiting)
                 Log.w(SILVER_LOG_TAG, "Silver removal sync failed error=${syncErrorSummary(error)}")
                 publish()
                 scheduleRetry()
@@ -212,31 +120,22 @@ internal class SilverController(
             sync.synchronize(activeSession, connected, state.dataset) { remote ->
                 state = state.copy(
                     dataset = remote,
-                    pendingSync = emptySet(),
-                    syncing = emptySet(),
-                    syncFailed = emptySet(),
+                    syncErrors = emptySet(),
                 )
                 publish()
             }
-            state = if (sync.isBackedUp) {
-                state.copy(pendingSync = emptySet(), syncing = emptySet(), syncFailed = emptySet())
+            val error = sync.lastError
+            if (error == null) {
+                state = state.copy(syncErrors = emptySet())
+                Log.i(SILVER_LOG_TAG, "Silver sync finished durationMs=${SystemClock.elapsedRealtime() - syncStartedAt}")
             } else {
-                state.copy(syncing = emptySet(), syncFailed = state.syncFailed + affected)
-            }
-            if (affected.isNotEmpty()) {
-                val error = sync.lastError
-                if (sync.isBackedUp) {
-                    Log.i(
-                        SILVER_LOG_TAG,
-                        "Silver sync finished durationMs=${SystemClock.elapsedRealtime() - syncStartedAt}",
-                    )
-                } else {
-                    Log.w(
-                        SILVER_LOG_TAG,
-                        "Silver sync failed durationMs=${SystemClock.elapsedRealtime() - syncStartedAt} " +
-                            "error=${syncErrorSummary(error)}",
-                    )
-                }
+                val awaiting = state.jobs.values.filter { it.state == "completed" }.mapTo(mutableSetOf()) { it.sourceId }
+                state = state.copy(syncErrors = awaiting)
+                Log.w(
+                    SILVER_LOG_TAG,
+                    "Silver sync failed durationMs=${SystemClock.elapsedRealtime() - syncStartedAt} " +
+                        "error=${syncErrorSummary(error)}",
+                )
             }
             publish()
         }
@@ -255,18 +154,12 @@ internal class SilverController(
                 val affectedSourceIds = setOf(sourceId)
                 state = state.copy(
                     dataset = removeSilverSources(state.dataset, affectedSourceIds, now),
-                    processing = state.processing - affectedSourceIds,
-                    progress = state.progress - affectedSourceIds,
-                    pendingSync = state.pendingSync + affectedSourceIds,
-                    syncFailed = state.syncFailed - affectedSourceIds,
+                    jobs = state.jobs - affectedSourceIds,
+                    syncErrors = state.syncErrors - affectedSourceIds,
                 )
-                checkpoints = checkpoints.copy(checkpoints = checkpoints.checkpoints.filterNot {
-                    it.bronzeSourceId in affectedSourceIds
-                })
                 sync.changed()
                 publish()
                 sync.persist(activeSession, state.dataset)
-                persistCheckpoints(activeSession)
                 true
             }
             if (removed) {
@@ -278,16 +171,13 @@ internal class SilverController(
 
     private suspend fun refineAvailableSources() {
         val attempted = mutableSetOf<String>()
+        var activeSourceId: String? = null
         try {
-            while (!refinementIsPaused()) {
+            while (true) {
                 val connected = connectedNode() ?: run {
-                    state = state.copy(processing = emptyMap(), progress = emptyMap())
-                    publish()
                     return
                 }
                 val desiredModel = connected.aiModel ?: run {
-                    state = state.copy(processing = emptyMap(), progress = emptyMap())
-                    publish()
                     return
                 }
                 val sources = bronzeSources().filter { it.text.isNotBlank() }
@@ -301,23 +191,11 @@ internal class SilverController(
                     )
                 }
                 if (candidateSources.isEmpty()) {
-                    state = state.copy(processing = emptyMap(), progress = emptyMap())
-                    publish()
                     return
                 }
-                state = state.copy(
-                    processing = candidateSources.associate { it.id to SilverProcessingState.QUEUED },
-                    progress = candidateSources.associate { source ->
-                        source.id to SilverBatchProgress(0, 1)
-                    },
-                )
-                publish()
                 val source = candidateSources.first()
+                activeSourceId = source.id
                 attempted += source.id
-                state = state.copy(
-                    processing = state.processing + (source.id to SilverProcessingState.PROCESSING),
-                )
-                publish()
                 Log.i(
                     SILVER_LOG_TAG,
                     "Node refinement candidate started sourceType=${source.sourceType} " +
@@ -329,24 +207,17 @@ internal class SilverController(
                     source,
                     UUID.randomUUID().toString(),
                 )
-                activeNodeJobs[source.id] = job.id
+                state = state.copy(
+                    jobs = state.jobs + (source.id to job),
+                    syncErrors = state.syncErrors - source.id,
+                )
+                publish()
                 job = observeNodeJob(connected, source.id, job)
                 if (job.state == "cancelled") {
-                    activeNodeJobs.remove(source.id)
-                    state = state.copy(
-                        processing = state.processing - source.id,
-                        progress = state.progress - source.id,
-                    )
-                    publish()
                     continue
                 }
                 synchronize()
-                activeNodeJobs.remove(source.id)
-                state = state.copy(
-                    processing = state.processing - source.id,
-                    progress = state.progress - source.id,
-                )
-                publish()
+                activeSourceId = null
             }
         } catch (error: CancellationException) {
             throw error
@@ -355,11 +226,7 @@ internal class SilverController(
                 SILVER_LOG_TAG,
                 "refinement failed error=${syncErrorSummary(error)}; retryMs=$RETRY_DELAY_MILLIS",
             )
-            state = state.copy(
-                processing = state.processing.mapValues { (_, value) ->
-                    if (value == SilverProcessingState.PROCESSING) SilverProcessingState.QUEUED else value
-                },
-            )
+            activeSourceId?.let { state = state.copy(syncErrors = state.syncErrors + it) }
             publish()
             scheduleRetry()
         } finally {
@@ -376,44 +243,17 @@ internal class SilverController(
     ): SilverRefinementJob {
         var job = initial
         while (true) {
-            if (job.state != "paused" && pausedByNode) {
-                pausedByNode = false
-            }
             state = state.copy(
-                processing = state.processing + (
-                    sourceId to if (job.state == "running") SilverProcessingState.PROCESSING else SilverProcessingState.QUEUED
-                ),
-                progress = state.progress + (sourceId to SilverBatchProgress(job.completedBatches, job.totalBatches)),
-                refinementPaused = pausedByUser || pausedByNode,
+                jobs = state.jobs + (sourceId to job),
+                syncErrors = state.syncErrors - sourceId,
             )
             publish()
             when (job.state) {
-                "completed", "cancelled" -> {
-                    pausedByNode = false
-                    state = state.copy(refinementPaused = pausedByUser)
-                    publish()
-                    return job
-                }
-                "failed" -> {
-                    pausedByNode = false
-                    state = state.copy(refinementPaused = pausedByUser)
-                    publish()
-                    throw SourceApiException(
+                "completed", "cancelled" -> return job
+                "failed" -> throw SourceApiException(
                         job.errorCode ?: "silver_refinement_failed",
                         "The Node could not refine knowledge from this source.",
                     )
-                }
-                "paused" -> {
-                    pausedByNode = true
-                    state = state.copy(refinementPaused = true)
-                    publish()
-                    delay(JOB_POLL_MILLIS)
-                    job = nodeApi.silverRefinementJob(
-                        connected.discovered.apiBaseUrl,
-                        connected.trusted,
-                        job.id,
-                    )
-                }
                 else -> {
                     delay(JOB_POLL_MILLIS)
                     job = nodeApi.silverRefinementJob(
@@ -426,66 +266,10 @@ internal class SilverController(
         }
     }
 
-    private fun controlActiveNodeJobs(action: String) {
-        val connected = connectedNode() ?: return
-        activeNodeJobs.values.toSet().forEach { jobId ->
-            scope.launch {
-                runCatching {
-                    nodeApi.controlSilverRefinementJob(
-                        connected.discovered.apiBaseUrl,
-                        connected.trusted,
-                        jobId,
-                        action,
-                    )
-                }.onFailure { error ->
-                    Log.w(SILVER_LOG_TAG, "Node refinement $action failed error=${syncErrorSummary(error as? Exception)}")
-                }
-            }
-        }
-    }
-
     private fun nextModifiedAt(): Long = maxOf(clock().coerceAtLeast(1), state.dataset.modifiedAtMillis + 1)
 
-    private fun refinementIsPaused(): Boolean = pausedForInteraction || pausedForBackground || pausedByUser || pausedByNode
-
-    private fun cancelWorker() {
-        worker?.cancel()
-        retryWorker?.cancel()
-        retryWorker = null
-        val current = state.processing.filterValues { it == SilverProcessingState.PROCESSING }.keys
-        if (current.isEmpty()) return
-        state = state.copy(
-            processing = state.processing.mapValues { (id, processing) ->
-                if (id in current) SilverProcessingState.QUEUED else processing
-            },
-        )
-        publish()
-    }
-
-    private fun resumeWhenReady() {
-        if (refinementIsPaused()) return
-        val cancellingWorker = worker
-        if (cancellingWorker != null && !cancellingWorker.isCompleted) {
-            cancellingWorker.invokeOnCompletion { scope.launch { refresh() } }
-        } else {
-            refresh()
-        }
-    }
-
-    private suspend fun persistCheckpoints(
-        activeSession: VaultSession? = session(),
-        snapshot: SilverCheckpointDataset = checkpoints,
-    ) {
-        activeSession ?: return
-        checkpointStoreMutex.withLock {
-            withContext(Dispatchers.Default) {
-                localStore.save(activeSession, SilverCheckpointData, snapshot)
-            }
-        }
-    }
-
     private fun scheduleRetry() {
-        if (refinementIsPaused() || retryWorker?.isActive == true) return
+        if (retryWorker?.isActive == true) return
         retryWorker = scope.launch {
             delay(RETRY_DELAY_MILLIS)
             retryWorker = null
@@ -498,11 +282,6 @@ internal class SilverController(
         private const val JOB_POLL_MILLIS = 1_000L
         private const val SILVER_LOG_TAG = "SourceSilver"
     }
-}
-
-internal fun firstUnfinishedBatch(totalBatches: Int, completedBatches: Set<Int>): Int? {
-    require(totalBatches > 0)
-    return (0 until totalBatches).firstOrNull { it !in completedBatches }
 }
 
 internal fun removeSilverSources(
@@ -538,23 +317,6 @@ internal fun removeSilverSources(
         },
     )
 }
-
-internal fun isReusableCheckpoint(
-    checkpoint: SilverRefinementCheckpoint,
-    source: BronzeTextSource,
-    chunks: List<String>,
-    desiredModel: AiModelMetadata,
-    processorVersion: String,
-): Boolean = checkpoint.bronzeSourceId == source.id &&
-    checkpoint.bronzeContentSha256 == source.contentSha256 &&
-    checkpoint.processorVersion == processorVersion &&
-    checkpoint.totalBatches == chunks.size &&
-    checkpoint.completedBatches.first().result.let { result ->
-        result.modelId == desiredModel.modelId && result.parameterCount == desiredModel.parameterCount
-    } &&
-    checkpoint.completedBatches.all { batch ->
-        batch.batchIndex in chunks.indices && batch.batchContentSha256 == sha256Hex(chunks[batch.batchIndex])
-    }
 
 private fun syncErrorSummary(error: Exception?): String = when (error) {
     is SourceApiException -> "SourceApiException:${error.code}"

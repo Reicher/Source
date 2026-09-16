@@ -5,6 +5,7 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import com.source.client.R
 import com.source.client.knowledge.BronzeTextSource
+import com.source.client.knowledge.SILVER_EXTRACTION_COMPLETE_KIND
 import com.source.client.model.ChatConversation
 import com.source.client.model.ConnectedNode
 import com.source.client.model.ChatConversations
@@ -32,7 +33,9 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-enum class LibrarySyncState { LOCAL_ONLY, LOCAL_AND_SYNCED, NODE_ONLY, SYNCING, FAILED }
+enum class BronzeNodeStatus { NOT_ON_NODE, UPLOADING, STORED }
+
+enum class KnowledgeStatus { WAITING, PROCESSING, SYNCING_TO_CLIENT, CURRENT, ERROR }
 
 enum class LibraryPreviewKind { TEXT }
 
@@ -52,22 +55,20 @@ data class LibraryUiItem(
     val mimeType: String,
     val byteCount: Long,
     val createdAtMillis: Long,
-    val syncState: LibrarySyncState,
+    val bronzeContentSha256: String,
+    val bronzeStatus: BronzeNodeStatus,
+    val knowledgeStatus: KnowledgeStatus = KnowledgeStatus.WAITING,
+    val knowledgeProgress: SilverBatchProgress? = null,
     val localAvailable: Boolean,
-    val nodeAvailable: Boolean,
     val canRemoveFromDevice: Boolean,
     val canDeleteFromSource: Boolean,
     val previewKind: LibraryPreviewKind?,
-    val silverProcessing: SilverProcessingState? = null,
-    val silverProgress: SilverBatchProgress? = null,
-    val silverSyncState: LibrarySyncState? = null,
 )
 
 data class LibraryUiState(
     val items: List<LibraryUiItem> = emptyList(),
     val importing: Boolean = false,
     val feedback: String? = null,
-    val silverRefinementPaused: Boolean = false,
 )
 
 internal class LibraryController(
@@ -84,7 +85,7 @@ internal class LibraryController(
     private val mutex = Mutex()
     private val manifestSync = SourceDataSync(LibraryData, localStore, nodeApi)
     private var manifest = LibraryManifest()
-    private var syncStates = emptyMap<String, LibrarySyncState>()
+    private var uploading = emptySet<String>()
     private val acknowledgedTombstones = mutableSetOf<String>()
 
     var state = LibraryUiState()
@@ -103,7 +104,7 @@ internal class LibraryController(
                 blobStore.cleanup(activeSession, manifest.items.mapTo(mutableSetOf(), LibraryItem::id))
             }
         }
-        syncStates = emptyMap()
+        uploading = emptySet()
         publish()
     }
 
@@ -147,7 +148,7 @@ internal class LibraryController(
                 items = manifest.items + item,
                 modifiedAtMillis = nextModifiedAt(now),
             )
-            syncStates = syncStates - item.id
+            uploading = uploading - item.id
             manifestSync.changed()
             manifestSync.persist(activeSession, manifest)
             committed = true
@@ -170,7 +171,7 @@ internal class LibraryController(
         val item = manifest.items.firstOrNull { it.id == itemId } ?: return@withLock
         if (!item.nodeStored || !blobStore.exists(activeSession, item.id)) return@withLock
         withContext(Dispatchers.IO) { blobStore.delete(activeSession, item.id) }
-        syncStates = syncStates - item.id
+        uploading = uploading - item.id
         publish(feedback = message(R.string.library_item_removed_from_device))
     }
 
@@ -184,7 +185,7 @@ internal class LibraryController(
             tombstones = manifest.tombstones.filterNot { it.itemId == item.id } + tombstone,
             modifiedAtMillis = nextModifiedAt(now),
         )
-        syncStates = syncStates - item.id
+        uploading = uploading - item.id
         manifestSync.changed()
         manifestSync.persist(activeSession, manifest)
         withContext(Dispatchers.IO) { runCatching { blobStore.delete(activeSession, item.id) } }
@@ -209,7 +210,7 @@ internal class LibraryController(
     suspend fun bronzeTextSources(): List<BronzeTextSource> = mutex.withLock {
         val activeSession = session() ?: return@withLock emptyList()
         manifest.items.mapNotNull { item ->
-            if (!isSupportedText(item.mimeType, item.name)) return@mapNotNull null
+            if (!item.nodeStored || !isSupportedText(item.mimeType, item.name)) return@mapNotNull null
             val text = if (blobStore.exists(activeSession, item.id) && item.byteCount <= MAXIMUM_TEXT_PREVIEW_BYTES) {
                 runCatching {
                     withContext(Dispatchers.IO) {
@@ -229,7 +230,7 @@ internal class LibraryController(
         val encodedDataKey = connected.trusted.dataKey ?: return@withLock
         if (resetAcknowledgements) {
             acknowledgedTombstones.clear()
-            syncStates = emptyMap()
+            uploading = emptySet()
             publish()
         }
 
@@ -252,19 +253,15 @@ internal class LibraryController(
         var nodeStatusChanged = false
         manifest.items.toList().forEach { item ->
             if (!blobStore.exists(activeSession, item.id)) {
-                syncStates = if (item.nodeStored) {
-                    syncStates - item.id
-                } else {
-                    syncStates + (item.id to LibrarySyncState.FAILED)
-                }
+                uploading = uploading - item.id
                 publish()
                 return@forEach
             }
             if (item.nodeStored) {
-                syncStates = syncStates - item.id
+                uploading = uploading - item.id
                 return@forEach
             }
-            syncStates = syncStates + (item.id to LibrarySyncState.SYNCING)
+            uploading = uploading + item.id
             publish()
             val dataKey = SourceCrypto.base64UrlDecode(encodedDataKey)
             try {
@@ -287,13 +284,13 @@ internal class LibraryController(
                 )
                 manifestSync.changed()
                 nodeStatusChanged = true
-                syncStates = syncStates - item.id
+                uploading = uploading - item.id
             } catch (error: CancellationException) {
-                syncStates = syncStates - item.id
+                uploading = uploading - item.id
                 publish()
                 throw error
             } catch (_: Exception) {
-                syncStates = syncStates + (item.id to LibrarySyncState.FAILED)
+                uploading = uploading - item.id
             } finally {
                 dataKey.fill(0)
             }
@@ -306,7 +303,7 @@ internal class LibraryController(
     private fun applySynchronizedManifest(synchronized: LibraryManifest) {
         manifest = synchronized
         val retainedItems = manifest.items.mapTo(mutableSetOf(), LibraryItem::id)
-        syncStates = syncStates.filterKeys(retainedItems::contains)
+        uploading = uploading.filterTo(mutableSetOf(), retainedItems::contains)
         publish()
     }
 
@@ -340,12 +337,6 @@ internal class LibraryController(
                 .map { item ->
                     val activeSession = session()
                     val localAvailable = activeSession != null && blobStore.exists(activeSession, item.id)
-                    val syncState = syncStates[item.id] ?: when {
-                        localAvailable && item.nodeStored -> LibrarySyncState.LOCAL_AND_SYNCED
-                        localAvailable -> LibrarySyncState.LOCAL_ONLY
-                        item.nodeStored -> LibrarySyncState.NODE_ONLY
-                        else -> LibrarySyncState.FAILED
-                    }
                     LibraryUiItem(
                         id = item.id,
                         filename = item.name,
@@ -353,9 +344,13 @@ internal class LibraryController(
                         mimeType = item.mimeType,
                         byteCount = item.byteCount,
                         createdAtMillis = item.createdAtMillis,
-                        syncState = syncState,
+                        bronzeContentSha256 = item.contentSha256,
+                        bronzeStatus = when {
+                            item.nodeStored -> BronzeNodeStatus.STORED
+                            item.id in uploading -> BronzeNodeStatus.UPLOADING
+                            else -> BronzeNodeStatus.NOT_ON_NODE
+                        },
                         localAvailable = localAvailable,
-                        nodeAvailable = item.nodeStored,
                         canRemoveFromDevice = localAvailable && item.nodeStored,
                         canDeleteFromSource = true,
                         previewKind = if (localAvailable) previewKind(item.mimeType, item.name) else null,
@@ -404,13 +399,9 @@ internal fun withConversationLibraryItems(
                     mimeType = "application/json",
                     byteCount = conversationByteCount(conversation),
                     createdAtMillis = conversation.createdAtMillis,
-                    syncState = if (conversationsBackedUp) {
-                        LibrarySyncState.LOCAL_AND_SYNCED
-                    } else {
-                        LibrarySyncState.LOCAL_ONLY
-                    },
+                    bronzeContentSha256 = ChatData.refinementContentSha256(conversation),
+                    bronzeStatus = if (conversationsBackedUp) BronzeNodeStatus.STORED else BronzeNodeStatus.NOT_ON_NODE,
                     localAvailable = true,
-                    nodeAvailable = conversationsBackedUp,
                     canRemoveFromDevice = false,
                     canDeleteFromSource = true,
                     previewKind = LibraryPreviewKind.TEXT,
@@ -420,21 +411,26 @@ internal fun withConversationLibraryItems(
 )
 
 internal fun withSilverState(library: LibraryUiState, silver: SilverUiState): LibraryUiState = library.copy(
-    silverRefinementPaused = silver.refinementPaused,
     items = library.items.map { item ->
+        val matchingEvidence = silver.dataset.evidence.filter { evidence ->
+            evidence.bronzeSourceId == item.id && evidence.bronzeContentSha256 == item.bronzeContentSha256
+        }.mapTo(mutableSetOf()) { it.id }
+        val currentSilver = matchingEvidence.isNotEmpty() && silver.dataset.observations.any { observation ->
+            observation.kind == SILVER_EXTRACTION_COMPLETE_KIND &&
+                observation.evidenceIds.any(matchingEvidence::contains)
+        }
+        val job = silver.jobs[item.id]?.takeIf { it.sourceContentSha256 == item.bronzeContentSha256 }
         item.copy(
-            silverSyncState = when (item.id) {
-                in silver.syncing -> LibrarySyncState.SYNCING
-                in silver.syncFailed -> LibrarySyncState.FAILED
-                in silver.pendingSync -> LibrarySyncState.LOCAL_ONLY
-                else -> if (silver.dataset.evidence.any { it.bronzeSourceId == item.id }) {
-                    LibrarySyncState.LOCAL_AND_SYNCED
-                } else {
-                    null
-                }
+            knowledgeStatus = when {
+                currentSilver -> KnowledgeStatus.CURRENT
+                item.id in silver.syncErrors || job?.state == "failed" -> KnowledgeStatus.ERROR
+                job?.state == "completed" -> KnowledgeStatus.SYNCING_TO_CLIENT
+                job?.state == "running" -> KnowledgeStatus.PROCESSING
+                else -> KnowledgeStatus.WAITING
             },
-            silverProcessing = silver.processing[item.id],
-            silverProgress = silver.progress[item.id],
+            knowledgeProgress = job?.takeIf { it.state == "running" }?.let {
+                SilverBatchProgress(it.completedBatches, it.totalBatches)
+            },
         )
     },
 )

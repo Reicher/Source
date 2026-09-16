@@ -70,8 +70,8 @@ returns without waiting for inference. Jobs continue across Client disconnects,
 and interrupted `running` jobs recover after Node restart. Successful batches
 are checkpointed internally; retries and resubmissions reuse safe checkpoints.
 Clients read lifecycle and progress from `GET /api/v1/silver/refinements` or
-`GET /api/v1/silver/refinements/{job}`, and control jobs with the `pause`,
-`resume`, `cancel`, and `retry` action endpoints. Only a fully successful job
+`GET /api/v1/silver/refinements/{job}`, and may `cancel` or `retry` jobs through
+the action endpoint. Only a fully successful job
 atomically commits the sole `silver-datasets` head with the Node identity as
 origin; staged batch output is never authoritative Silver. Publication rejects
 jobs superseded by newer Bronze, and checkpoint reuse requires the accepted

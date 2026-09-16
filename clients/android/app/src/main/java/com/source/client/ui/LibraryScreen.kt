@@ -24,13 +24,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.outlined.Cloud
-import androidx.compose.material.icons.outlined.CloudDone
+import androidx.compose.material.icons.outlined.ArrowDownward
+import androidx.compose.material.icons.outlined.ArrowUpward
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Delete
-import androidx.compose.material.icons.outlined.PhoneAndroid
-import androidx.compose.material.icons.outlined.Sync
-import androidx.compose.material.icons.outlined.SyncProblem
+import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -60,6 +60,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -78,8 +80,6 @@ internal fun LibraryScreen(
     onOpen: (String) -> Unit,
     onOpenKnowledge: (String) -> Unit,
     onFeedbackShown: () -> Unit,
-    onPauseRefinement: () -> Unit,
-    onResumeRefinement: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -116,36 +116,6 @@ internal fun LibraryScreen(
             }
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
-                if (state.silverRefinementPaused || state.items.any { it.silverProcessing != null }) {
-                    item(key = "refinement-control") {
-                        Row(
-                            Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                stringResource(
-                                    if (state.silverRefinementPaused) {
-                                        R.string.knowledge_refinement_paused
-                                    } else {
-                                        R.string.knowledge_refinement_running
-                                    },
-                                ),
-                                modifier = Modifier.weight(1f),
-                                color = Ink.copy(alpha = .65f),
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                            TextButton(
-                                onClick = if (state.silverRefinementPaused) {
-                                    onResumeRefinement
-                                } else {
-                                    onPauseRefinement
-                                },
-                            ) {
-                                Text(stringResource(if (state.silverRefinementPaused) R.string.resume else R.string.pause))
-                            }
-                        }
-                    }
-                }
                 if (state.importing) {
                     item(key = "importing") {
                         Row(
@@ -254,57 +224,14 @@ private fun LibraryItemRow(
                 fontWeight = FontWeight.Medium,
             )
             Spacer(Modifier.width(10.dp))
-            if (item.silverProcessing == SilverProcessingState.PROCESSING) {
-                val progress = item.silverProgress
-                if (progress == null) {
-                    CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp, color = Moss.copy(alpha = .68f))
-                } else {
-                    CircularProgressIndicator(
-                        progress = { progress.completedBatches.toFloat() / progress.totalBatches },
-                        modifier = Modifier.size(15.dp),
-                        strokeWidth = 1.5.dp,
-                        color = Moss.copy(alpha = .68f),
-                    )
-                    Spacer(Modifier.width(5.dp))
-                    Text(
-                        "${progress.completedBatches}/${progress.totalBatches}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Ink.copy(alpha = .55f),
-                    )
-                }
-                Spacer(Modifier.width(7.dp))
-            } else if (item.silverSyncState == LibrarySyncState.FAILED) {
-                Icon(
-                    Icons.Outlined.SyncProblem,
-                    contentDescription = stringResource(R.string.knowledge_sync_failed),
-                    modifier = Modifier.size(18.dp),
-                    tint = MaterialTheme.colorScheme.error,
-                )
-                Spacer(Modifier.width(7.dp))
-            }
-            StatusIcon(item.syncState)
+            BronzeStatusIndicator(item.bronzeStatus)
+            Spacer(Modifier.width(7.dp))
+            KnowledgeStatusIndicator(item.knowledgeStatus, item.knowledgeProgress)
         }
         if (expanded) {
             Column(Modifier.fillMaxWidth().padding(start = 45.dp, end = 8.dp, bottom = 9.dp)) {
                 DetailLine(stringResource(R.string.library_size), formatBytes(item.byteCount))
                 DetailLine(stringResource(R.string.library_added), formatDate(item.createdAtMillis))
-                DetailLine(stringResource(R.string.library_stored), storageLabel(item))
-                if (item.syncState == LibrarySyncState.SYNCING || item.syncState == LibrarySyncState.FAILED) {
-                    DetailLine(stringResource(R.string.library_sync_status), syncLabel(item.syncState))
-                }
-                item.silverProgress?.let { progress ->
-                    DetailLine(
-                        stringResource(R.string.knowledge_refinement),
-                        stringResource(
-                            R.string.knowledge_refinement_batches,
-                            progress.completedBatches,
-                            progress.totalBatches,
-                        ),
-                    )
-                }
-                item.silverSyncState?.let { silverSync ->
-                    DetailLine(stringResource(R.string.knowledge_sync_status), syncLabel(silverSync))
-                }
                 Row(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End,
@@ -339,47 +266,75 @@ private fun DetailLine(label: String, value: String) {
 }
 
 @Composable
-private fun StatusIcon(state: LibrarySyncState) {
-    val icon = when (state) {
-        LibrarySyncState.LOCAL_ONLY -> Icons.Outlined.PhoneAndroid
-        LibrarySyncState.LOCAL_AND_SYNCED -> Icons.Outlined.CloudDone
-        LibrarySyncState.NODE_ONLY -> Icons.Outlined.Cloud
-        LibrarySyncState.SYNCING -> Icons.Outlined.Sync
-        LibrarySyncState.FAILED -> Icons.Outlined.SyncProblem
+private fun BronzeStatusIndicator(status: BronzeNodeStatus) {
+    val description = stringResource(when (status) {
+        BronzeNodeStatus.NOT_ON_NODE -> R.string.library_bronze_not_on_node
+        BronzeNodeStatus.UPLOADING -> R.string.library_bronze_uploading
+        BronzeNodeStatus.STORED -> R.string.library_bronze_stored
+    })
+    Box(
+        Modifier.size(width = 26.dp, height = 20.dp).clearAndSetSemantics { contentDescription = description },
+    ) {
+        Icon(
+            Icons.Outlined.Storage,
+            contentDescription = null,
+            modifier = Modifier.size(19.dp).align(Alignment.CenterStart),
+            tint = if (status == BronzeNodeStatus.STORED) Moss else Ink.copy(alpha = .42f),
+        )
+        val badge = when (status) {
+            BronzeNodeStatus.NOT_ON_NODE -> null
+            BronzeNodeStatus.UPLOADING -> Icons.Outlined.ArrowUpward
+            BronzeNodeStatus.STORED -> Icons.Outlined.Check
+        }
+        badge?.let {
+            Icon(
+                it,
+                contentDescription = null,
+                modifier = Modifier.size(12.dp).align(Alignment.BottomEnd),
+                tint = if (status == BronzeNodeStatus.STORED) Moss else Color(0xFF9A6A24),
+            )
+        }
     }
-    val tint = when (state) {
-        LibrarySyncState.LOCAL_AND_SYNCED -> Moss
-        LibrarySyncState.FAILED -> MaterialTheme.colorScheme.error
-        LibrarySyncState.SYNCING -> Color(0xFF9A6A24)
-        else -> Ink.copy(alpha = .48f)
-    }
-    Icon(
-        icon,
-        contentDescription = syncLabel(state),
-        modifier = Modifier.size(19.dp),
-        tint = tint,
-    )
 }
 
 @Composable
-private fun storageLabel(item: LibraryUiItem): String = stringResource(
-    when {
-        item.localAvailable && item.nodeAvailable -> R.string.library_storage_device_and_node
-        item.nodeAvailable -> R.string.library_storage_node_only
-        else -> R.string.library_storage_device_only
-    },
-)
-
-@Composable
-private fun syncLabel(state: LibrarySyncState): String = stringResource(
-    when (state) {
-        LibrarySyncState.LOCAL_ONLY -> R.string.library_sync_local_only
-        LibrarySyncState.LOCAL_AND_SYNCED -> R.string.library_sync_local_and_synced
-        LibrarySyncState.NODE_ONLY -> R.string.library_sync_node_only
-        LibrarySyncState.SYNCING -> R.string.library_sync_syncing
-        LibrarySyncState.FAILED -> R.string.library_sync_failed
-    },
-)
+private fun KnowledgeStatusIndicator(status: KnowledgeStatus, progress: SilverBatchProgress?) {
+    val description = stringResource(when (status) {
+        KnowledgeStatus.WAITING -> R.string.knowledge_waiting
+        KnowledgeStatus.PROCESSING -> R.string.knowledge_processing
+        KnowledgeStatus.SYNCING_TO_CLIENT -> R.string.knowledge_syncing_to_client
+        KnowledgeStatus.CURRENT -> R.string.knowledge_current_local
+        KnowledgeStatus.ERROR -> R.string.knowledge_error
+    })
+    Row(
+        modifier = Modifier.height(20.dp).clearAndSetSemantics { contentDescription = description },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            if (status == KnowledgeStatus.PROCESSING && progress != null) {
+                "✦ ${progress.completedBatches}/${progress.totalBatches}"
+            } else {
+                "✦"
+            },
+            style = MaterialTheme.typography.labelMedium,
+            color = when (status) {
+                KnowledgeStatus.CURRENT -> Moss
+                KnowledgeStatus.ERROR -> MaterialTheme.colorScheme.error
+                KnowledgeStatus.PROCESSING, KnowledgeStatus.SYNCING_TO_CLIENT -> Color(0xFF9A6A24)
+                KnowledgeStatus.WAITING -> Ink.copy(alpha = .36f)
+            },
+        )
+        val badge = when (status) {
+            KnowledgeStatus.SYNCING_TO_CLIENT -> Icons.Outlined.ArrowDownward
+            KnowledgeStatus.CURRENT -> Icons.Outlined.Check
+            KnowledgeStatus.ERROR -> Icons.Outlined.ErrorOutline
+            else -> null
+        }
+        badge?.let {
+            Icon(it, contentDescription = null, modifier = Modifier.size(12.dp))
+        }
+    }
+}
 
 private fun typeIcon(item: LibraryUiItem): ImageVector {
     return when {

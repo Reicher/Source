@@ -197,6 +197,52 @@ CREATE TABLE refinement_checkpoints(
     PRIMARY KEY(user_id,source_id,content_sha256,processor_id,processor_version,model_id,output_layer,batch_index)
 ) STRICT;`,
 	},
+	{
+		version: 8,
+		up: `
+ALTER TABLE refinement_jobs RENAME TO refinement_jobs_with_pause;
+CREATE TABLE refinement_jobs(
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    job_id TEXT NOT NULL,
+    request_digest TEXT NOT NULL CHECK(length(request_digest)=64),
+    source_id TEXT NOT NULL,
+    source_name TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL CHECK(length(content_sha256)=64),
+    plaintext TEXT NOT NULL,
+    processor_id TEXT NOT NULL,
+    processor_version TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    output_layer TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('queued','running','completed','failed','cancelled')),
+    completed_batches INTEGER NOT NULL DEFAULT 0 CHECK(completed_batches>=0),
+    total_batches INTEGER NOT NULL CHECK(total_batches>0 AND completed_batches<=total_batches),
+    accepted_at INTEGER NOT NULL,
+    started_at INTEGER,
+    updated_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    error_code TEXT,
+    error_message TEXT,
+    receipt_json TEXT,
+    UNIQUE(user_id,job_id)
+) STRICT;
+INSERT INTO refinement_jobs(
+    sequence,user_id,job_id,request_digest,source_id,source_name,source_type,
+    content_sha256,plaintext,processor_id,processor_version,model_id,output_layer,state,
+    completed_batches,total_batches,accepted_at,started_at,updated_at,completed_at,error_code,error_message,receipt_json
+)
+SELECT sequence,user_id,job_id,request_digest,source_id,source_name,source_type,
+    content_sha256,plaintext,processor_id,processor_version,model_id,output_layer,
+    CASE WHEN state IN ('running','paused') THEN 'queued' ELSE state END,
+    completed_batches,total_batches,accepted_at,started_at,updated_at,completed_at,error_code,error_message,receipt_json
+FROM refinement_jobs_with_pause;
+DROP TABLE refinement_jobs_with_pause;
+CREATE INDEX refinement_jobs_queue_idx ON refinement_jobs(state,sequence);
+CREATE INDEX refinement_jobs_generation_idx ON refinement_jobs(
+    user_id,source_id,content_sha256,processor_id,processor_version,model_id,output_layer,sequence
+);`,
+	},
 }
 
 const schemaVersionTable = `

@@ -522,19 +522,18 @@ class SourceNodeApi {
         ).toSilverRefinementJob()
     }
 
-    suspend fun controlSilverRefinementJob(
+    suspend fun silverRefinementJobs(
         apiBaseUrl: String,
         trusted: TrustedNode,
-        jobId: String,
-        action: String,
-    ): SilverRefinementJob = withContext(Dispatchers.IO) {
-        require(action in setOf("pause", "resume", "cancel", "retry"))
-        postJson(
-            "${apiBaseUrl.removeSuffix("/")}/silver/refinements/$jobId/$action",
-            JSONObject(),
+    ): List<SilverRefinementJob> = withContext(Dispatchers.IO) {
+        val response = getJson(
+            "${apiBaseUrl.removeSuffix("/")}/silver/refinements",
             trusted.tlsCaCertificate,
             trusted.clientCredential,
-        ).toSilverRefinementJob()
+        )
+        val jobs = response.optJSONArray("jobs")
+            ?: throw SourceApiException("invalid_response", "The Node returned an incomplete refinement queue.")
+        List(jobs.length()) { jobs.getJSONObject(it).toSilverRefinementJob() }
     }
 
     suspend fun removeSilver(
@@ -665,6 +664,18 @@ class SourceNodeApi {
             }
             val status = connection.responseCode
             if (status !in 200..299) throw apiError(connection, status)
+            val response = connection.inputStream.bufferedReader(Charsets.UTF_8).use { JSONObject(it.readText()) }
+            val confirmed = response.optJSONObject("item")
+                ?: throw SourceApiException("invalid_response", "The Node returned an incomplete Library receipt.")
+            if (
+                confirmed.optString("id") != item.id ||
+                confirmed.optString("contentSha256") != item.contentSha256 ||
+                confirmed.optString("encryptedSha256").length != 64 ||
+                confirmed.optLong("bytes", -1) != payload.byteCount ||
+                confirmed.has("deletedAt")
+            ) {
+                throw SourceApiException("invalid_response", "The Node did not confirm the current Library revision.")
+            }
         } finally {
             connection.disconnect()
         }
@@ -838,7 +849,7 @@ private fun JSONObject.toSilverRefinementJob(): SilverRefinementJob {
     val total = optInt("totalBatches", -1)
     val state = requiredJobString("state")
     if (completed < 0 || total <= 0 || completed > total || state !in setOf(
-            "queued", "running", "paused", "completed", "failed", "cancelled",
+            "queued", "running", "completed", "failed", "cancelled",
         )
     ) throw SourceApiException("invalid_response", "The Node returned an invalid refinement job.")
     return SilverRefinementJob(

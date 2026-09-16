@@ -12,7 +12,6 @@ type SilverRefinementJob struct {
 	ProcessorID, ProcessorVersion        string
 	ModelID, OutputLayer, State          string
 	Sequence                             int64
-	PauseRequested                       bool
 	CompletedBatches, TotalBatches       int
 	AcceptedAt, UpdatedAt                int64
 	StartedAt, CompletedAt               *int64
@@ -27,18 +26,16 @@ type SilverRefinementCheckpoint struct {
 }
 
 const silverJobColumns = `sequence,user_id,job_id,request_digest,source_id,source_name,source_type,
-content_sha256,plaintext,processor_id,processor_version,model_id,output_layer,state,pause_requested,completed_batches,total_batches,
+content_sha256,plaintext,processor_id,processor_version,model_id,output_layer,state,completed_batches,total_batches,
 accepted_at,started_at,updated_at,completed_at,error_code,error_message,receipt_json`
 
 func scanSilverJob(scanner interface{ Scan(...any) error }) (SilverRefinementJob, error) {
 	var job SilverRefinementJob
-	var pauseRequested int
 	err := scanner.Scan(&job.Sequence, &job.UserID, &job.JobID, &job.RequestDigest,
 		&job.SourceID, &job.SourceName, &job.SourceType, &job.ContentSHA256, &job.Plaintext,
-		&job.ProcessorID, &job.ProcessorVersion, &job.ModelID, &job.OutputLayer, &job.State, &pauseRequested,
+		&job.ProcessorID, &job.ProcessorVersion, &job.ModelID, &job.OutputLayer, &job.State,
 		&job.CompletedBatches, &job.TotalBatches, &job.AcceptedAt, &job.StartedAt,
 		&job.UpdatedAt, &job.CompletedAt, &job.ErrorCode, &job.ErrorMessage, &job.ReceiptJSON)
-	job.PauseRequested = pauseRequested == 1
 	return job, err
 }
 
@@ -153,7 +150,7 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)`, userID, jobID, requestDigest, s
 			return SilverRefinementJob{}, false, err
 		}
 	} else if job.State == "failed" {
-		_, err = tx.Exec(`UPDATE refinement_jobs SET state='queued',pause_requested=0,
+		_, err = tx.Exec(`UPDATE refinement_jobs SET state='queued',
 error_code=NULL,error_message=NULL,completed_at=NULL,updated_at=? WHERE user_id=? AND job_id=?`,
 			now, userID, job.JobID)
 		if err != nil {
@@ -219,9 +216,7 @@ WHERE user_id=? ORDER BY sequence`, userID)
 }
 
 func (d *DB) RecoverSilverRefinementJobs(now int64) error {
-	_, err := d.sql.Exec(`UPDATE refinement_jobs SET
-state=CASE WHEN pause_requested=1 THEN 'paused' ELSE 'queued' END,updated_at=?
-WHERE state='running'`, now)
+	_, err := d.sql.Exec(`UPDATE refinement_jobs SET state='queued',updated_at=? WHERE state='running'`, now)
 	return err
 }
 
@@ -268,43 +263,9 @@ WHERE user_id=? AND job_id=? AND state='running'`, completed, now, userID, jobID
 	return err
 }
 
-func (d *DB) PauseSilverRefinementJob(userID, jobID string, now int64) (SilverRefinementJob, error) {
-	_, err := d.sql.Exec(`UPDATE refinement_jobs SET
-state=CASE WHEN state='queued' THEN 'paused' ELSE state END,
-pause_requested=CASE WHEN state IN ('queued','running','paused') THEN 1 ELSE pause_requested END,
-updated_at=CASE WHEN state IN ('queued','running','paused') THEN ? ELSE updated_at END
-WHERE user_id=? AND job_id=?`, now, userID, jobID)
-	if err != nil {
-		return SilverRefinementJob{}, err
-	}
-	return d.SilverRefinementJob(userID, jobID)
-}
-
-func (d *DB) PauseSilverRefinementJobAfterBatch(userID, jobID string, now int64) (bool, error) {
-	result, err := d.sql.Exec(`UPDATE refinement_jobs SET state='paused',updated_at=?
-WHERE user_id=? AND job_id=? AND state='running' AND pause_requested=1`, now, userID, jobID)
-	if err != nil {
-		return false, err
-	}
-	count, err := result.RowsAffected()
-	return count == 1, err
-}
-
-func (d *DB) ResumeSilverRefinementJob(userID, jobID string, now int64) (SilverRefinementJob, error) {
-	_, err := d.sql.Exec(`UPDATE refinement_jobs SET
-state=CASE WHEN state='paused' THEN 'queued' ELSE state END,
-pause_requested=CASE WHEN state IN ('running','paused') THEN 0 ELSE pause_requested END,
-updated_at=CASE WHEN state IN ('running','paused') THEN ? ELSE updated_at END
-WHERE user_id=? AND job_id=?`, now, userID, jobID)
-	if err != nil {
-		return SilverRefinementJob{}, err
-	}
-	return d.SilverRefinementJob(userID, jobID)
-}
-
 func (d *DB) CancelSilverRefinementJob(userID, jobID string, now int64) (SilverRefinementJob, error) {
-	_, err := d.sql.Exec(`UPDATE refinement_jobs SET state='cancelled',pause_requested=0,
-plaintext='',updated_at=?,completed_at=? WHERE user_id=? AND job_id=? AND state IN ('queued','running','paused','failed')`,
+	_, err := d.sql.Exec(`UPDATE refinement_jobs SET state='cancelled',
+plaintext='',updated_at=?,completed_at=? WHERE user_id=? AND job_id=? AND state IN ('queued','running','failed')`,
 		now, now, userID, jobID)
 	if err != nil {
 		return SilverRefinementJob{}, err
@@ -313,7 +274,7 @@ plaintext='',updated_at=?,completed_at=? WHERE user_id=? AND job_id=? AND state 
 }
 
 func (d *DB) RetrySilverRefinementJob(userID, jobID string, now int64) (SilverRefinementJob, error) {
-	_, err := d.sql.Exec(`UPDATE refinement_jobs SET state='queued',pause_requested=0,
+	_, err := d.sql.Exec(`UPDATE refinement_jobs SET state='queued',
 error_code=NULL,error_message=NULL,completed_at=NULL,updated_at=?
 WHERE user_id=? AND job_id=? AND state='failed'`, now, userID, jobID)
 	if err != nil {
@@ -335,7 +296,7 @@ func (d *DB) CompleteSilverRefinementJob(userID, jobID, receiptJSON string, now 
 		return err
 	}
 	defer tx.Rollback()
-	result, err := tx.Exec(`UPDATE refinement_jobs SET state='completed',pause_requested=0,
+	result, err := tx.Exec(`UPDATE refinement_jobs SET state='completed',
 plaintext='',completed_batches=total_batches,updated_at=?,completed_at=?,receipt_json=?,error_code=NULL,error_message=NULL
 WHERE user_id=? AND job_id=? AND state='running'`, now, now, nullableString(receiptJSON), userID, jobID)
 	if err != nil {

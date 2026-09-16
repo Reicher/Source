@@ -13,10 +13,6 @@ import com.source.client.ai.SourceAiRuntime
 import com.source.client.ai.SourceAiRuntimeState
 import com.source.client.ai.SourceAiAvailability
 import com.source.client.model.AiModelMetadata
-import com.source.client.storage.SilverBatchCheckpoint
-import com.source.client.storage.SilverBatchResult
-import com.source.client.storage.SilverCheckpointData
-import com.source.client.storage.SilverCheckpointDataset
 import com.source.client.storage.SilverClaim
 import com.source.client.storage.SilverData
 import com.source.client.storage.SilverDataset
@@ -26,7 +22,6 @@ import com.source.client.storage.SilverJsonObject
 import com.source.client.storage.SilverJsonString
 import com.source.client.storage.SilverObservation
 import com.source.client.storage.SilverProducer
-import com.source.client.storage.SilverRefinementCheckpoint
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
@@ -45,42 +40,6 @@ class SilverDeviceTest {
         val legacy = """{"version":1,"modifiedAtMillis":100,"results":[],"removedSources":[]}"""
 
         SilverData.decode(legacy.toByteArray())
-    }
-
-    @Test(expected = RuntimeException::class)
-    fun OldSilverCheckpointShapeIsRejectedRatherThanMigrated() {
-        val legacy = """{"version":1,"refinementPaused":true,"checkpoints":[{"legacy":"work"}]}"""
-
-        SilverCheckpointData.decode(legacy.toByteArray())
-    }
-
-    @Test
-    fun SilverCheckpointDataRoundTripsCompletedObservationBatches() {
-        val sourceId = "source-1"
-        val sourceHash = "a".repeat(64)
-        val evidence = SilverEvidence.create(sourceId, sourceHash)
-        val observation = observation(evidence, 100)
-        val result = SilverBatchResult(
-            listOf(evidence),
-            listOf(observation),
-            "model-4b",
-            4_000_000_000,
-        )
-        val dataset = SilverCheckpointDataset(
-            checkpoints = listOf(SilverRefinementCheckpoint(
-                bronzeSourceId = sourceId,
-                bronzeContentSha256 = sourceHash,
-                processorVersion = "2",
-                totalBatches = 3,
-                completedBatches = listOf(
-                    SilverBatchCheckpoint(0, "b".repeat(64), result),
-                    SilverBatchCheckpoint(1, "c".repeat(64), result),
-                ),
-            )),
-            refinementPaused = true,
-        )
-
-        assertEquals(dataset, SilverCheckpointData.decode(SilverCheckpointData.encode(dataset)))
     }
 
     @Test

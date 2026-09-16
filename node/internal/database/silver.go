@@ -165,8 +165,8 @@ WHERE user_id=? AND source_id=?`, now, userID, sourceID)
 		return false, false, err
 	}
 	if changed {
-		if _, err = tx.Exec(`UPDATE refinement_jobs SET state='cancelled',pause_requested=0,
-plaintext='',updated_at=?,completed_at=? WHERE user_id=? AND source_id=? AND state IN ('queued','running','paused','failed')`,
+		if _, err = tx.Exec(`UPDATE refinement_jobs SET state='cancelled',
+plaintext='',updated_at=?,completed_at=? WHERE user_id=? AND source_id=? AND state IN ('queued','running','failed')`,
 			now, now, userID, sourceID); err != nil {
 			return false, false, err
 		}

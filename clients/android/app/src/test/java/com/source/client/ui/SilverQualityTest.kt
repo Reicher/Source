@@ -2,9 +2,7 @@ package com.source.client.ui
 
 import com.source.client.knowledge.BronzeTextSource
 import com.source.client.knowledge.SILVER_EXTRACTION_COMPLETE_KIND
-import com.source.client.knowledge.sha256Hex
 import com.source.client.model.AiModelMetadata
-import com.source.client.storage.SilverBatchCheckpoint
 import com.source.client.storage.SilverClaim
 import com.source.client.storage.SilverData
 import com.source.client.storage.SilverDataset
@@ -13,8 +11,6 @@ import com.source.client.storage.SilverJsonObject
 import com.source.client.storage.SilverJsonString
 import com.source.client.storage.SilverObservation
 import com.source.client.storage.SilverProducer
-import com.source.client.storage.SilverRefinementCheckpoint
-import com.source.client.storage.testBatchResult
 import com.source.client.storage.testEvidence
 import com.source.client.storage.testObservation
 import org.junit.Assert.assertEquals
@@ -40,34 +36,6 @@ class SilverQualityTest {
         assertTrue(needsSilverRefinement(dataset, changedSource, AiModelMetadata("model-4b", 4_000_000_000), "2"))
         assertTrue(needsSilverRefinement(dataset, sameSource, AiModelMetadata("model-4b", 4_000_000_000), "3"))
         assertTrue(needsSilverRefinement(dataset, sameSource, AiModelMetadata("model-9b", 9_000_000_000), "2"))
-    }
-
-    @Test
-    fun `checkpoint is reusable only for the same deterministic work`() {
-        val source = BronzeTextSource("source-1", "file", "file", "a".repeat(64), "first second")
-        val chunks = listOf("first", "second")
-        val model = AiModelMetadata("model-4b", 4_000_000_000)
-        val checkpoint = SilverRefinementCheckpoint(
-            bronzeSourceId = source.id,
-            bronzeContentSha256 = source.contentSha256,
-            processorVersion = "2",
-            totalBatches = chunks.size,
-            completedBatches = listOf(
-                SilverBatchCheckpoint(0, sha256Hex(chunks[0]), testBatchResult()),
-            ),
-        )
-
-        assertTrue(isReusableCheckpoint(checkpoint, source, chunks, model, "2"))
-        assertFalse(isReusableCheckpoint(checkpoint, source, listOf("changed", "second"), model, "2"))
-        assertFalse(isReusableCheckpoint(checkpoint, source, chunks, AiModelMetadata("model-9b", 9_000_000_000), "2"))
-        assertFalse(isReusableCheckpoint(checkpoint, source.copy(contentSha256 = "b".repeat(64)), chunks, model, "2"))
-        assertFalse(isReusableCheckpoint(checkpoint, source, chunks, model, "3"))
-    }
-
-    @Test
-    fun `resume selects the first unfinished batch`() {
-        assertEquals(1, firstUnfinishedBatch(5, setOf(0, 2, 3)))
-        assertEquals(null, firstUnfinishedBatch(3, setOf(0, 1, 2)))
     }
 
     @Test
