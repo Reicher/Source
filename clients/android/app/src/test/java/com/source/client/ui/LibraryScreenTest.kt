@@ -3,11 +3,17 @@ package com.source.client.ui
 import com.source.client.model.ChatConversation
 import com.source.client.model.ChatConversations
 import com.source.client.model.ChatMessage
+import com.source.client.knowledge.SILVER_ENTITY_TYPE_PREDICATE
 import com.source.client.knowledge.SILVER_EXTRACTION_COMPLETE_KIND
+import com.source.client.knowledge.SILVER_NAME_PREDICATE
 import com.source.client.protocol.SilverRefinementJob
+import com.source.client.storage.SilverClaim
+import com.source.client.storage.SilverClaimState
 import com.source.client.storage.SilverDataset
+import com.source.client.storage.SilverEntity
 import com.source.client.storage.SilverEvidence
 import com.source.client.storage.SilverJsonObject
+import com.source.client.storage.SilverJsonString
 import com.source.client.storage.SilverObservation
 import com.source.client.storage.SilverProducer
 import com.source.client.storage.LibraryItem
@@ -186,6 +192,89 @@ class LibraryScreenTest {
         val current = withSilverState(LibraryUiState(listOf(item)), SilverUiState(dataset(item.bronzeContentSha256)))
 
         assertEquals(KnowledgeStatus.WAITING, stale.items.single().knowledgeStatus)
+        assertEquals(null, stale.items.single().knowledgeSummary)
         assertEquals(KnowledgeStatus.CURRENT, current.items.single().knowledgeStatus)
+        assertEquals(SilverKnowledgeSummary(0, 0), current.items.single().knowledgeSummary)
+    }
+
+    @Test
+    fun `Silver summary counts source entities and user meaningful facts`() {
+        val item = LibraryUiItem(
+            id = "source-1",
+            filename = "notes.txt",
+            sourceType = "file",
+            mimeType = "text/plain",
+            byteCount = 100,
+            createdAtMillis = 100,
+            bronzeContentSha256 = "a".repeat(64),
+            bronzeStatus = BronzeNodeStatus.STORED,
+            localAvailable = true,
+            canRemoveFromDevice = true,
+            canDeleteFromSource = true,
+            previewKind = LibraryPreviewKind.TEXT,
+        )
+        val evidence = SilverEvidence.create(item.id, item.bronzeContentSha256)
+        val producer = SilverProducer.create("source.node.silver-resolution", "1")
+        val observation = SilverObservation.create(
+            kind = "resolved-facts",
+            payload = SilverJsonObject(emptyMap()),
+            evidenceIds = listOf(evidence.id),
+            producer = producer,
+            createdAtMillis = 100,
+        )
+        val complete = SilverObservation.create(
+            kind = SILVER_EXTRACTION_COMPLETE_KIND,
+            payload = SilverJsonObject(emptyMap()),
+            evidenceIds = listOf(evidence.id),
+            producer = producer,
+            createdAtMillis = 101,
+        )
+        val source = SilverEntity.create()
+        val related = SilverEntity.create()
+        fun scalarClaim(
+            predicate: String,
+            value: String,
+            confidence: Double? = null,
+            state: SilverClaimState = SilverClaimState.ACTIVE,
+        ) = SilverClaim.create(
+            subjectEntityId = source.id,
+            predicate = predicate,
+            value = SilverJsonString(value),
+            supportingObservationIds = listOf(observation.id),
+            confidence = confidence,
+            producer = producer,
+            state = state,
+            createdAtMillis = 102,
+        )
+        val claims = listOf(
+            scalarClaim(SILVER_NAME_PREDICATE, "Source"),
+            scalarClaim(SILVER_ENTITY_TYPE_PREDICATE, "project"),
+            scalarClaim("status", "active", confidence = .8),
+            scalarClaim("status", "active", confidence = .9),
+            scalarClaim("ignored", "old", state = SilverClaimState.SUPERSEDED),
+            SilverClaim.create(
+                subjectEntityId = source.id,
+                predicate = "related-to",
+                objectEntityId = related.id,
+                supportingObservationIds = listOf(observation.id),
+                producer = producer,
+                createdAtMillis = 102,
+            ),
+        )
+        val dataset = SilverDataset(
+            evidence = listOf(evidence),
+            observations = listOf(observation, complete),
+            entities = listOf(source, related),
+            claims = claims,
+            modifiedAtMillis = 103,
+        )
+
+        val presented = withSilverState(
+            LibraryUiState(listOf(item)),
+            SilverUiState(dataset = dataset),
+        ).items.single()
+
+        assertEquals(KnowledgeStatus.CURRENT, presented.knowledgeStatus)
+        assertEquals(SilverKnowledgeSummary(entityCount = 2, factCount = 2), presented.knowledgeSummary)
     }
 }
