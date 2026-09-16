@@ -616,9 +616,9 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
         val current = _screen.value
         _screen.value = when {
             current is AppScreen.Main -> current.copy(status = status, chat = chatController.state)
-            current is AppScreen.Pairing && status is NodeConnectionState.Connected -> mainScreen(status)
+            current is AppScreen.Pairing && status.nodeStorageUsable() -> mainScreen(status)
             current is AppScreen.Pairing && status is NodeConnectionState.Failed -> mainScreen(status)
-            current is AppScreen.Recovery && status is NodeConnectionState.Connected -> mainScreen(status)
+            current is AppScreen.Recovery && status.nodeStorageUsable() -> mainScreen(status)
             current is AppScreen.Pairing && status is NodeConnectionState.Disconnected -> mainScreen(status)
             current is AppScreen.Recovery && status is NodeConnectionState.Disconnected &&
                 status.reason == NodeDisconnectReason.BACKGROUND -> mainScreen(status)
@@ -685,7 +685,8 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             "invalid_recovery_key" -> R.string.error_recovery_key_incorrect
             "recovery_not_configured" -> R.string.error_recovery_not_configured
             "authentication_required" -> R.string.error_authentication_required
-            "model_unavailable" -> R.string.error_node_model_unavailable
+            "model_unavailable", "node_unavailable" -> R.string.error_node_model_unavailable
+            "model_not_installed", "model_load_failed" -> R.string.error_local_model_unavailable
             "chat_rate_limited" -> R.string.error_chat_rate_limited
             "storage_quota_exceeded" -> R.string.error_storage_quota_exceeded
             "silver_source_too_large" -> R.string.error_silver_source_too_large

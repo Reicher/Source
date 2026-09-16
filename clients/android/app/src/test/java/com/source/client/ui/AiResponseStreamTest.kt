@@ -8,6 +8,9 @@ import com.source.client.ai.SourceAiMessage
 import com.source.client.ai.SourceAiRequest
 import com.source.client.ai.SourceAiRole
 import com.source.client.ai.SourceAiRuntime
+import com.source.client.ai.SourceAiRuntimeState
+import com.source.client.ai.SourceAiAvailability
+import com.source.client.model.AiModelMetadata
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
@@ -79,11 +82,15 @@ class AiResponseStreamTest {
     }
 
     private fun runtime(vararg events: SourceAiEvent) = object : SourceAiRuntime {
-        override val capabilities = SourceAiCapabilities(
-            capabilities = setOf(SourceAiCapability.TEXT),
-            streaming = true,
-            cancellation = true,
-            maximumContextTokens = 1_024,
+        override val runtimeState = SourceAiRuntimeState(
+            SourceAiAvailability.READY,
+            AiModelMetadata("test-model", 1),
+            SourceAiCapabilities(
+                capabilities = setOf(SourceAiCapability.TEXT),
+                streaming = true,
+                cancellation = true,
+                maximumContextTokens = 1_024,
+            ),
         )
 
         override fun stream(request: SourceAiRequest): Flow<SourceAiEvent> = flowOf(*events)

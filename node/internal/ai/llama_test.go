@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -34,6 +36,10 @@ func TestLlamaStreamsOnlyVisibleContent(t *testing.T) {
 	if !client.Status(context.Background()) {
 		t.Fatal("health endpoint was not available")
 	}
+	state := client.State(context.Background())
+	if state.Availability != "ready" || state.Capabilities["modelId"] != "source-model" {
+		t.Fatalf("unexpected runtime state: %#v", state)
+	}
 	var events []Event
 	e := client.StreamChat(context.Background(), []Message{{Role: "user", Content: "Hello"}}, func(event Event) error { events = append(events, event); return nil })
 	if e != nil {
@@ -51,6 +57,64 @@ func TestLlamaStreamsOnlyVisibleContent(t *testing.T) {
 	streamOptions, ok := request["stream_options"].(map[string]any)
 	if !ok || streamOptions["include_usage"] != true {
 		t.Fatal("streaming token usage was not requested")
+	}
+}
+
+func TestLlamaDistinguishesMissingAndFailedModels(t *testing.T) {
+	for _, test := range []struct {
+		status       int
+		availability string
+		code         string
+	}{
+		{http.StatusNotFound, "model_not_installed", "model_not_installed"},
+		{http.StatusServiceUnavailable, "model_load_failed", "model_load_failed"},
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(test.status)
+		}))
+		client := New(config.Config{AIBackendURL: server.URL, AIModel: "source-model", AIParameterCount: 123, AITimeout: time.Second})
+
+		state := client.State(context.Background())
+
+		server.Close()
+		if state.Availability != test.availability || state.Failure == nil || state.Failure.Code != test.code {
+			t.Fatalf("status %d produced %#v", test.status, state)
+		}
+	}
+}
+
+func TestRuntimeStatesMatchSharedJSONSchema(t *testing.T) {
+	raw, err := os.ReadFile("../../../contracts/source-ai.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Defs struct {
+			RuntimeState struct {
+				Properties struct {
+					Availability struct {
+						Enum []string `json:"enum"`
+					} `json:"availability"`
+				} `json:"properties"`
+			} `json:"runtimeState"`
+			Request struct {
+				Required []string `json:"required"`
+			} `json:"request"`
+		} `json:"$defs"`
+	}
+	if err = json.Unmarshal(raw, &schema); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"model_not_installed", "model_present", "model_load_failed", "ready", "inference_failed"}
+	if !reflect.DeepEqual(schema.Defs.RuntimeState.Properties.Availability.Enum, want) {
+		t.Fatalf("runtime states differ from schema: %#v", schema.Defs.RuntimeState.Properties.Availability.Enum)
+	}
+	foundTimeout := false
+	for _, field := range schema.Defs.Request.Required {
+		foundTimeout = foundTimeout || field == "timeoutMillis"
+	}
+	if !foundTimeout {
+		t.Fatal("shared request schema does not require timeoutMillis")
 	}
 }
 

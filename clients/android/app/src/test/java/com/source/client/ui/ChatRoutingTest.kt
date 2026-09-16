@@ -24,8 +24,8 @@ class ChatRoutingTest {
     }
 
     @Test
-    fun `unavailable explicit node falls back to the device`() {
-        assertEquals(AiRuntimeTarget.THIS_DEVICE, resolveAiRuntime(AiSelection.NODE, false))
+    fun `unavailable explicit node remains explicit and reports unavailability`() {
+        assertEquals(AiRuntimeTarget.UNAVAILABLE, resolveAiRuntime(AiSelection.NODE, false))
     }
 
     @Test

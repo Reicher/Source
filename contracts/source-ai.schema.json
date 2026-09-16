@@ -43,12 +43,13 @@
     "request": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["contractVersion", "runId", "conversationId", "messages"],
+      "required": ["contractVersion", "runId", "conversationId", "messages", "timeoutMillis"],
       "properties": {
         "contractVersion": { "const": 1 },
         "runId": { "type": "string", "format": "uuid" },
         "conversationId": { "type": "string", "minLength": 1 },
         "workload": { "enum": ["interactive", "background"] },
+        "timeoutMillis": { "type": "integer", "minimum": 1000, "maximum": 600000 },
         "messages": {
           "type": "array",
           "minItems": 1,
@@ -74,6 +75,37 @@
         "maximumContextTokens": { "type": "integer", "minimum": 1 },
         "promptPolicy": { "const": "none-v1" },
         "reasoning": { "const": "off" }
+      }
+    },
+    "runtimeFailure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "retryable"],
+      "properties": {
+        "code": {
+          "enum": [
+            "model_not_installed",
+            "model_load_failed",
+            "inference_failed",
+            "timeout",
+            "cancelled",
+            "node_unavailable",
+            "node_stream_interrupted_after_output"
+          ]
+        },
+        "retryable": { "type": "boolean" }
+      }
+    },
+    "runtimeState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["availability"],
+      "properties": {
+        "availability": {
+          "enum": ["model_not_installed", "model_present", "model_load_failed", "ready", "inference_failed"]
+        },
+        "capabilities": { "$ref": "#/$defs/capabilities" },
+        "failure": { "$ref": "#/$defs/runtimeFailure" }
       }
     },
     "event": {

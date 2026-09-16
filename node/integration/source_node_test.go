@@ -35,6 +35,9 @@ import (
 type fakeAI struct{ received []localai.Message }
 
 func (f *fakeAI) Status(context.Context) bool { return true }
+func (f *fakeAI) State(context.Context) localai.RuntimeState {
+	return localai.RuntimeState{Availability: "ready", Capabilities: f.Capabilities()}
+}
 func (f *fakeAI) Capabilities() map[string]any {
 	return map[string]any{"contractVersion": 1, "modelId": "source-test-model", "parameterCount": int64(9_000_000_000), "modalities": []string{"text"}, "streaming": true, "cancellation": true, "maximumContextTokens": 8192, "promptPolicy": "none-v1", "reasoning": "off"}
 }
@@ -88,6 +91,14 @@ func TestSourceAPIEndToEnd(t *testing.T) {
 	defer api.Close()
 	adm := httptest.NewServer(admin.New(db, cfg, ai, pairs, logger))
 	defer adm.Close()
+	status := request(t, http.MethodGet, api.URL+"/api/v1/status", nil, nil)
+	wantStatus(t, status, 200)
+	var statusBody map[string]any
+	decode(t, status.Body, &statusBody)
+	aiRuntime := statusBody["aiRuntime"].(map[string]any)
+	if aiRuntime["availability"] != "ready" {
+		t.Fatalf("unexpected AI runtime state: %#v", aiRuntime)
+	}
 
 	state := request(t, http.MethodGet, adm.URL+"/admin/api/state", nil, nil)
 	wantStatus(t, state, 200)

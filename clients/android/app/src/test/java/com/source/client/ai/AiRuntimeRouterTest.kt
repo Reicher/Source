@@ -4,6 +4,7 @@ import com.source.client.model.AiSelection
 import com.source.client.model.ConnectedNode
 import com.source.client.model.DiscoveredNode
 import com.source.client.model.TrustedNode
+import com.source.client.model.AiModelMetadata
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.toList
@@ -20,6 +21,7 @@ class AiRuntimeRouterTest {
     private val connected = ConnectedNode(
         DiscoveredNode("service", "node", "Node", "https://node/api/v1"),
         TrustedNode("node", "key", "ca", "Node", "credential", "user", "client"),
+        readyState("node-model"),
     )
 
     @Test
@@ -40,7 +42,7 @@ class AiRuntimeRouterTest {
     @Test
     fun `router owns fallback before node output starts`() = runBlocking {
         val unavailable = object : SourceAiRuntime {
-            override val capabilities = AiRuntimeRouterTest.capabilities
+            override val runtimeState = readyState("node-model")
             override fun stream(request: SourceAiRequest): Flow<SourceAiEvent> = flowOf(
                 SourceAiEvent.Started(request.runId),
                 SourceAiEvent.Failed(request.runId, "model_unavailable", true),
@@ -56,8 +58,32 @@ class AiRuntimeRouterTest {
         assertEquals(SourceAiEvent.Completed::class, events.last()::class)
     }
 
+    @Test
+    fun `explicit node selection never silently falls back to the client`() = runBlocking {
+        val disconnected = connected.copy(
+            aiRuntimeState = SourceAiRuntimeState(SourceAiAvailability.MODEL_NOT_INSTALLED),
+        )
+        val router = AiRuntimeRouter(runtime("local"), { disconnected }, {}, { runtime("node") })
+        router.select(AiSelection.NODE)
+
+        val events = router.stream(request).toList()
+
+        assertEquals(SourceAiFailureCode.NODE_UNAVAILABLE.wireValue, (events.single() as SourceAiEvent.Failed).code)
+    }
+
+    @Test
+    fun `auto snapshots the runtime when a request starts`() = runBlocking {
+        var current: ConnectedNode? = null
+        val router = AiRuntimeRouter(runtime("local"), { current }, {}, { runtime("node") })
+        router.select(AiSelection.AUTO)
+        val stream = router.stream(request)
+        current = connected
+
+        assertEquals("local", (stream.toList()[1] as SourceAiEvent.Delta).text)
+    }
+
     private fun runtime(answer: String) = object : SourceAiRuntime {
-        override val capabilities = AiRuntimeRouterTest.capabilities
+        override val runtimeState = readyState("$answer-model")
         override fun stream(request: SourceAiRequest): Flow<SourceAiEvent> = flowOf(
             SourceAiEvent.Started(request.runId),
             SourceAiEvent.Delta(request.runId, 0, answer),
@@ -71,6 +97,12 @@ class AiRuntimeRouterTest {
             streaming = true,
             cancellation = true,
             maximumContextTokens = 1_024,
+        )
+
+        fun readyState(modelId: String) = SourceAiRuntimeState(
+            SourceAiAvailability.READY,
+            AiModelMetadata(modelId, 1),
+            capabilities,
         )
     }
 }

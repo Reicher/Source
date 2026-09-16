@@ -1,9 +1,12 @@
 package com.source.client.ui
 
 import com.source.client.SourceClientApplication
+import com.source.client.ai.SourceAiAvailability
+import com.source.client.ai.SourceAiRuntimeState
 import com.source.client.model.ConnectedNode
 import com.source.client.model.DiscoveredNode
 import com.source.client.model.NodeConnectionState
+import com.source.client.model.NodeDegradedReason
 import com.source.client.model.NodeDisconnectReason
 import com.source.client.model.NodeRecoveryPhase
 import com.source.client.model.TrustedNode
@@ -19,11 +22,23 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 internal fun NodeConnectionState.connectedNodeOrNull(): ConnectedNode? =
-    (this as? NodeConnectionState.Connected)?.connection
+    when (this) {
+        is NodeConnectionState.Ready -> connection
+        is NodeConnectionState.Degraded -> connection
+        else -> null
+    }
 
-internal fun NodeConnectionState.isAuthenticating(node: DiscoveredNode): Boolean =
-    this is NodeConnectionState.Authenticating &&
-        this.node.serviceName == node.serviceName && this.node.apiBaseUrl == node.apiBaseUrl
+internal fun NodeConnectionState.nodeStorageUsable(): Boolean =
+    this is NodeConnectionState.Ready || this is NodeConnectionState.Degraded
+
+internal fun NodeConnectionState.nodeAiUsable(): Boolean =
+    this is NodeConnectionState.Ready && connection.aiRuntimeState.isUsable
+
+internal fun NodeConnectionState.isConnectingTo(node: DiscoveredNode): Boolean = when (this) {
+    is NodeConnectionState.Authenticating -> this.node == node
+    is NodeConnectionState.Retrying -> this.node == node
+    else -> false
+}
 
 internal fun TrustedNode?.automaticConnectionCandidate(
     nodes: List<DiscoveredNode>,
@@ -37,6 +52,11 @@ internal fun TrustedNode?.manuallySelectableNodes(nodes: List<DiscoveredNode>): 
 
 internal fun NodeConnectionState.selectableNodes(): List<DiscoveredNode> =
     (this as? NodeConnectionState.Found)?.nodes.orEmpty()
+
+internal fun reconnectDelayMillis(failedAttempt: Int): Long {
+    require(failedAttempt >= 0)
+    return (1L shl failedAttempt.coerceAtMost(4)) * 1_000
+}
 
 internal class NodeConnection(
     private val app: SourceClientApplication,
@@ -131,7 +151,7 @@ internal class NodeConnection(
     }
 
     suspend fun acceptConnection(discovered: DiscoveredNode, trusted: TrustedNode) {
-        transition(NodeConnectionState.Connected(connectedNode(discovered, trusted)))
+        transition(connectedState(connectedNode(discovered, trusted)))
         onConnected()
         startHeartbeat(discovered, trusted)
     }
@@ -182,7 +202,7 @@ internal class NodeConnection(
                 connected.discovered.serviceName == candidate.first.serviceName &&
                 connected.discovered.apiBaseUrl == candidate.first.apiBaseUrl
             ) return
-            if (state.isAuthenticating(candidate.first)) return
+            if (state.isConnectingTo(candidate.first)) return
             authenticate(candidate.first, candidate.second)
             return
         }
@@ -219,7 +239,7 @@ internal class NodeConnection(
                         activeSession.vault = activeSession.vault.bindAuthoritativeNode(refreshed)
                         app.secureVault.save(activeSession)
                     }
-                    transition(NodeConnectionState.Connected(connectedNode(discovered, refreshed)))
+                    transition(connectedState(connectedNode(discovered, refreshed)))
                     onConnected()
                     refreshed = configureRecoveryIfNeeded(activeSession, discovered, refreshed)
                     startHeartbeat(discovered, refreshed)
@@ -231,7 +251,17 @@ internal class NodeConnection(
                         transition(NodeConnectionState.Disconnected(trusted, NodeDisconnectReason.AUTHENTICATION_FAILED))
                         return@launch
                     }
-                    delay((1L shl attempt).coerceAtMost(16) * 1_000)
+                    val retryInMillis = reconnectDelayMillis(attempt)
+                    transition(
+                        NodeConnectionState.Retrying(
+                            discovered,
+                            trusted,
+                            attempt + 1,
+                            retryInMillis,
+                            NodeDisconnectReason.AUTHENTICATION_FAILED,
+                        ),
+                    )
+                    delay(retryInMillis)
                 }
             }
         }
@@ -278,7 +308,7 @@ internal class NodeConnection(
         app.nodeApi.setupRecovery(discovered.apiBaseUrl, pending, recoveryKey, envelope)
         val updated = pending.copy(recoverySetupPending = false)
         saveAuthoritativeNode(activeSession, updated)
-        transition(NodeConnectionState.Connected(connectedNode(discovered, updated)))
+        transition(connectedState(connectedNode(discovered, updated)))
         onRecoveryConfigured()
         return updated
     }
@@ -290,7 +320,7 @@ internal class NodeConnection(
                 delay(HEARTBEAT_INTERVAL_MILLIS)
                 try {
                     val refreshed = app.nodeApi.authenticate(discovered.apiBaseUrl, trusted)
-                    transition(NodeConnectionState.Connected(connectedNode(discovered, refreshed)))
+                    transition(connectedState(connectedNode(discovered, refreshed)))
                     onHeartbeat()
                 } catch (error: CancellationException) {
                     throw error
@@ -316,15 +346,25 @@ internal class NodeConnection(
     }
 
     private suspend fun connectedNode(discovered: DiscoveredNode, trusted: TrustedNode): ConnectedNode {
-        val model = try {
-            app.nodeApi.availableAiModel(discovered.apiBaseUrl, trusted)
+        val aiRuntime = try {
+            app.nodeApi.aiRuntimeState(discovered.apiBaseUrl, trusted)
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
-            null
+            SourceAiRuntimeState(
+                SourceAiAvailability.MODEL_LOAD_FAILED,
+                failureCode = "node_status_unavailable",
+            )
         }
-        return ConnectedNode(discovered, trusted, model)
+        return ConnectedNode(discovered, trusted, aiRuntime)
     }
+
+    private fun connectedState(connection: ConnectedNode): NodeConnectionState =
+        if (connection.aiRuntimeState.isUsable) {
+            NodeConnectionState.Ready(connection)
+        } else {
+            NodeConnectionState.Degraded(connection, NodeDegradedReason.AI_UNAVAILABLE)
+        }
 
     private companion object {
         const val MAX_RECONNECT_ATTEMPTS = 5

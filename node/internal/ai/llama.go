@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"source.local/node/internal/config"
@@ -22,8 +23,18 @@ type Event struct {
 	Type, Text, FinishReason                  string
 	InputTokens, OutputTokens, ReasoningBytes int
 }
+type RuntimeFailure struct {
+	Code      string `json:"code"`
+	Retryable bool   `json:"retryable"`
+}
+type RuntimeState struct {
+	Availability string          `json:"availability"`
+	Capabilities map[string]any  `json:"capabilities,omitempty"`
+	Failure      *RuntimeFailure `json:"failure,omitempty"`
+}
 type Backend interface {
 	Status(context.Context) bool
+	State(context.Context) RuntimeState
 	Capabilities() map[string]any
 	StreamChat(context.Context, []Message, func(Event) error) error
 }
@@ -33,29 +44,66 @@ type Client struct {
 	maximumOutputTokens int
 	timeout             time.Duration
 	http                *http.Client
+	stateMu             sync.Mutex
+	lastFailure         *RuntimeFailure
 }
 
 func New(cfg config.Config) *Client {
 	return &Client{url: strings.TrimRight(cfg.AIBackendURL, "/"), model: cfg.AIModel, parameterCount: cfg.AIParameterCount, maximumOutputTokens: cfg.AIMaximumOutputTokens, timeout: cfg.AITimeout, http: &http.Client{}}
 }
 func (c *Client) Status(ctx context.Context) bool {
+	state := c.State(ctx)
+	return state.Availability == "ready" || state.Availability == "inference_failed"
+}
+func (c *Client) State(ctx context.Context) RuntimeState {
 	ctx, cancel := context.WithTimeout(ctx, min(c.timeout, 1500*time.Millisecond))
 	defer cancel()
 	req, e := http.NewRequestWithContext(ctx, http.MethodGet, c.url+"/health", nil)
 	if e != nil {
-		return false
+		return c.failedState("model_load_failed")
 	}
 	res, e := c.http.Do(req)
 	if e != nil {
-		return false
+		return c.failedState("model_load_failed")
 	}
 	defer res.Body.Close()
-	return res.StatusCode >= 200 && res.StatusCode < 300
+	if res.StatusCode == http.StatusNotFound {
+		return RuntimeState{Availability: "model_not_installed", Failure: &RuntimeFailure{Code: "model_not_installed", Retryable: false}}
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return c.failedState("model_load_failed")
+	}
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if c.lastFailure != nil {
+		return RuntimeState{Availability: "inference_failed", Capabilities: c.Capabilities(), Failure: c.lastFailure}
+	}
+	return RuntimeState{Availability: "ready", Capabilities: c.Capabilities()}
 }
 func (c *Client) Capabilities() map[string]any {
 	return map[string]any{"contractVersion": 1, "modelId": c.model, "parameterCount": c.parameterCount, "modalities": []string{"text"}, "streaming": true, "cancellation": true, "maximumContextTokens": 8192, "promptPolicy": "none-v1", "reasoning": "off"}
 }
-func (c *Client) StreamChat(ctx context.Context, messages []Message, yield func(Event) error) error {
+func (c *Client) failedState(code string) RuntimeState {
+	return RuntimeState{
+		Availability: "model_load_failed",
+		Capabilities: c.Capabilities(),
+		Failure:      &RuntimeFailure{Code: code, Retryable: true},
+	}
+}
+func (c *Client) StreamChat(ctx context.Context, messages []Message, yield func(Event) error) (resultErr error) {
+	defer func() {
+		c.stateMu.Lock()
+		defer c.stateMu.Unlock()
+		if resultErr == nil {
+			c.lastFailure = nil
+			return
+		}
+		code := "inference_failed"
+		if errors.Is(resultErr, context.Canceled) || errors.Is(resultErr, context.DeadlineExceeded) {
+			code = "timeout"
+		}
+		c.lastFailure = &RuntimeFailure{Code: code, Retryable: true}
+	}()
 	for _, m := range messages {
 		if m.Role != "user" && m.Role != "assistant" {
 			return errors.New("Only explicit user and assistant messages are allowed")

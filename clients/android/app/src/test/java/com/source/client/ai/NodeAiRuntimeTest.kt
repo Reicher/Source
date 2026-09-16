@@ -1,6 +1,6 @@
 package com.source.client.ai
 
-import com.source.client.protocol.SourceApiException
+import com.source.client.model.AiModelMetadata
 import java.io.IOException
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
@@ -18,42 +18,41 @@ class NodeAiRuntimeTest {
 
     @Test
     fun `node failures before output retain their original fallback semantics`() = runBlocking {
-        val runtime = NodeAiRuntime {
+        val runtime = NodeAiRuntime({
             flow {
                 emit(SourceAiEvent.Started(request.runId))
                 throw IOException("offline")
             }
-        }
+        }, readyState)
 
-        val failure = runCatching { runtime.stream(request).toList() }.exceptionOrNull()
+        val events = runtime.stream(request).toList()
 
-        assertTrue(failure is IOException)
-        assertTrue(failure !is SourceApiException)
+        assertEquals(SourceAiFailureCode.NODE_UNAVAILABLE.wireValue, (events.last() as SourceAiEvent.Failed).code)
     }
 
     @Test
     fun `node failures after output never allow a second local answer`() = runBlocking {
-        val runtime = NodeAiRuntime {
+        val runtime = NodeAiRuntime({
             flow {
                 emit(SourceAiEvent.Started(request.runId))
                 emit(SourceAiEvent.Delta(request.runId, 0, "partial"))
                 throw IOException("offline")
             }
-        }
+        }, readyState)
 
-        val failure = runCatching { runtime.stream(request).toList() }.exceptionOrNull()
+        val events = runtime.stream(request).toList()
 
-        assertEquals("node_stream_interrupted_after_output", (failure as SourceApiException).code)
+        assertEquals(SourceAiFailureCode.STREAM_INTERRUPTED.wireValue, (events.last() as SourceAiEvent.Failed).code)
     }
 
     @Test
     fun `node failed events remain shared runtime events`() = runBlocking {
-        val runtime = NodeAiRuntime {
+        val runtime = NodeAiRuntime({
             flow {
                 emit(SourceAiEvent.Started(request.runId))
                 emit(SourceAiEvent.Failed(request.runId, "chat_rate_limited", false))
             }
-        }
+        }, readyState)
 
         val events = runtime.stream(request).toList()
 
@@ -62,16 +61,22 @@ class NodeAiRuntimeTest {
 
     @Test
     fun `node failed events after output retain the reported event`() = runBlocking {
-        val runtime = NodeAiRuntime {
+        val runtime = NodeAiRuntime({
             flow {
                 emit(SourceAiEvent.Started(request.runId))
                 emit(SourceAiEvent.Delta(request.runId, 0, "partial"))
                 emit(SourceAiEvent.Failed(request.runId, "model_unavailable", true))
             }
-        }
+        }, readyState)
 
         val events = runtime.stream(request).toList()
 
         assertEquals("model_unavailable", (events.last() as SourceAiEvent.Failed).code)
     }
+
+    private val readyState = SourceAiRuntimeState(
+        SourceAiAvailability.READY,
+        AiModelMetadata("node-model", 1),
+        SourceAiCapabilities(setOf(SourceAiCapability.TEXT), true, true, 8_192),
+    )
 }
