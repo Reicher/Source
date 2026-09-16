@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -28,7 +30,6 @@ import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Description
-import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material3.AlertDialog
@@ -45,9 +46,11 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -59,6 +62,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -232,29 +236,71 @@ private fun LibraryItemRow(
             Column(Modifier.fillMaxWidth().padding(start = 45.dp, end = 8.dp, bottom = 9.dp)) {
                 DetailLine(stringResource(R.string.library_size), formatBytes(item.byteCount))
                 DetailLine(stringResource(R.string.library_added), formatDate(item.createdAtMillis))
+                item.knowledgeSummary?.let { summary ->
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "${pluralStringResource(R.plurals.library_knowledge_entities, summary.entityCount, summary.entityCount)} · " +
+                            pluralStringResource(R.plurals.library_knowledge_facts, summary.factCount, summary.factCount),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Ink.copy(alpha = .64f),
+                    )
+                }
+                Spacer(Modifier.height(5.dp))
                 Row(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    if (item.previewKind != null && item.localAvailable) {
-                        Button(onClick = onOpen) { Text(stringResource(R.string.library_view)) }
-                        Spacer(Modifier.width(8.dp))
-                    }
-                    OutlinedButton(onClick = onOpenKnowledge) { Text(stringResource(R.string.knowledge)) }
-                    if (item.canDeleteFromSource) {
-                        IconButton(onClick = onDeleteFromSource) {
-                            Icon(
-                                Icons.Outlined.Delete,
-                                contentDescription = stringResource(R.string.delete),
-                                tint = MaterialTheme.colorScheme.error,
-                            )
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = Ink.copy(alpha = .045f),
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (item.previewKind != null && item.localAvailable) {
+                                CompactAction(onOpen, stringResource(R.string.library_view))
+                                ActionDivider()
+                            }
+                            CompactAction(onOpenKnowledge, stringResource(R.string.knowledge))
+                            if (item.canDeleteFromSource) {
+                                ActionDivider()
+                                CompactAction(
+                                    onDeleteFromSource,
+                                    stringResource(R.string.delete),
+                                    destructive = true,
+                                )
+                            }
                         }
                     }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun CompactAction(
+    onClick: () -> Unit,
+    label: String,
+    destructive: Boolean = false,
+) {
+    TextButton(
+        onClick = onClick,
+        modifier = Modifier.height(40.dp),
+        colors = ButtonDefaults.textButtonColors(
+            contentColor = if (destructive) MaterialTheme.colorScheme.error else Moss,
+        ),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+    ) {
+        Text(label, style = MaterialTheme.typography.labelLarge)
+    }
+}
+
+@Composable
+private fun ActionDivider() {
+    VerticalDivider(
+        modifier = Modifier.height(20.dp),
+        color = Ink.copy(alpha = .1f),
+    )
 }
 
 @Composable

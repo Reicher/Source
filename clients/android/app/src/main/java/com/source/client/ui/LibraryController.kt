@@ -5,7 +5,9 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import com.source.client.R
 import com.source.client.knowledge.BronzeTextSource
+import com.source.client.knowledge.SILVER_ENTITY_TYPE_PREDICATE
 import com.source.client.knowledge.SILVER_EXTRACTION_COMPLETE_KIND
+import com.source.client.knowledge.SILVER_NAME_PREDICATE
 import com.source.client.model.ChatConversation
 import com.source.client.model.ConnectedNode
 import com.source.client.model.ChatConversations
@@ -19,6 +21,9 @@ import com.source.client.storage.LibraryItem
 import com.source.client.storage.ImportedLibraryBlob
 import com.source.client.storage.LibraryManifest
 import com.source.client.storage.LibraryTombstone
+import com.source.client.storage.SilverClaimState
+import com.source.client.storage.SilverDataset
+import com.source.client.storage.SilverJsonValue
 import com.source.client.storage.SourceDataStore
 import com.source.client.storage.SourceDataSync
 import java.util.UUID
@@ -48,6 +53,15 @@ data class LibraryPreviewData(
     val content: LibraryPreviewContent,
 )
 
+data class SilverKnowledgeSummary(
+    val entityCount: Int,
+    val factCount: Int,
+) {
+    init {
+        require(entityCount >= 0 && factCount >= 0)
+    }
+}
+
 data class LibraryUiItem(
     val id: String,
     val filename: String,
@@ -59,6 +73,7 @@ data class LibraryUiItem(
     val bronzeStatus: BronzeNodeStatus,
     val knowledgeStatus: KnowledgeStatus = KnowledgeStatus.WAITING,
     val knowledgeProgress: SilverBatchProgress? = null,
+    val knowledgeSummary: SilverKnowledgeSummary? = null,
     val localAvailable: Boolean,
     val canRemoveFromDevice: Boolean,
     val canDeleteFromSource: Boolean,
@@ -431,9 +446,45 @@ internal fun withSilverState(library: LibraryUiState, silver: SilverUiState): Li
             knowledgeProgress = job?.takeIf { it.state == "running" }?.let {
                 SilverBatchProgress(it.completedBatches, it.totalBatches)
             },
+            knowledgeSummary = silverKnowledgeSummary(silver.dataset, matchingEvidence),
         )
     },
 )
+
+private data class SilverFactIdentity(
+    val subjectEntityId: String,
+    val predicate: String,
+    val objectEntityId: String?,
+    val value: SilverJsonValue?,
+)
+
+private fun silverKnowledgeSummary(
+    dataset: SilverDataset,
+    evidenceIds: Set<String>,
+): SilverKnowledgeSummary? {
+    if (evidenceIds.isEmpty()) return null
+    val observationIds = dataset.observations.asSequence()
+        .filter { observation -> observation.evidenceIds.any(evidenceIds::contains) }
+        .mapTo(mutableSetOf()) { it.id }
+    val sourceClaims = dataset.claims.filter { claim ->
+        claim.state == SilverClaimState.ACTIVE && claim.supportingObservationIds.any(observationIds::contains)
+    }
+    val entityIds = sourceClaims.flatMapTo(mutableSetOf()) { claim ->
+        listOfNotNull(claim.subjectEntityId, claim.objectEntityId)
+    }
+    val facts = sourceClaims.asSequence()
+        .filterNot { it.predicate == SILVER_NAME_PREDICATE || it.predicate == SILVER_ENTITY_TYPE_PREDICATE }
+        .distinctBy { claim ->
+            SilverFactIdentity(
+                claim.subjectEntityId,
+                claim.predicate,
+                claim.objectEntityId,
+                claim.value,
+            )
+        }
+        .count()
+    return SilverKnowledgeSummary(entityIds.size, facts)
+}
 
 private val conversationFilenameFormat: DateTimeFormatter =
     DateTimeFormatter.ofPattern("yyyy-MM-dd-HHmm").withZone(ZoneOffset.UTC)
