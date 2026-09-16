@@ -2,6 +2,8 @@ package com.source.client.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -18,25 +20,31 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.Label
 import androidx.compose.material.icons.outlined.Business
+import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Event
 import androidx.compose.material.icons.outlined.LocationOn
 import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.source.client.R
 import com.source.client.knowledge.SILVER_ATTRIBUTE_CANDIDATE_KIND
@@ -109,6 +117,14 @@ data class SilverInspectorClaimUi(
     val producer: SilverInspectorProducerUi,
 )
 
+data class SilverBrowserEntityUi(
+    val id: String,
+    val name: String,
+    val type: String,
+    val icon: SilverInspectorEntityIcon,
+    val claims: List<SilverInspectorClaimUi>,
+)
+
 data class SilverInspectorSourceUi(
     val id: String,
     val name: String,
@@ -130,7 +146,10 @@ data class SilverInspectorSourceUi(
         claims.filter { it.subjectEntityId == entityId }
 }
 
-data class KnowledgeUiState(val sources: List<SilverInspectorSourceUi> = emptyList())
+data class KnowledgeUiState(
+    val sources: List<SilverInspectorSourceUi> = emptyList(),
+    val entities: List<SilverBrowserEntityUi> = emptyList(),
+)
 
 internal fun buildKnowledgeUiState(
     silver: SilverDataset,
@@ -154,7 +173,7 @@ internal fun buildKnowledgeUiState(
         claim.supportingObservationIds.map { observationId -> observationId to claim }
     }.groupBy({ it.first }, { it.second })
 
-    return KnowledgeUiState(sourceIds.map { sourceId ->
+    val sources = sourceIds.map { sourceId ->
         val libraryItem = libraryById[sourceId]
         val evidence = silver.evidence.filter { it.bronzeSourceId == sourceId }.sortedBy(SilverEvidence::id)
         val evidenceIds = evidence.mapTo(mutableSetOf(), SilverEvidence::id)
@@ -221,7 +240,52 @@ internal fun buildKnowledgeUiState(
                 }
                 .sortedWith(compareBy(SilverInspectorClaimUi::subjectName, SilverInspectorClaimUi::predicate)),
         )
-    })
+    }
+    val entities = silver.entities.map { entity ->
+        SilverBrowserEntityUi(
+            id = entity.id,
+            name = checkNotNull(entityNames[entity.id]),
+            type = checkNotNull(entityTypes[entity.id]),
+            icon = entityIcon(entityTypes[entity.id]),
+            claims = activeClaims
+                .filter {
+                    it.subjectEntityId == entity.id &&
+                        it.predicate != SILVER_NAME_PREDICATE &&
+                        it.predicate != SILVER_ENTITY_TYPE_PREDICATE
+                }
+                .groupBy { it.predicate to it.objectIdentity() }
+                .values
+                .map { matchingClaims ->
+                    val claim = matchingClaims.maxWithOrNull(
+                        compareBy<SilverClaim>({ it.confidence ?: -1.0 }, SilverClaim::id),
+                    ) ?: error("A displayed Claim group cannot be empty")
+                    SilverInspectorClaimUi(
+                        id = claim.id,
+                        subjectEntityId = claim.subjectEntityId,
+                        subjectName = checkNotNull(entityNames[entity.id]),
+                        predicate = claim.predicate,
+                        objectDisplay = claim.objectEntityId?.let { entityNames[it] ?: "Unknown entity" }
+                            ?: checkNotNull(claim.value).displayScalar(),
+                        objectEntityId = claim.objectEntityId,
+                        objectEntityIcon = claim.objectEntityId?.let { entityIcon(entityTypes[it]) },
+                        state = claim.state.storageValue,
+                        confidence = (
+                            matchingClaims.mapNotNull(SilverClaim::confidence) +
+                                matchingClaims.flatMap(SilverClaim::supportingObservationIds)
+                                    .mapNotNull(observationConfidenceById::get)
+                            ).maxOrNull(),
+                        competing = matchingClaims.any { it.id in competingClaimIds },
+                        supportingObservationIds = matchingClaims
+                            .flatMap(SilverClaim::supportingObservationIds)
+                            .distinct()
+                            .sorted(),
+                        producer = claim.producer.toUi(),
+                    )
+                }
+                .sortedWith(compareBy(SilverInspectorClaimUi::predicate, SilverInspectorClaimUi::id)),
+        )
+    }.sortedWith(compareBy<SilverBrowserEntityUi> { it.name.lowercase() }.thenBy { it.id })
+    return KnowledgeUiState(sources, entities)
 }
 
 @Composable
@@ -351,6 +415,188 @@ private fun EntityClaims(source: SilverInspectorSourceUi, entity: SilverInspecto
 }
 
 @Composable
+internal fun SilverBrowserScreen(
+    entities: List<SilverBrowserEntityUi>,
+    modifier: Modifier = Modifier,
+) {
+    var query by rememberSaveable { mutableStateOf("") }
+    var entityPath by rememberSaveable { mutableStateOf(emptyList<String>()) }
+    val entitiesById = entities.associateBy(SilverBrowserEntityUi::id)
+    LaunchedEffect(entitiesById.keys) {
+        val validPath = entityPath.takeWhile(entitiesById::containsKey)
+        if (validPath != entityPath) entityPath = validPath
+    }
+    BackHandler(enabled = entityPath.isNotEmpty()) {
+        entityPath = entityPath.dropLast(1)
+    }
+    val selectedEntity = entityPath.lastOrNull()?.let(entitiesById::get)
+    if (selectedEntity != null) {
+        SilverEntityDetail(
+            entity = selectedEntity,
+            onBack = { entityPath = entityPath.dropLast(1) },
+            onOpenEntity = { entityId ->
+                if (entityId in entitiesById) entityPath = entityPath + entityId
+            },
+            modifier = modifier,
+        )
+        return
+    }
+
+    val filteredEntities = filterSilverEntities(entities, query)
+    Column(modifier.fillMaxSize()) {
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
+            singleLine = true,
+            leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
+            placeholder = { Text(stringResource(R.string.knowledge_search_entities)) },
+        )
+        when {
+            entities.isEmpty() -> SilverBrowserEmptyState(stringResource(R.string.knowledge_silver_empty))
+            filteredEntities.isEmpty() -> SilverBrowserEmptyState(stringResource(R.string.knowledge_search_empty))
+            else -> LazyColumn(Modifier.fillMaxSize()) {
+                items(filteredEntities, key = SilverBrowserEntityUi::id) { entity ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { entityPath = entityPath + entity.id }
+                            .padding(horizontal = 12.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        EntityTypeIcon(entity.icon, entity.type, 24)
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                entity.name,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            Text(
+                                entity.type.displayLabel(),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = Ink.copy(alpha = .58f),
+                            )
+                        }
+                        Icon(
+                            Icons.Outlined.ChevronRight,
+                            contentDescription = null,
+                            tint = Ink.copy(alpha = .42f),
+                        )
+                    }
+                    HorizontalDivider(color = Ink.copy(alpha = .08f))
+                }
+                item { Spacer(Modifier.height(88.dp)) }
+            }
+        }
+    }
+}
+
+internal fun filterSilverEntities(
+    entities: List<SilverBrowserEntityUi>,
+    query: String,
+): List<SilverBrowserEntityUi> {
+    val normalizedQuery = query.trim()
+    return if (normalizedQuery.isEmpty()) entities else entities.filter {
+        it.name.contains(normalizedQuery, ignoreCase = true)
+    }
+}
+
+@Composable
+private fun SilverEntityDetail(
+    entity: SilverBrowserEntityUi,
+    onBack: () -> Unit,
+    onOpenEntity: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Outlined.ArrowBack, stringResource(R.string.back))
+            }
+            EntityTypeIcon(entity.icon, entity.type, 28)
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    entity.name,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    entity.type.displayLabel(),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Ink.copy(alpha = .58f),
+                )
+            }
+        }
+        LazyColumn(Modifier.fillMaxSize()) {
+            item { InspectorSectionTitle("Claims · ${entity.claims.size}") }
+            if (entity.claims.isEmpty()) {
+                item { InspectorEmptyState(stringResource(R.string.knowledge_claims_empty)) }
+            } else {
+                items(entity.claims, key = SilverInspectorClaimUi::id) { claim ->
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp)) {
+                        Text(
+                            claim.predicate.displayLabel(),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Ink.copy(alpha = .7f),
+                        )
+                        val relatedEntityId = claim.objectEntityId
+                        if (relatedEntityId == null) {
+                            Text(
+                                claim.objectDisplay.withoutDecorativeQuotes(),
+                                modifier = Modifier.padding(top = 6.dp),
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        } else {
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable { onOpenEntity(relatedEntityId) }
+                                    .padding(top = 6.dp, bottom = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                claim.objectEntityIcon?.let {
+                                    EntityTypeIcon(it, claim.objectDisplay, 20)
+                                    Spacer(Modifier.width(7.dp))
+                                }
+                                Text(
+                                    claim.objectDisplay,
+                                    modifier = Modifier.weight(1f),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium,
+                                )
+                                Icon(
+                                    Icons.Outlined.ChevronRight,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp),
+                                    tint = Ink.copy(alpha = .42f),
+                                )
+                            }
+                        }
+                    }
+                    HorizontalDivider(color = Ink.copy(alpha = .08f))
+                }
+            }
+            item { Spacer(Modifier.height(88.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun SilverBrowserEmptyState(message: String) = Box(
+    Modifier.fillMaxSize().padding(24.dp),
+    contentAlignment = Alignment.Center,
+) {
+    Text(message, style = MaterialTheme.typography.bodyMedium, color = Ink.copy(alpha = .64f))
+}
+
+@Composable
 private fun InspectorSectionTitle(title: String) = Text(
     title,
     modifier = Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 8.dp, start = 12.dp, end = 12.dp),
@@ -359,10 +605,14 @@ private fun InspectorSectionTitle(title: String) = Text(
 )
 
 @Composable
-private fun EntityTypeIcon(icon: SilverInspectorEntityIcon, description: String) = Icon(
+private fun EntityTypeIcon(
+    icon: SilverInspectorEntityIcon,
+    description: String,
+    size: Int = 18,
+) = Icon(
     imageVector = icon.imageVector(),
     contentDescription = description.displayLabel(),
-    modifier = Modifier.size(18.dp),
+    modifier = Modifier.size(size.dp),
     tint = Ink.copy(alpha = .68f),
 )
 

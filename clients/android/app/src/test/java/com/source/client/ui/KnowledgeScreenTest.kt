@@ -183,6 +183,43 @@ class KnowledgeScreenTest {
     }
 
     @Test
+    fun `global Silver entities combine active Claims across Bronze sources`() {
+        val firstEvidence = testEvidence("source-1", "a".repeat(64))
+        val secondEvidence = testEvidence("source-2", "b".repeat(64))
+        val observations = listOf(
+            candidate("status", "active", evidence = firstEvidence),
+            candidate("purpose", "private knowledge", evidence = secondEvidence),
+        )
+        val base = SilverDataset(
+            evidence = listOf(firstEvidence, secondEvidence),
+            observations = observations,
+            modifiedAtMillis = 100,
+        )
+        val silver = base.with(resolver.resolve(base, observations, 200))
+
+        val entity = buildKnowledgeUiState(silver, library()).entities.single()
+
+        assertEquals("Source", entity.name)
+        assertEquals("project", entity.type)
+        assertTrue(entity.claims.any { it.predicate == "status" && it.objectDisplay == "“active”" })
+        assertTrue(entity.claims.any { it.predicate == "purpose" && it.objectDisplay == "“private knowledge”" })
+    }
+
+    @Test
+    fun `global Silver search filters display names case insensitively`() {
+        val observation = relationshipCandidate()
+        val base = dataset(listOf(observation))
+        val entities = buildKnowledgeUiState(
+            base.with(resolver.resolve(base, listOf(observation), 200)),
+            library(),
+        ).entities
+
+        assertEquals(listOf("Robin"), filterSilverEntities(entities, "  ROB  ").map { it.name })
+        assertTrue(filterSilverEntities(entities, "missing").isEmpty())
+        assertEquals(entities, filterSilverEntities(entities, " "))
+    }
+
+    @Test
     fun `common entity types have stable presentation icons`() {
         assertEquals(SilverInspectorEntityIcon.PERSON, entityIcon("person"))
         assertEquals(SilverInspectorEntityIcon.LOCATION, entityIcon("city"))

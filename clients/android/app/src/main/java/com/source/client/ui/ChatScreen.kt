@@ -38,6 +38,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -118,7 +120,7 @@ internal fun MainScreen(
                     selected = state.destination == MainDestination.LIBRARY,
                     onClick = { selectDestination(MainDestination.LIBRARY) },
                     icon = { Icon(Icons.Outlined.Folder, null) },
-                    label = { Text(stringResource(R.string.library)) },
+                    label = { Text(stringResource(R.string.knowledge)) },
                 )
             }
         },
@@ -138,7 +140,7 @@ internal fun MainScreen(
                     stringResource(
                         when (state.destination) {
                             MainDestination.CHAT -> R.string.app_name
-                            MainDestination.LIBRARY -> R.string.library
+                            MainDestination.LIBRARY -> R.string.knowledge
                         },
                     ),
                     style = MaterialTheme.typography.headlineMedium,
@@ -198,16 +200,37 @@ internal fun MainScreen(
                     }
                     Spacer(Modifier.height(12.dp))
                 }
-                MainDestination.LIBRARY -> LibraryScreen(
-                    state = state.library,
-                    onImport = importFile,
-                    onRemoveFromDevice = removeLibraryItemFromDevice,
-                    onDeleteFromSource = deleteLibraryItemFromSource,
-                    onOpen = openLibraryItem,
-                    onOpenKnowledge = openKnowledgeSource,
-                    onFeedbackShown = clearLibraryFeedback,
-                    modifier = Modifier.fillMaxWidth().weight(1f),
-                )
+                MainDestination.LIBRARY -> {
+                    var selectedKnowledgeTab by rememberSaveable { mutableStateOf(0) }
+                    PrimaryTabRow(selectedTabIndex = selectedKnowledgeTab) {
+                        Tab(
+                            selected = selectedKnowledgeTab == 0,
+                            onClick = { selectedKnowledgeTab = 0 },
+                            text = { Text(stringResource(R.string.knowledge_bronze)) },
+                        )
+                        Tab(
+                            selected = selectedKnowledgeTab == 1,
+                            onClick = { selectedKnowledgeTab = 1 },
+                            text = { Text(stringResource(R.string.knowledge_silver)) },
+                        )
+                    }
+                    when (selectedKnowledgeTab) {
+                        0 -> LibraryScreen(
+                            state = state.library,
+                            onImport = importFile,
+                            onRemoveFromDevice = removeLibraryItemFromDevice,
+                            onDeleteFromSource = deleteLibraryItemFromSource,
+                            onOpen = openLibraryItem,
+                            onOpenKnowledge = openKnowledgeSource,
+                            onFeedbackShown = clearLibraryFeedback,
+                            modifier = Modifier.fillMaxWidth().weight(1f),
+                        )
+                        else -> SilverBrowserScreen(
+                            entities = state.knowledge.entities,
+                            modifier = Modifier.fillMaxWidth().weight(1f),
+                        )
+                    }
+                }
             }
         }
     }
