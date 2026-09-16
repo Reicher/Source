@@ -24,6 +24,12 @@
     <string name="chat">Chat</string>
     <string name="library">Library</string>
     <string name="knowledge">Knowledge</string>
+    <string name="knowledge_bronze">Bronze</string>
+    <string name="knowledge_silver">Silver</string>
+    <string name="knowledge_search_entities">Search entities</string>
+    <string name="knowledge_silver_empty">No Silver entities are available for this profile yet.</string>
+    <string name="knowledge_search_empty">No entities match this search.</string>
+    <string name="knowledge_claims_empty">This entity has no active claims.</string>
     <string name="knowledge_waiting">Waiting for processing</string>
     <string name="knowledge_processing">Processing on Node</string>
     <string name="knowledge_syncing_to_client">Silver finished on Node and syncing to this device</string>
