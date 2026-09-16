@@ -41,7 +41,7 @@ func (f *fakeAI) State(context.Context) localai.RuntimeState {
 func (f *fakeAI) Capabilities() map[string]any {
 	return map[string]any{"contractVersion": 1, "modelId": "source-test-model", "parameterCount": int64(9_000_000_000), "modalities": []string{"text"}, "streaming": true, "cancellation": true, "maximumContextTokens": 8192, "promptPolicy": "none-v1", "reasoning": "off"}
 }
-func (f *fakeAI) StreamChat(_ context.Context, m []localai.Message, yield func(localai.Event) error) error {
+func (f *fakeAI) StreamChat(_ context.Context, m []localai.Message, _ localai.ChatOptions, yield func(localai.Event) error) error {
 	f.received = m
 	if len(m) == 1 && strings.Contains(m[0].Content, "Bronze text:") {
 		if e := yield(localai.Event{Type: "delta", Text: `{"entities":[{"key":"e1","name":"Source","type":"project"}],"claims":[{"subjectKey":"e1","predicate":"status","value":"active","confidence":0.9,"evidenceExcerpt":"Source is active"}]}`}); e != nil {

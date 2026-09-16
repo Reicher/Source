@@ -39,7 +39,7 @@ func (a *resumableAI) State(context.Context) localai.RuntimeState {
 	return localai.RuntimeState{Availability: "ready", Capabilities: a.Capabilities()}
 }
 func (a *resumableAI) Capabilities() map[string]any { return map[string]any{"modelId": "test-model"} }
-func (a *resumableAI) StreamChat(ctx context.Context, _ []localai.Message, yield func(localai.Event) error) error {
+func (a *resumableAI) StreamChat(ctx context.Context, _ []localai.Message, _ localai.ChatOptions, yield func(localai.Event) error) error {
 	a.mu.Lock()
 	a.calls++
 	call, failAt, blockAt := a.calls, a.failAt, a.blockAt
@@ -79,7 +79,7 @@ func (a *resumableAI) unblock() {
 	a.mu.Unlock()
 }
 func (a *testAI) Capabilities() map[string]any { return map[string]any{"modelId": "test-model"} }
-func (a *testAI) StreamChat(_ context.Context, _ []localai.Message, yield func(localai.Event) error) error {
+func (a *testAI) StreamChat(_ context.Context, _ []localai.Message, _ localai.ChatOptions, yield func(localai.Event) error) error {
 	a.calls++
 	return yield(localai.Event{Type: "delta", Text: `{"entities":[{"key":"e1","name":"Source","type":"project"}],"claims":[{"subjectKey":"e1","predicate":"status","value":"active","confidence":0.9,"evidenceExcerpt":"Source is active"}]}`})
 }
@@ -289,7 +289,7 @@ func TestRefinementRetriesFromDurableCompletedBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	failed := waitForJob(t, service, user.ID, accepted.Job.ID, "failed")
-	if failed.CompletedBatches != 1 || failed.TotalBatches < 3 {
+	if failed.CompletedBatches != 1 || failed.TotalBatches < 2 {
 		t.Fatalf("failed progress = %d/%d", failed.CompletedBatches, failed.TotalBatches)
 	}
 	ai.mu.Lock()

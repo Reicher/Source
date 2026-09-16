@@ -96,7 +96,11 @@ func (h *Handler) streamAI(w http.ResponseWriter, r *http.Request, session *auth
 	inputTokens := 0
 	outputTokens := 0
 	reasoningBytes := 0
-	err = h.ai.StreamChat(inferenceContext, messages, func(event localai.Event) error {
+	err = h.ai.StreamChat(inferenceContext, messages, localai.ChatOptions{
+		Temperature: 0.6,
+		TopP:        0.9,
+		Reasoning:   false,
+	}, func(event localai.Event) error {
 		if event.Type == "delta" {
 			defer func() { sequence++ }()
 			return emit(map[string]any{"type": "delta", "runId": body.RunID, "sequence": sequence, "text": event.Text})

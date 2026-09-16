@@ -19,6 +19,12 @@ type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
+type ChatOptions struct {
+	Temperature float64
+	TopP        float64
+	Reasoning   bool
+	JSONSchema  map[string]any
+}
 type Event struct {
 	Type, Text, FinishReason                  string
 	InputTokens, OutputTokens, ReasoningBytes int
@@ -36,7 +42,7 @@ type Backend interface {
 	Status(context.Context) bool
 	State(context.Context) RuntimeState
 	Capabilities() map[string]any
-	StreamChat(context.Context, []Message, func(Event) error) error
+	StreamChat(context.Context, []Message, ChatOptions, func(Event) error) error
 }
 type Client struct {
 	url, model          string
@@ -90,7 +96,7 @@ func (c *Client) failedState(code string) RuntimeState {
 		Failure:      &RuntimeFailure{Code: code, Retryable: true},
 	}
 }
-func (c *Client) StreamChat(ctx context.Context, messages []Message, yield func(Event) error) (resultErr error) {
+func (c *Client) StreamChat(ctx context.Context, messages []Message, options ChatOptions, yield func(Event) error) (resultErr error) {
 	defer func() {
 		c.stateMu.Lock()
 		defer c.stateMu.Unlock()
@@ -117,11 +123,16 @@ func (c *Client) StreamChat(ctx context.Context, messages []Message, yield func(
 	defer cancel()
 	timeout := time.AfterFunc(c.timeout, cancel)
 	defer timeout.Stop()
-	body, e := json.Marshal(map[string]any{
+	requestBody := map[string]any{
 		"model": c.model, "messages": messages, "stream": true,
 		"stream_options": map[string]any{"include_usage": true},
-		"temperature":    0.6, "top_p": 0.9, "max_tokens": c.maximumOutputTokens,
-	})
+		"temperature":    options.Temperature, "top_p": options.TopP, "max_tokens": c.maximumOutputTokens,
+		"chat_template_kwargs": map[string]any{"enable_thinking": options.Reasoning},
+	}
+	if options.JSONSchema != nil {
+		requestBody["json_schema"] = options.JSONSchema
+	}
+	body, e := json.Marshal(requestBody)
 	if e != nil {
 		return e
 	}
