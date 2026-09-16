@@ -41,7 +41,11 @@ func TestLlamaStreamsOnlyVisibleContent(t *testing.T) {
 		t.Fatalf("unexpected runtime state: %#v", state)
 	}
 	var events []Event
-	e := client.StreamChat(context.Background(), []Message{{Role: "user", Content: "Hello"}}, func(event Event) error { events = append(events, event); return nil })
+	e := client.StreamChat(context.Background(), []Message{{Role: "user", Content: "Hello"}}, ChatOptions{
+		Temperature: 0.6,
+		TopP:        0.9,
+		Reasoning:   false,
+	}, func(event Event) error { events = append(events, event); return nil })
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -54,9 +58,37 @@ func TestLlamaStreamsOnlyVisibleContent(t *testing.T) {
 	if request["stream"] != true {
 		t.Fatal("streaming was not requested")
 	}
+	if request["temperature"] != 0.6 || request["top_p"] != 0.9 {
+		t.Fatalf("unexpected interactive sampling options: %#v", request)
+	}
+	templateOptions, ok := request["chat_template_kwargs"].(map[string]any)
+	if !ok || templateOptions["enable_thinking"] != false {
+		t.Fatal("interactive reasoning was not explicitly disabled")
+	}
+	if _, ok = request["json_schema"]; ok {
+		t.Fatal("interactive chat unexpectedly requested constrained JSON")
+	}
 	streamOptions, ok := request["stream_options"].(map[string]any)
 	if !ok || streamOptions["include_usage"] != true {
 		t.Fatal("streaming token usage was not requested")
+	}
+
+	schema := map[string]any{"type": "object", "additionalProperties": false}
+	e = client.StreamChat(context.Background(), []Message{{Role: "user", Content: "Extract facts"}}, ChatOptions{
+		Temperature: 0.1,
+		TopP:        0.9,
+		Reasoning:   true,
+		JSONSchema:  schema,
+	}, func(Event) error { return nil })
+	if e != nil {
+		t.Fatal(e)
+	}
+	templateOptions, ok = request["chat_template_kwargs"].(map[string]any)
+	if request["temperature"] != 0.1 || request["top_p"] != 0.9 || !ok || templateOptions["enable_thinking"] != true {
+		t.Fatalf("unexpected extraction inference options: %#v", request)
+	}
+	if !reflect.DeepEqual(request["json_schema"], schema) {
+		t.Fatalf("unexpected extraction JSON schema: %#v", request["json_schema"])
 	}
 }
 
@@ -141,7 +173,10 @@ func TestLlamaTimeoutIsResetWhileStreamIsActive(t *testing.T) {
 		AITimeout:             100 * time.Millisecond,
 	})
 	var events []Event
-	err := client.StreamChat(context.Background(), []Message{{Role: "user", Content: "Hello"}}, func(event Event) error {
+	err := client.StreamChat(context.Background(), []Message{{Role: "user", Content: "Hello"}}, ChatOptions{
+		Temperature: 0.6,
+		TopP:        0.9,
+	}, func(event Event) error {
 		events = append(events, event)
 		return nil
 	})
@@ -156,7 +191,7 @@ func TestLlamaTimeoutIsResetWhileStreamIsActive(t *testing.T) {
 
 func TestLlamaRejectsHiddenSystemMessages(t *testing.T) {
 	client := New(config.Config{AIBackendURL: "http://127.0.0.1", AITimeout: time.Second})
-	e := client.StreamChat(context.Background(), []Message{{Role: "system", Content: "hidden"}}, func(Event) error { return nil })
+	e := client.StreamChat(context.Background(), []Message{{Role: "system", Content: "hidden"}}, ChatOptions{}, func(Event) error { return nil })
 	if e == nil {
 		t.Fatal("system message was accepted")
 	}

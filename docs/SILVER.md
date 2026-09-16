@@ -410,7 +410,7 @@ cache: they are never uploaded to the canonical Silver namespace, and the first
 Node-produced `silver-datasets` head replaces them. Refinement working state and
 retry checkpoints live only on the Node.
 
-The Node `source.node.silver-extraction` processor version `1` emits one
+The Node `source.node.silver-extraction` processor version `2` emits one
 `attribute-candidate` or `relationship-candidate` Observation for each valid
 finding. It retains the compatible candidate payload schema:
 
@@ -422,6 +422,11 @@ finding. It retains the compatible candidate payload schema:
   "evidenceExcerpt": "Robin created Source"
 }
 ```
+
+Silver extraction uses low-randomness sampling, enables the model's internal
+reasoning, and constrains visible output to the candidate JSON schema. These
+settings are private to background refinement; normal chat continues to run
+with reasoning disabled.
 
 The subject and object are local mentions, not Entity identities. An attribute
 candidate has a scalar `value`; a relationship candidate has an
@@ -463,10 +468,12 @@ verifies that the job's Bronze content hash is still the current accepted
 generation for that source. A stale retry can therefore never replace
 Silver produced from a newer source generation.
 
-One refinement request is bounded to eight deterministic 2,400-byte chunks
-(19,200 UTF-8 bytes total). The Node rejects larger requests before accepting
-Bronze. The HTTP request only performs durable acceptance; inference is done by
-the Node-owned worker independently of the Client session.
+One refinement request is bounded to 19,200 UTF-8 bytes. The Node processes it
+in deterministic chunks of up to 6,000 bytes with up to 600 bytes of preceding
+context repeated between adjacent chunks, and never more than eight chunks.
+The Node rejects larger requests before accepting Bronze. The HTTP request only
+performs durable acceptance; inference is done by the Node-owned worker
+independently of the Client session.
 
 Entity resolution remains deliberately separate: candidate Observations do not
 create global Entities by themselves. The Node owns the conservative resolution
