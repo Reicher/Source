@@ -439,16 +439,30 @@ no candidates, and prevents an unchanged source and producer version from being
 processed repeatedly.
 
 The Client submits plaintext text Bronze to its authenticated authoritative
-Node. The Node durably accepts and hash-verifies that Bronze before invoking the
-refinement model, then atomically commits the complete `source-silver` dataset
-as a Node-originated canonical revision. A lost response or disconnect may
-repeat the submission, but operation identity plus source/content identity make
-both Bronze acceptance and Silver generation idempotent.
+Node. Acceptance creates a durable Node-owned job with an immutable input
+snapshot. The initiating Client is only an observer and controller after the
+Node responds: disconnecting it does not stop the job. One refinement job runs
+per Node and additional accepted jobs remain in FIFO order.
+
+Each successful inference batch is checkpointed before the next batch starts.
+After interruption or retry, the Node validates those checkpoints against the
+input, processor, model, batch index, and batch-content hash and resumes at the
+first incomplete batch. `pause` takes effect after the current batch and is
+resumable; `cancel` is terminal for that job. Lifecycle and completed-versus-total
+progress are durable as `queued`, `running`, `paused`, `completed`, `failed`, or
+`cancelled` and can be read by any reconnecting Client for the profile.
+
+Checkpoints are internal staged state. They never appear in canonical storage
+or authoritative Silver. Only after every batch succeeds does the Node resolve
+the complete generation and atomically commit the complete `source-silver`
+dataset as a Node-originated canonical revision. A lost response, disconnect,
+restart, retry, or resubmission reuses the same accepted job or safe generation
+checkpoints where possible.
 
 One refinement request is bounded to eight deterministic 2,400-byte chunks
 (19,200 UTF-8 bytes total). The Node rejects larger requests before accepting
-Bronze or invoking the model, preventing a single HTTP request from expanding
-into hundreds of sequential model calls without a durable checkpoint.
+Bronze. The HTTP request only performs durable acceptance; inference is done by
+the Node-owned worker independently of the Client session.
 
 Entity resolution remains deliberately separate: candidate Observations do not
 create global Entities by themselves. The Node owns the conservative resolution

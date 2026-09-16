@@ -9,6 +9,7 @@ import com.source.client.knowledge.SILVER_EXTRACTION_COMPLETE_KIND
 import com.source.client.model.AiModelMetadata
 import com.source.client.model.ConnectedNode
 import com.source.client.protocol.SourceApiException
+import com.source.client.protocol.SilverRefinementJob
 import com.source.client.security.VaultSession
 import com.source.client.storage.SilverBatchCheckpoint
 import com.source.client.storage.SilverCheckpointData
@@ -69,6 +70,7 @@ internal class SilverController(
     private var pausedForBackground = false
     private var pausedByUser = false
     private var checkpoints = SilverCheckpointDataset()
+    private val activeNodeJobs = mutableMapOf<String, String>()
     private val checkpointStoreMutex = Mutex()
     // A refinement commit and a remote reconciliation both replace the complete persisted snapshot.
     // Keep their read/merge/persist/state transitions atomic so neither can publish stale Silver state.
@@ -87,6 +89,7 @@ internal class SilverController(
         pausedForInteraction = false
         pausedForBackground = false
         pausedByUser = false
+        activeNodeJobs.clear()
         datasetMutex.withLock {
             sync.reset()
             val dataset = if (activeSession == null) {
@@ -158,6 +161,7 @@ internal class SilverController(
         val activeSession = session()
         val snapshot = checkpoints
         scope.launch { persistCheckpoints(activeSession, snapshot) }
+        controlActiveNodeJobs("pause")
     }
 
     fun resumeRefinement() {
@@ -169,6 +173,7 @@ internal class SilverController(
         val activeSession = session()
         val snapshot = checkpoints
         scope.launch { persistCheckpoints(activeSession, snapshot) }
+        controlActiveNodeJobs("resume")
         resumeWhenReady()
     }
 
@@ -315,13 +320,25 @@ internal class SilverController(
                     "Node refinement candidate started sourceType=${source.sourceType} " +
                         "bytes=${source.text.toByteArray(Charsets.UTF_8).size}",
                 )
-                nodeApi.refineSilver(
+                var job = nodeApi.refineSilver(
                     connected.discovered.apiBaseUrl,
                     connected.trusted,
                     source,
                     UUID.randomUUID().toString(),
                 )
+                activeNodeJobs[source.id] = job.id
+                job = observeNodeJob(connected, source.id, job)
+                if (job.state == "cancelled") {
+                    activeNodeJobs.remove(source.id)
+                    state = state.copy(
+                        processing = state.processing - source.id,
+                        progress = state.progress - source.id,
+                    )
+                    publish()
+                    continue
+                }
                 synchronize()
+                activeNodeJobs.remove(source.id)
                 state = state.copy(
                     processing = state.processing - source.id,
                     progress = state.progress - source.id,
@@ -348,6 +365,68 @@ internal class SilverController(
     }
 
     private fun publish() = onStateChanged(state)
+
+    private suspend fun observeNodeJob(
+        connected: ConnectedNode,
+        sourceId: String,
+        initial: SilverRefinementJob,
+    ): SilverRefinementJob {
+        var job = initial
+        while (true) {
+            state = state.copy(
+                processing = state.processing + (
+                    sourceId to if (job.state == "running") SilverProcessingState.PROCESSING else SilverProcessingState.QUEUED
+                ),
+                progress = state.progress + (sourceId to SilverBatchProgress(job.completedBatches, job.totalBatches)),
+            )
+            publish()
+            when (job.state) {
+                "completed", "cancelled" -> return job
+                "failed" -> throw SourceApiException(
+                    job.errorCode ?: "silver_refinement_failed",
+                    "The Node could not refine knowledge from this source.",
+                )
+                "paused" -> {
+                    if (pausedByUser) {
+                        delay(JOB_POLL_MILLIS)
+                    } else {
+                        job = nodeApi.controlSilverRefinementJob(
+                            connected.discovered.apiBaseUrl,
+                            connected.trusted,
+                            job.id,
+                            "resume",
+                        )
+                    }
+                }
+                else -> {
+                    delay(JOB_POLL_MILLIS)
+                    job = nodeApi.silverRefinementJob(
+                        connected.discovered.apiBaseUrl,
+                        connected.trusted,
+                        job.id,
+                    )
+                }
+            }
+        }
+    }
+
+    private fun controlActiveNodeJobs(action: String) {
+        val connected = connectedNode() ?: return
+        activeNodeJobs.values.toSet().forEach { jobId ->
+            scope.launch {
+                runCatching {
+                    nodeApi.controlSilverRefinementJob(
+                        connected.discovered.apiBaseUrl,
+                        connected.trusted,
+                        jobId,
+                        action,
+                    )
+                }.onFailure { error ->
+                    Log.w(SILVER_LOG_TAG, "Node refinement $action failed error=${syncErrorSummary(error as? Exception)}")
+                }
+            }
+        }
+    }
 
     private fun nextModifiedAt(): Long = maxOf(clock().coerceAtLeast(1), state.dataset.modifiedAtMillis + 1)
 
@@ -400,6 +479,7 @@ internal class SilverController(
 
     companion object {
         private const val RETRY_DELAY_MILLIS = 30_000L
+        private const val JOB_POLL_MILLIS = 1_000L
         private const val SILVER_LOG_TAG = "SourceSilver"
     }
 }

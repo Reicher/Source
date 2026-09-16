@@ -35,9 +35,8 @@ type RefineRequest struct {
 }
 
 type RefineResult struct {
-	BronzeAccepted bool                     `json:"bronzeAccepted"`
-	Refined        bool                     `json:"refined"`
-	Receipt        *syncmodel.CommitReceipt `json:"receipt,omitempty"`
+	BronzeAccepted bool `json:"bronzeAccepted"`
+	Job            Job  `json:"job"`
 }
 
 type RemoveRequest struct {
@@ -53,24 +52,37 @@ type RemoveResult struct {
 }
 
 type Service struct {
-	db           *database.DB
-	storage      *storage.Storage
-	ai           localai.Backend
-	maximumBytes int64
-	now          func() time.Time
-	mu           sync.Mutex
+	db            *database.DB
+	storage       *storage.Storage
+	ai            localai.Backend
+	maximumBytes  int64
+	now           func() time.Time
+	mu            sync.Mutex
+	workerCtx     context.Context
+	stopWorker    context.CancelFunc
+	wake          chan struct{}
+	workerDone    chan struct{}
+	runningMu     sync.Mutex
+	runningUserID string
+	runningJobID  string
+	runningStop   context.CancelFunc
 }
 
 func New(db *database.DB, storage *storage.Storage, ai localai.Backend, maximumBytes int64, now func() time.Time) *Service {
-	return &Service{db: db, storage: storage, ai: ai, maximumBytes: maximumBytes, now: now}
+	workerCtx, stopWorker := context.WithCancel(context.Background())
+	service := &Service{
+		db: db, storage: storage, ai: ai, maximumBytes: maximumBytes, now: now,
+		workerCtx: workerCtx, stopWorker: stopWorker, wake: make(chan struct{}, 1), workerDone: make(chan struct{}),
+	}
+	go service.work()
+	service.signalWorker()
+	return service
 }
 
-func (s *Service) Refine(ctx context.Context, userID string, request RefineRequest) (RefineResult, error) {
+func (s *Service) Refine(_ context.Context, userID string, request RefineRequest) (RefineResult, error) {
 	if err := validateRequest(request); err != nil {
 		return RefineResult{}, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	requestBytes, err := marshalCanonical(request)
 	if err != nil {
 		return RefineResult{}, err
@@ -80,67 +92,21 @@ func (s *Service) Refine(ctx context.Context, userID string, request RefineReque
 	}
 	digest := sha256.Sum256(requestBytes)
 	now := s.now().UnixMilli()
-	accepted, changed, err := s.db.AcceptSilverRefinementSource(userID, request.OperationID,
-		hex.EncodeToString(digest[:]), database.SilverRefinementSource{
-			SourceID: request.Source.ID, Name: request.Source.Name, SourceType: request.Source.SourceType,
-			ContentSHA256: request.Source.ContentSHA256, Plaintext: request.Source.Text, AcceptedAt: now,
-		})
-	if err != nil {
-		return RefineResult{}, mapDatabaseError(err)
-	}
-	// A replay of an older operation cannot roll a newer accepted Bronze revision back.
-	if accepted.ContentSHA256 != request.Source.ContentSHA256 {
-		return RefineResult{BronzeAccepted: false}, nil
-	}
-
-	dataset, err := s.currentDataset(userID)
-	if err != nil {
-		return RefineResult{}, err
-	}
 	modelID, _ := s.ai.Capabilities()["modelId"].(string)
 	if modelID == "" {
 		return RefineResult{}, apperror.New(503, "silver_model_unavailable", "The Node has no Silver refinement model.")
 	}
-	if generationComplete(dataset, accepted.SourceID, accepted.ContentSHA256, modelID) {
-		if err = s.db.MarkSilverSourceRefined(userID, accepted.SourceID, accepted.ContentSHA256, ExtractionVersion, modelID, now); err != nil {
-			return RefineResult{}, err
-		}
-		return RefineResult{BronzeAccepted: changed}, nil
-	}
-
-	generation, err := extract(ctx, s.ai, Source{
-		ID: accepted.SourceID, Name: accepted.Name, SourceType: accepted.SourceType,
-		ContentSHA256: accepted.ContentSHA256, Text: accepted.Plaintext,
-	}, modelID, now)
+	chunks := textChunks(request.Source.Text, maximumChunkBytes)
+	job, changed, err := s.db.AcceptSilverRefinementJob(userID, request.OperationID,
+		hex.EncodeToString(digest[:]), database.SilverRefinementSource{
+			SourceID: request.Source.ID, Name: request.Source.Name, SourceType: request.Source.SourceType,
+			ContentSHA256: request.Source.ContentSHA256, Plaintext: request.Source.Text, AcceptedAt: now,
+		}, ExtractionProcessorID, ExtractionVersion, modelID, "silver", len(chunks), now)
 	if err != nil {
-		return RefineResult{}, apperror.Wrap(503, "silver_refinement_failed", "The Node could not refine the Bronze source.", err)
+		return RefineResult{}, mapDatabaseError(err)
 	}
-	dataset, err = replaceGeneration(dataset, request.Source, generation, now)
-	if err != nil {
-		return RefineResult{}, err
-	}
-	payload, err := EncodeDataset(dataset)
-	if err != nil {
-		return RefineResult{}, err
-	}
-	if err = s.checkFinalQuota(userID, int64(len(payload))); err != nil {
-		return RefineResult{}, err
-	}
-	node, err := s.db.GetNodeState(false)
-	if err != nil {
-		return RefineResult{}, err
-	}
-	receipt, _, created, err := s.storage.CommitNodeValue(
-		userID, node.NodeID, Collection, canonicalObjectID(Collection), DatasetFormat,
-		DatasetFormatVersion, payload, now, s.maximumBytes,
-	)
-	if err != nil {
-		return RefineResult{}, err
-	}
-	if err = s.db.MarkSilverSourceRefined(userID, accepted.SourceID, accepted.ContentSHA256, ExtractionVersion, modelID, now); err != nil {
-		return RefineResult{}, err
-	}
-	return RefineResult{BronzeAccepted: changed, Refined: created, Receipt: &receipt}, nil
+	s.signalWorker()
+	return RefineResult{BronzeAccepted: changed, Job: wireJob(job)}, nil
 }
 
 func (s *Service) Remove(userID string, request RemoveRequest) (RemoveResult, error) {

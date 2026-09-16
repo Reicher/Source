@@ -65,11 +65,16 @@ Administrator passwords and recovery keys use the existing Argon2id encoding.
 
 Persistent Silver uses that same revision graph. Authenticated Clients submit
 hash-verified plaintext Bronze to `POST /api/v1/silver/refinements`; the Node
-durably accepts the input, performs extraction and conservative resolution, and
-commits the sole `silver-datasets` head with the Node identity as origin.
-Clients synchronize that head through the canonical change API and store only
-an offline cache. Repeated requests for the same source/content/model generation
-do not invoke refinement again or append a second history.
+durably accepts an immutable input snapshot into a single-worker FIFO queue and
+returns without waiting for inference. Jobs continue across Client disconnects,
+and interrupted `running` jobs recover after Node restart. Successful batches
+are checkpointed internally; retries and resubmissions reuse safe checkpoints.
+Clients read lifecycle and progress from `GET /api/v1/silver/refinements` or
+`GET /api/v1/silver/refinements/{job}`, and control jobs with the `pause`,
+`resume`, `cancel`, and `retry` action endpoints. Only a fully successful job
+atomically commits the sole `silver-datasets` head with the Node identity as
+origin; staged batch output is never authoritative Silver. Clients synchronize
+that head through the canonical change API and store only an offline cache.
 Client-side Bronze deletion is submitted to `POST /api/v1/silver/removals`;
 the Node persists the tombstone and commits the dependent Silver invalidation.
 

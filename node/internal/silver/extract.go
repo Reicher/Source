@@ -38,24 +38,47 @@ func extract(ctx context.Context, ai localai.Backend, source Source, modelID str
 	if len(chunks) == 0 {
 		return extractedGeneration{}, errors.New("Bronze text is empty")
 	}
+	outputs := make([]string, len(chunks))
+	for index, chunk := range chunks {
+		output, err := extractBatch(ctx, ai, chunk)
+		if err != nil {
+			return extractedGeneration{}, err
+		}
+		outputs[index] = output
+	}
+	return generationFromBatchOutputs(source, modelID, now, chunks, outputs)
+}
+
+func extractBatch(ctx context.Context, ai localai.Backend, chunk string) (string, error) {
+	var output strings.Builder
+	err := ai.StreamChat(ctx, []localai.Message{{Role: "user", Content: extractionPrompt(chunk)}}, func(event localai.Event) error {
+		if event.Type == "delta" {
+			output.WriteString(event.Text)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	result := output.String()
+	if _, err = parseExtraction(result, chunk); err != nil {
+		return "", err
+	}
+	return result, nil
+}
+
+func generationFromBatchOutputs(source Source, modelID string, now int64, chunks, outputs []string) (extractedGeneration, error) {
+	if len(chunks) == 0 || len(chunks) != len(outputs) {
+		return extractedGeneration{}, errors.New("Silver batch checkpoints are incomplete")
+	}
 	producer := Producer{ProcessorID: ExtractionProcessorID, ProcessorVersion: ExtractionVersion, ModelID: &modelID}
 	evidence, err := NewEvidence(source.ID, source.ContentSHA256)
 	if err != nil {
 		return extractedGeneration{}, err
 	}
 	observations := map[string]Observation{}
-	for _, chunk := range chunks {
-		var output strings.Builder
-		err = ai.StreamChat(ctx, []localai.Message{{Role: "user", Content: extractionPrompt(chunk)}}, func(event localai.Event) error {
-			if event.Type == "delta" {
-				output.WriteString(event.Text)
-			}
-			return nil
-		})
-		if err != nil {
-			return extractedGeneration{}, err
-		}
-		claims, parseErr := parseExtraction(output.String(), chunk)
+	for index, chunk := range chunks {
+		claims, parseErr := parseExtraction(outputs[index], chunk)
 		if parseErr != nil {
 			return extractedGeneration{}, parseErr
 		}

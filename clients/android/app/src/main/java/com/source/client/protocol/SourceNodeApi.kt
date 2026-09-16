@@ -57,6 +57,16 @@ class SourceApiException(
     val responseStarted: Boolean = false,
 ) : IOException(message)
 
+data class SilverRefinementJob(
+    val id: String,
+    val sourceId: String,
+    val sourceContentSha256: String,
+    val state: String,
+    val completedBatches: Int,
+    val totalBatches: Int,
+    val errorCode: String? = null,
+)
+
 class SourceNodeApi {
     private val random = SecureRandom()
 
@@ -476,7 +486,7 @@ class SourceNodeApi {
         trusted: TrustedNode,
         source: BronzeTextSource,
         operationId: String,
-    ) = withContext(Dispatchers.IO) {
+    ): SilverRefinementJob = withContext(Dispatchers.IO) {
         val response = postJson(
             "${apiBaseUrl.removeSuffix("/")}/silver/refinements",
             JSONObject().apply {
@@ -494,9 +504,37 @@ class SourceNodeApi {
             trusted.clientCredential,
             LIBRARY_TIMEOUT_MILLIS,
         )
-        if (!response.has("bronzeAccepted") || !response.has("refined")) {
+        if (!response.has("bronzeAccepted") || !response.has("job")) {
             throw SourceApiException("invalid_response", "The Node returned an incomplete Silver result.")
         }
+        response.getJSONObject("job").toSilverRefinementJob()
+    }
+
+    suspend fun silverRefinementJob(
+        apiBaseUrl: String,
+        trusted: TrustedNode,
+        jobId: String,
+    ): SilverRefinementJob = withContext(Dispatchers.IO) {
+        getJson(
+            "${apiBaseUrl.removeSuffix("/")}/silver/refinements/$jobId",
+            trusted.tlsCaCertificate,
+            trusted.clientCredential,
+        ).toSilverRefinementJob()
+    }
+
+    suspend fun controlSilverRefinementJob(
+        apiBaseUrl: String,
+        trusted: TrustedNode,
+        jobId: String,
+        action: String,
+    ): SilverRefinementJob = withContext(Dispatchers.IO) {
+        require(action in setOf("pause", "resume", "cancel", "retry"))
+        postJson(
+            "${apiBaseUrl.removeSuffix("/")}/silver/refinements/$jobId/$action",
+            JSONObject(),
+            trusted.tlsCaCertificate,
+            trusted.clientCredential,
+        ).toSilverRefinementJob()
     }
 
     suspend fun removeSilver(
@@ -690,6 +728,31 @@ class SourceNodeApi {
         }
     }
 
+    private fun getJson(
+        url: String,
+        tlsCaCertificate: String,
+        credential: String,
+    ): JSONObject {
+        val connection = openConnection(url, tlsCaCertificate, credential)
+        return try {
+            connection.requestMethod = "GET"
+            connection.setRequestProperty("Accept", "application/json")
+            val status = connection.responseCode
+            if (status !in 200..299) throw apiError(connection, status)
+            val raw = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            runCatching { JSONObject(raw) }.getOrElse {
+                throw SourceApiException("invalid_response", "The Node returned an invalid response.")
+            }
+        } catch (error: SSLException) {
+            throw SourceApiException(
+                "tls_identity_mismatch",
+                "The HTTPS identity of the Node does not match the QR code.",
+            )
+        } finally {
+            connection.disconnect()
+        }
+    }
+
     private fun openConnection(
         url: String,
         tlsCaCertificate: String,
@@ -745,7 +808,7 @@ class SourceNodeApi {
             "The local AI model on the Node is unavailable."
         "inference_failed" -> "The AI runtime could not complete the response."
         "timeout" -> "The AI runtime timed out."
-        "silver_model_unavailable", "silver_refinement_failed" ->
+        "silver_model_unavailable", "silver_model_changed", "silver_refinement_failed" ->
             "The Node could not refine knowledge from this source."
         "chat_rate_limited" -> "Too many AI requests. Wait a moment."
         "background_ai_rate_limited" -> "Too many background AI requests. Wait a moment."
@@ -768,6 +831,29 @@ class SourceNodeApi {
         val STORAGE_APP_PATTERN = Regex("^[a-z][a-z0-9-]{1,31}$")
     }
 }
+
+private fun JSONObject.toSilverRefinementJob(): SilverRefinementJob {
+    val completed = optInt("completedBatches", -1)
+    val total = optInt("totalBatches", -1)
+    val state = requiredJobString("state")
+    if (completed < 0 || total <= 0 || completed > total || state !in setOf(
+            "queued", "running", "paused", "completed", "failed", "cancelled",
+        )
+    ) throw SourceApiException("invalid_response", "The Node returned an invalid refinement job.")
+    return SilverRefinementJob(
+        id = requiredJobString("id"),
+        sourceId = requiredJobString("sourceId"),
+        sourceContentSha256 = requiredJobString("sourceContentSha256"),
+        state = state,
+        completedBatches = completed,
+        totalBatches = total,
+        errorCode = optJSONObject("error")?.optString("code")?.takeIf(String::isNotBlank),
+    )
+}
+
+private fun JSONObject.requiredJobString(name: String): String =
+    optString(name).takeIf(String::isNotBlank)
+        ?: throw SourceApiException("invalid_response", "The Node returned an incomplete refinement job.")
 
 internal fun requiredAiDeltaText(value: Any?): String {
     val text = value as? String

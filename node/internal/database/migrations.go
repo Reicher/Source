@@ -147,6 +147,56 @@ ALTER TABLE silver_refinement_operations ADD COLUMN operation_kind TEXT NOT NULL
 ALTER TABLE silver_refinement_operations ADD COLUMN requires_silver_change INTEGER NOT NULL DEFAULT 0 CHECK(requires_silver_change IN (0,1));
 ALTER TABLE silver_refinement_operations ADD COLUMN completed_at INTEGER;`,
 	},
+	{
+		version: 7,
+		up: `
+ALTER TABLE silver_refinement_operations ADD COLUMN job_id TEXT;
+CREATE TABLE refinement_jobs(
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    job_id TEXT NOT NULL,
+    request_digest TEXT NOT NULL CHECK(length(request_digest)=64),
+    source_id TEXT NOT NULL,
+    source_name TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL CHECK(length(content_sha256)=64),
+    plaintext TEXT NOT NULL,
+	processor_id TEXT NOT NULL,
+    processor_version TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+	output_layer TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('queued','running','paused','completed','failed','cancelled')),
+    pause_requested INTEGER NOT NULL DEFAULT 0 CHECK(pause_requested IN (0,1)),
+    completed_batches INTEGER NOT NULL DEFAULT 0 CHECK(completed_batches>=0),
+    total_batches INTEGER NOT NULL CHECK(total_batches>0 AND completed_batches<=total_batches),
+    accepted_at INTEGER NOT NULL,
+    started_at INTEGER,
+    updated_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    error_code TEXT,
+    error_message TEXT,
+    receipt_json TEXT,
+    UNIQUE(user_id,job_id)
+) STRICT;
+CREATE INDEX refinement_jobs_queue_idx ON refinement_jobs(state,sequence);
+CREATE INDEX refinement_jobs_generation_idx ON refinement_jobs(
+    user_id,source_id,content_sha256,processor_id,processor_version,model_id,output_layer,sequence
+);
+CREATE TABLE refinement_checkpoints(
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    source_id TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL CHECK(length(content_sha256)=64),
+	processor_id TEXT NOT NULL,
+    processor_version TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+	output_layer TEXT NOT NULL,
+    batch_index INTEGER NOT NULL CHECK(batch_index>=0),
+    batch_content_sha256 TEXT NOT NULL CHECK(length(batch_content_sha256)=64),
+    output_json TEXT NOT NULL,
+    completed_at INTEGER NOT NULL,
+    PRIMARY KEY(user_id,source_id,content_sha256,processor_id,processor_version,model_id,output_layer,batch_index)
+) STRICT;`,
+	},
 }
 
 const schemaVersionTable = `
