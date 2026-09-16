@@ -3,8 +3,7 @@
     <string name="app_name">Source</string>
     <string name="existing_user">Existing user</string>
     <string name="android_device_name">Android</string>
-    <string name="select_user">Select user</string>
-    <string name="users_have_separate_data">Each user has separate encrypted data on this phone.</string>
+    <string name="log_in">Log in</string>
     <string name="create_new_user">Create new user</string>
     <string name="create_user">Create user</string>
     <string name="create_user_description">The user and password are stored encrypted on this phone. Pair with a Source Node later.</string>
@@ -48,6 +47,14 @@
     <string name="library_remove_from_device">Remove from device</string>
     <string name="library_delete_from_source">Delete from Source</string>
     <string name="library_view">View</string>
+    <plurals name="library_knowledge_entities">
+        <item quantity="one">%d entity</item>
+        <item quantity="other">%d entities</item>
+    </plurals>
+    <plurals name="library_knowledge_facts">
+        <item quantity="one">%d fact</item>
+        <item quantity="other">%d facts</item>
+    </plurals>
     <string name="library_size">Size</string>
     <string name="library_added">Added</string>
     <string name="library_bronze_not_on_node">Not on Node</string>

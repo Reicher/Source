@@ -39,11 +39,10 @@ internal fun AccountsScreen(
         Wordmark()
         Spacer(Modifier.height(40.dp))
         Text(
-            stringResource(R.string.select_user),
+            stringResource(R.string.log_in),
             style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.Medium,
         )
-        Text(stringResource(R.string.users_have_separate_data), color = Ink.copy(alpha = .64f))
         Spacer(Modifier.height(24.dp))
         LazyColumn(
             modifier = Modifier.fillMaxWidth().weight(1f),
