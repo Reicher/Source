@@ -15,6 +15,7 @@ import com.source.client.model.ChatConversations
 import com.source.client.model.ChatMessage
 import com.source.client.model.TrustedNode
 import com.source.client.model.bindAuthoritativeNode
+import org.json.JSONArray
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -50,6 +51,10 @@ class SecureVaultDeviceTest {
         assertTrue(vault.isInitialized)
         assertTrue(clientId.startsWith("srcclient_"))
         val profileId = vault.profiles.single().id
+        assertEquals(
+            VaultUnlockResult.IncorrectPassword,
+            SecureVault(context, preferencesName, alias).unlockDetailed(profileId, "wrong password".toCharArray()),
+        )
         assertNull(SecureVault(context, preferencesName, alias).unlock(profileId, "wrong password".toCharArray()))
 
         val unlocked = SecureVault(context, preferencesName, alias).unlock(profileId, password)
@@ -57,6 +62,24 @@ class SecureVaultDeviceTest {
         assertFalse(unlocked?.vault?.identity?.clientPrivateKey.isNullOrBlank())
         assertTrue(unlocked != null && dataStore.load(unlocked, ChatData).conversations.isEmpty())
         unlocked?.close()
+        password.fill('\u0000')
+    }
+
+    @Test
+    fun inaccessibleDeviceEnvelopeIsNotReportedAsAnIncorrectPassword() {
+        val vault = SecureVault(context, preferencesName, alias)
+        val password = "local test password".toCharArray()
+        val created = vault.create("Robin", password)
+        val profileId = created.profileId
+        created.close()
+        val preferences = context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
+        assertTrue(
+            preferences.edit()
+                .putString("profile.$profileId.device_nonce", SourceCrypto.base64Url(ByteArray(12)))
+                .commit(),
+        )
+
+        assertEquals(VaultUnlockResult.Unreadable, vault.unlockDetailed(profileId, password))
         password.fill('\u0000')
     }
 
@@ -299,6 +322,31 @@ class SecureVaultDeviceTest {
         password.fill('\u0000')
     }
 
+    @Test
+    fun versionOneVaultMigratesWithItsPasswordIdentityAndAuthoritativeNode() {
+        val vault = SecureVault(context, preferencesName, alias)
+        val password = "old password".toCharArray()
+        val created = vault.create("Robin", password)
+        val profileId = created.profileId
+        val originalClientId = created.vault.identity.clientId
+        val node = trustedNode("legacy-node")
+        replaceVaultPayloadWithVersionOne(created, listOf(node))
+        created.close()
+
+        val migrated = vault.unlockDetailed(profileId, password)
+        assertTrue(migrated is VaultUnlockResult.Success)
+        val migratedSession = (migrated as VaultUnlockResult.Success).session
+        assertEquals(originalClientId, migratedSession.vault.identity.clientId)
+        assertEquals(node, migratedSession.vault.authoritativeNode)
+        migratedSession.close()
+
+        val reopened = vault.unlock(profileId, password)!!
+        assertEquals(originalClientId, reopened.vault.identity.clientId)
+        assertEquals(node, reopened.vault.authoritativeNode)
+        reopened.close()
+        password.fill('\u0000')
+    }
+
     private fun cleanup() {
         context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE).edit().clear().commit()
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -310,6 +358,45 @@ class SecureVaultDeviceTest {
     private fun conversations(messages: List<ChatMessage>): ChatConversations {
         val conversation = ChatConversation(id = "conversation-test", messages = messages)
         return ChatConversations(listOf(conversation), conversation.id)
+    }
+
+    private fun replaceVaultPayloadWithVersionOne(session: VaultSession, nodes: List<TrustedNode>) {
+        val identity = session.vault.identity
+        val plaintext = JSONObject().apply {
+            put("version", 1)
+            put("identity", JSONObject().apply {
+                put("userId", identity.userId)
+                put("userDisplayName", identity.userDisplayName)
+                put("clientId", identity.clientId)
+                put("clientDisplayName", identity.clientDisplayName)
+                put("clientPublicKey", identity.clientPublicKey)
+                put("clientPrivateKey", identity.clientPrivateKey)
+            })
+            put("trustedNodes", JSONArray().apply {
+                nodes.forEach { node ->
+                    put(JSONObject().apply {
+                        put("nodeId", node.nodeId)
+                        put("nodePublicKey", node.nodePublicKey)
+                        put("tlsCaCertificate", node.tlsCaCertificate)
+                        put("displayName", node.displayName)
+                        put("clientCredential", node.clientCredential)
+                        put("userId", node.userId)
+                        put("clientId", node.clientId)
+                        node.recoveryKey?.let { put("recoveryKey", it) }
+                        node.dataKey?.let { put("dataKey", it) }
+                        if (node.recoverySetupPending) put("recoverySetupPending", true)
+                    })
+                }
+            })
+        }.toString().toByteArray()
+        val nonce = ByteArray(12) { (it + 1).toByte() }
+        val ciphertext = SourceCrypto.encrypt(session.key, plaintext, nonce)
+        plaintext.fill(0)
+        val prefix = "profile.${session.profileId}."
+        assertTrue(context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE).edit()
+            .putString("${prefix}vault_nonce", SourceCrypto.base64Url(nonce))
+            .putString("${prefix}vault_data", SourceCrypto.base64Url(ciphertext))
+            .commit())
     }
 
     private fun trustedNode(nodeId: String) = TrustedNode(

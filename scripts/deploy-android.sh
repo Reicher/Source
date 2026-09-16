@@ -147,6 +147,65 @@ write_model_stamp() {
     fi
 }
 
+ensure_bundletool() {
+    mkdir -p "$bundletool_dir"
+    if [ ! -f "$bundletool_jar" ]; then
+        command -v curl >/dev/null 2>&1 || fail "curl is required to download pinned bundletool $bundletool_version."
+        printf 'Downloading pinned bundletool %s.\n' "$bundletool_version"
+        if ! curl -fL "https://github.com/google/bundletool/releases/download/$bundletool_version/bundletool-all-$bundletool_version.jar" -o "$bundletool_download"; then
+            fail "bundletool download failed."
+        fi
+        mv "$bundletool_download" "$bundletool_jar"
+    fi
+    actual_bundletool_sha256=$(sha256_file "$bundletool_jar")
+    if [ "$actual_bundletool_sha256" != "$bundletool_sha256" ]; then
+        fail "bundletool checksum mismatch; remove $bundletool_jar and rerun."
+    fi
+}
+
+build_device_apks() {
+    printf '%s\n' "Building the debug Client bundle with its model asset packs."
+    if ! (cd "$android_dir" && ./gradlew :app:bundleDebug); then
+        fail "the Android debug bundle build failed."
+    fi
+    [ -f "$debug_bundle" ] || fail "Gradle succeeded but did not produce $debug_bundle."
+    mkdir -p "$(dirname -- "$device_apks")"
+    printf '%s\n' "Creating an APK set for the connected device."
+    if ! java -jar "$bundletool_jar" build-apks \
+        --bundle="$debug_bundle" \
+        --output="$device_apks" \
+        --adb="$adb" \
+        --device-id="$serial" \
+        --connected-device \
+        --local-testing \
+        --overwrite; then
+        fail "bundletool could not create the device APK set."
+    fi
+}
+
+update_base_splits() {
+    update_dir=$(mktemp -d "${TMPDIR:-/tmp}/source-client-update.XXXXXX") || \
+        fail "could not create a temporary APK directory."
+    if ! unzip -q "$device_apks" 'splits/*.apk' -d "$update_dir"; then
+        rm -rf "$update_dir"
+        fail "could not extract the Client APK splits."
+    fi
+    set -- "$update_dir"/splits/*.apk
+    if [ ! -f "$1" ]; then
+        rm -rf "$update_dir"
+        fail "the Client APK set did not contain base configuration splits."
+    fi
+    # A partial package update retains the 3 GB install-time model packs. Every
+    # base configuration split must be replaced together, however: retaining an
+    # older locale, density, or ABI split pairs stale resource IDs with the new
+    # code and can display unrelated strings.
+    if ! adb_device install-multiple -r -p "$package_name" "$@"; then
+        rm -rf "$update_dir"
+        fail "the Client APK split update failed; the installed app may have a newer version code or a different signing key."
+    fi
+    rm -rf "$update_dir"
+}
+
 printf 'Deploying Source Client to %s (%s, API %s).\n' "$device_model" "$serial" "$device_api"
 printf 'Expected model: %s (%s).\n' "$model_label" "$model_sha256"
 printf '%s\n' "Building the debug Client APK."
@@ -177,14 +236,15 @@ if model_is_current; then
     model_current=1
 fi
 
+ensure_bundletool
+
 if [ "$model_current" -eq 1 ] && [ "$installed_version" = "$built_version" ]; then
     printf '%s\n' "The correct model and all three asset packs are already installed; the 3 GB model will not be transferred."
-    printf '%s\n' "Updating the Client while retaining the installed model asset packs."
-    if ! adb_device install-multiple -r -p "$package_name" "$debug_apk"; then
-        fail "the base APK update failed; the installed app may have a newer version code or a different signing key."
-    fi
+    printf '%s\n' "Updating the Client and its device configuration while retaining the installed model asset packs."
+    build_device_apks
+    update_base_splits
     if ! model_is_current; then
-        fail "the base APK was updated, but Android did not retain the model asset packs; rerun to reprovision them."
+        fail "the Client APK splits were updated, but Android did not retain the model asset packs; rerun to reprovision them."
     fi
     [ "$(installed_version_code || true)" = "$built_version" ] || \
         fail "the base APK was installed, but its version code does not match the build."
@@ -199,38 +259,7 @@ else
     fi
     printf '%s\n' "Provisioning the complete install while preserving app data."
     "$repo_root/scripts/provision-client-model.sh"
-
-    mkdir -p "$bundletool_dir"
-    if [ ! -f "$bundletool_jar" ]; then
-        command -v curl >/dev/null 2>&1 || fail "curl is required to download pinned bundletool $bundletool_version."
-        printf 'Downloading pinned bundletool %s.\n' "$bundletool_version"
-        if ! curl -fL "https://github.com/google/bundletool/releases/download/$bundletool_version/bundletool-all-$bundletool_version.jar" -o "$bundletool_download"; then
-            fail "bundletool download failed."
-        fi
-        mv "$bundletool_download" "$bundletool_jar"
-    fi
-    actual_bundletool_sha256=$(sha256_file "$bundletool_jar")
-    if [ "$actual_bundletool_sha256" != "$bundletool_sha256" ]; then
-        fail "bundletool checksum mismatch; remove $bundletool_jar and rerun."
-    fi
-
-    printf '%s\n' "Building the debug Client bundle with its model asset packs."
-    if ! (cd "$android_dir" && ./gradlew :app:bundleDebug); then
-        fail "the Android debug bundle build failed."
-    fi
-    [ -f "$debug_bundle" ] || fail "Gradle succeeded but did not produce $debug_bundle."
-    mkdir -p "$(dirname -- "$device_apks")"
-    printf '%s\n' "Creating an APK set for the connected device."
-    if ! java -jar "$bundletool_jar" build-apks \
-        --bundle="$debug_bundle" \
-        --output="$device_apks" \
-        --adb="$adb" \
-        --device-id="$serial" \
-        --connected-device \
-        --local-testing \
-        --overwrite; then
-        fail "bundletool could not create the device APK set."
-    fi
+    build_device_apks
     printf '%s\n' "Installing the Client and transferring the model asset packs (approximately 3 GB)."
     if ! java -jar "$bundletool_jar" install-apks \
         --apks="$device_apks" \
