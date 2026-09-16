@@ -13,7 +13,7 @@ type entityProfile struct {
 
 type mention struct{ Name, Type string }
 
-func resolve(dataset Dataset, observations []Observation, now int64) ([]Entity, []Claim, error) {
+func resolve(dataset Dataset, observations []Observation, profileContext ProfileContext, now int64) ([]Entity, []Claim, error) {
 	profiles := profiles(dataset)
 	entities := map[string]Entity{}
 	claims := map[string]Claim{}
@@ -32,7 +32,8 @@ func resolve(dataset Dataset, observations []Observation, now int64) ([]Entity, 
 		if !ok || predicate == "" {
 			continue
 		}
-		subjectID, created, profile, err := resolveMention(subject, profiles)
+		authoredBySelf, _ := payload["authoredBySelf"].(bool)
+		subjectID, created, profile, err := resolveMention(subject, profiles, profileContext, authoredBySelf)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -43,8 +44,11 @@ func resolve(dataset Dataset, observations []Observation, now int64) ([]Entity, 
 			entities[created.ID] = *created
 			profiles = append(profiles, profile)
 		}
-		if err = addMetadataClaims(claims, subjectID, subject, observation.ID, producer, now); err != nil {
-			return nil, nil, err
+		if !contextualSelfMention(subject, authoredBySelf) {
+			addMentionToProfile(profiles, subjectID, subject)
+			if err = addMetadataClaims(claims, subjectID, subject, observation.ID, producer, now); err != nil {
+				return nil, nil, err
+			}
 		}
 
 		var objectID *string
@@ -54,7 +58,7 @@ func resolve(dataset Dataset, observations []Observation, now int64) ([]Entity, 
 			if !valid {
 				continue
 			}
-			resolved, objectEntity, objectProfile, resolveErr := resolveMention(object, profiles)
+			resolved, objectEntity, objectProfile, resolveErr := resolveMention(object, profiles, profileContext, authoredBySelf)
 			if resolveErr != nil {
 				return nil, nil, resolveErr
 			}
@@ -65,8 +69,11 @@ func resolve(dataset Dataset, observations []Observation, now int64) ([]Entity, 
 				entities[objectEntity.ID] = *objectEntity
 				profiles = append(profiles, objectProfile)
 			}
-			if err = addMetadataClaims(claims, resolved, object, observation.ID, producer, now); err != nil {
-				return nil, nil, err
+			if !contextualSelfMention(object, authoredBySelf) {
+				addMentionToProfile(profiles, resolved, object)
+				if err = addMetadataClaims(claims, resolved, object, observation.ID, producer, now); err != nil {
+					return nil, nil, err
+				}
 			}
 			objectID = &resolved
 		} else if observation.Kind == "attribute-candidate" {
@@ -120,8 +127,14 @@ func profiles(dataset Dataset) []entityProfile {
 	return result
 }
 
-func resolveMention(value mention, profiles []entityProfile) (string, *Entity, entityProfile, error) {
+func resolveMention(value mention, profiles []entityProfile, context ProfileContext, authoredBySelf bool) (string, *Entity, entityProfile, error) {
 	name, typeName := matchText(value.Name), matchText(value.Type)
+	if typeName == "person" && firstPersonName(name) {
+		if authoredBySelf {
+			return context.SelfEntityID, nil, entityProfile{}, nil
+		}
+		return "", nil, entityProfile{}, nil
+	}
 	var sameName, exact []entityProfile
 	for _, profile := range profiles {
 		if profile.Names[name] {
@@ -137,12 +150,75 @@ func resolveMention(value mention, profiles []entityProfile) (string, *Entity, e
 	if len(sameName) > 0 {
 		return "", nil, entityProfile{}, nil
 	}
+	if typeName == "person" {
+		var aliases []entityProfile
+		for _, profile := range profiles {
+			if !profile.Types["person"] {
+				continue
+			}
+			for existingName := range profile.Names {
+				if personNameAlias(name, existingName) {
+					aliases = append(aliases, profile)
+					break
+				}
+			}
+		}
+		if len(aliases) == 1 {
+			return aliases[0].ID, nil, entityProfile{}, nil
+		}
+	}
 	entity, err := newEntity()
 	if err != nil {
 		return "", nil, entityProfile{}, err
 	}
 	profile := entityProfile{ID: entity.ID, Names: map[string]bool{name: true}, Types: map[string]bool{typeName: true}}
 	return entity.ID, &entity, profile, nil
+}
+
+func addMentionToProfile(profiles []entityProfile, entityID string, value mention) {
+	for index := range profiles {
+		if profiles[index].ID == entityID {
+			profiles[index].Names[matchText(value.Name)] = true
+			profiles[index].Types[matchText(value.Type)] = true
+			return
+		}
+	}
+}
+
+func firstPersonName(value string) bool {
+	switch value {
+	case "i", "me", "my", "myself":
+		return true
+	default:
+		return false
+	}
+}
+
+func contextualSelfMention(value mention, authoredBySelf bool) bool {
+	return authoredBySelf && matchText(value.Type) == "person" && firstPersonName(matchText(value.Name))
+}
+
+func personNameAlias(left, right string) bool {
+	leftParts, rightParts := strings.Fields(left), strings.Fields(right)
+	if len(leftParts) == 1 && len(rightParts) > 1 {
+		return containsNamePart(rightParts, leftParts[0])
+	}
+	if len(rightParts) == 1 && len(leftParts) > 1 {
+		return containsNamePart(leftParts, rightParts[0])
+	}
+	return false
+}
+
+func containsNamePart(parts []string, part string) bool {
+	if len([]rune(part)) < 2 {
+		return false
+	}
+	for _, candidate := range parts {
+		if candidate == part {
+			return true
+		}
+	}
+	return false
 }
 
 func addMetadataClaims(destination map[string]Claim, entityID string, value mention, observationID string, producer Producer, now int64) error {

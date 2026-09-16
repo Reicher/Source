@@ -19,19 +19,19 @@ type NodeState struct {
 	CreatedAt                                                     int64
 }
 type User struct {
-	ID, DisplayName, StorageNamespace string
-	QuotaBytes, CreatedAt             int64
-	DisabledAt                        *int64
-	RecoveryKeyHash, RecoveryEnvelope *string
-	RecoveryConfigured                bool
-	StorageUsedBytes                  int64
-	ClientCount                       int
+	ID, DisplayName, StorageNamespace, SelfEntityID string
+	QuotaBytes, CreatedAt                           int64
+	DisabledAt                                      *int64
+	RecoveryKeyHash, RecoveryEnvelope               *string
+	RecoveryConfigured                              bool
+	StorageUsedBytes                                int64
+	ClientCount                                     int
 }
 type Client struct {
-	ID, UserID, ClientDisplayName, PublicKey string
-	PairedAt                                 int64
-	LastSeenAt, RevokedAt, DisabledAt        *int64
-	UserDisplayName                          string
+	ID, UserID, ClientDisplayName, PublicKey, UserSelfEntityID string
+	PairedAt                                                   int64
+	LastSeenAt, RevokedAt, DisabledAt                          *int64
+	UserDisplayName                                            string
 }
 type NewClient struct {
 	ID, DisplayName, PublicKey, CredentialHash string
@@ -64,10 +64,43 @@ func Open(path string) (*DB, error) {
 		sqldb.Close()
 		return nil, err
 	}
+	if err = backfillSelfEntityIDs(sqldb); err != nil {
+		sqldb.Close()
+		return nil, err
+	}
 	if path != ":memory:" {
 		_ = os.Chmod(path, 0600)
 	}
 	return db, nil
+}
+
+func backfillSelfEntityIDs(db *sql.DB) error {
+	rows, err := db.Query(`SELECT id FROM users WHERE self_entity_id IS NULL`)
+	if err != nil {
+		return err
+	}
+	var userIDs []string
+	for rows.Next() {
+		var userID string
+		if err = rows.Scan(&userID); err != nil {
+			rows.Close()
+			return err
+		}
+		userIDs = append(userIDs, userID)
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	for _, userID := range userIDs {
+		selfEntityID, createErr := security.UUID()
+		if createErr != nil {
+			return createErr
+		}
+		if _, err = db.Exec(`UPDATE users SET self_entity_id=? WHERE id=? AND self_entity_id IS NULL`, selfEntityID, userID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (d *DB) Close() error { return d.sql.Close() }
@@ -114,7 +147,7 @@ func (d *DB) GetNodeState(includeSecrets bool) (NodeState, error) {
 }
 
 func (d *DB) ListUsers() ([]User, error) {
-	rows, err := d.sql.Query(`SELECT u.id,u.display_name,u.storage_namespace,u.quota_bytes,u.created_at,u.disabled_at,u.recovery_key_hash,u.recovery_envelope,(u.recovery_key_hash IS NOT NULL AND u.recovery_envelope IS NOT NULL),COALESCE((SELECT SUM(s.byte_count) FROM snapshots s WHERE s.user_id=u.id),0)+COALESCE((SELECT SUM(l.byte_count) FROM library_items l WHERE l.user_id=u.id AND l.deleted_at IS NULL),0)+COALESCE((SELECT SUM(r.byte_count) FROM storage_revisions r WHERE r.user_id=u.id AND r.kind='content'),0)+COALESCE((SELECT SUM(length(CAST(b.plaintext AS BLOB))) FROM silver_refinement_sources b WHERE b.user_id=u.id),0),(SELECT COUNT(*) FROM clients c WHERE c.user_id=u.id AND c.revoked_at IS NULL) FROM users u ORDER BY u.created_at,u.id`)
+	rows, err := d.sql.Query(`SELECT u.id,u.display_name,u.storage_namespace,u.self_entity_id,u.quota_bytes,u.created_at,u.disabled_at,u.recovery_key_hash,u.recovery_envelope,(u.recovery_key_hash IS NOT NULL AND u.recovery_envelope IS NOT NULL),COALESCE((SELECT SUM(s.byte_count) FROM snapshots s WHERE s.user_id=u.id),0)+COALESCE((SELECT SUM(l.byte_count) FROM library_items l WHERE l.user_id=u.id AND l.deleted_at IS NULL),0)+COALESCE((SELECT SUM(r.byte_count) FROM storage_revisions r WHERE r.user_id=u.id AND r.kind='content'),0)+COALESCE((SELECT SUM(length(CAST(b.plaintext AS BLOB))) FROM silver_refinement_sources b WHERE b.user_id=u.id),0),(SELECT COUNT(*) FROM clients c WHERE c.user_id=u.id AND c.revoked_at IS NULL) FROM users u ORDER BY u.created_at,u.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +155,7 @@ func (d *DB) ListUsers() ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var u User
-		if err = rows.Scan(&u.ID, &u.DisplayName, &u.StorageNamespace, &u.QuotaBytes, &u.CreatedAt, &u.DisabledAt, &u.RecoveryKeyHash, &u.RecoveryEnvelope, &u.RecoveryConfigured, &u.StorageUsedBytes, &u.ClientCount); err != nil {
+		if err = rows.Scan(&u.ID, &u.DisplayName, &u.StorageNamespace, &u.SelfEntityID, &u.QuotaBytes, &u.CreatedAt, &u.DisabledAt, &u.RecoveryKeyHash, &u.RecoveryEnvelope, &u.RecoveryConfigured, &u.StorageUsedBytes, &u.ClientCount); err != nil {
 			return nil, err
 		}
 		users = append(users, u)
@@ -131,7 +164,7 @@ func (d *DB) ListUsers() ([]User, error) {
 }
 func (d *DB) FindUser(id string) (*User, error) {
 	var u User
-	err := d.sql.QueryRow(`SELECT id,display_name,storage_namespace,quota_bytes,created_at,disabled_at,recovery_key_hash,recovery_envelope FROM users WHERE id=?`, id).Scan(&u.ID, &u.DisplayName, &u.StorageNamespace, &u.QuotaBytes, &u.CreatedAt, &u.DisabledAt, &u.RecoveryKeyHash, &u.RecoveryEnvelope)
+	err := d.sql.QueryRow(`SELECT id,display_name,storage_namespace,self_entity_id,quota_bytes,created_at,disabled_at,recovery_key_hash,recovery_envelope FROM users WHERE id=?`, id).Scan(&u.ID, &u.DisplayName, &u.StorageNamespace, &u.SelfEntityID, &u.QuotaBytes, &u.CreatedAt, &u.DisabledAt, &u.RecoveryKeyHash, &u.RecoveryEnvelope)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -143,7 +176,7 @@ func (d *DB) FindClientByCredentialHash(hash string) (*Client, error) {
 }
 func (d *DB) findClient(clause, value string) (*Client, error) {
 	var c Client
-	err := d.sql.QueryRow(`SELECT c.id,c.user_id,c.display_name,c.public_key,c.paired_at,c.last_seen_at,c.revoked_at,u.display_name,u.disabled_at FROM clients c JOIN users u ON u.id=c.user_id `+clause, value).Scan(&c.ID, &c.UserID, &c.ClientDisplayName, &c.PublicKey, &c.PairedAt, &c.LastSeenAt, &c.RevokedAt, &c.UserDisplayName, &c.DisabledAt)
+	err := d.sql.QueryRow(`SELECT c.id,c.user_id,c.display_name,c.public_key,c.paired_at,c.last_seen_at,c.revoked_at,u.display_name,u.self_entity_id,u.disabled_at FROM clients c JOIN users u ON u.id=c.user_id `+clause, value).Scan(&c.ID, &c.UserID, &c.ClientDisplayName, &c.PublicKey, &c.PairedAt, &c.LastSeenAt, &c.RevokedAt, &c.UserDisplayName, &c.UserSelfEntityID, &c.DisabledAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -159,12 +192,16 @@ func (d *DB) CreatePairedUser(displayName string, quota int64, recoveryHash, rec
 	if err != nil {
 		return nil, nil, err
 	}
+	selfEntityID, err := security.UUID()
+	if err != nil {
+		return nil, nil, err
+	}
 	tx, err := d.sql.Begin()
 	if err != nil {
 		return nil, nil, err
 	}
 	defer tx.Rollback()
-	if _, err = tx.Exec(`INSERT INTO users(id,display_name,storage_namespace,quota_bytes,created_at,recovery_key_hash,recovery_envelope) VALUES(?,?,?,?,?,?,?)`, userID, displayName, namespace, quota, now, recoveryHash, recoveryEnvelope); err != nil {
+	if _, err = tx.Exec(`INSERT INTO users(id,display_name,storage_namespace,self_entity_id,quota_bytes,created_at,recovery_key_hash,recovery_envelope) VALUES(?,?,?,?,?,?,?,?)`, userID, displayName, namespace, selfEntityID, quota, now, recoveryHash, recoveryEnvelope); err != nil {
 		return nil, nil, err
 	}
 	if _, err = tx.Exec(`INSERT INTO clients(id,user_id,display_name,public_key,credential_hash,protocol_version,paired_at) VALUES(?,?,?,?,?,?,?)`, client.ID, userID, client.DisplayName, client.PublicKey, client.CredentialHash, client.ProtocolVersion, now); err != nil {
@@ -231,7 +268,7 @@ func (d *DB) DisableUser(userID string, now int64) (*User, error) {
 	}
 	defer tx.Rollback()
 	var u User
-	err = tx.QueryRow(`SELECT id,display_name,storage_namespace,quota_bytes,created_at,disabled_at,recovery_key_hash,recovery_envelope FROM users WHERE id=?`, userID).Scan(&u.ID, &u.DisplayName, &u.StorageNamespace, &u.QuotaBytes, &u.CreatedAt, &u.DisabledAt, &u.RecoveryKeyHash, &u.RecoveryEnvelope)
+	err = tx.QueryRow(`SELECT id,display_name,storage_namespace,self_entity_id,quota_bytes,created_at,disabled_at,recovery_key_hash,recovery_envelope FROM users WHERE id=?`, userID).Scan(&u.ID, &u.DisplayName, &u.StorageNamespace, &u.SelfEntityID, &u.QuotaBytes, &u.CreatedAt, &u.DisabledAt, &u.RecoveryKeyHash, &u.RecoveryEnvelope)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, coded("user_not_found", "User not found")
 	}

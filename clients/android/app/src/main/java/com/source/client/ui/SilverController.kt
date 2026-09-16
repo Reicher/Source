@@ -344,4 +344,4 @@ internal fun needsSilverRefinement(
 }
 
 private const val NODE_EXTRACTION_PROCESSOR_ID = "source.node.silver-extraction"
-private const val NODE_EXTRACTION_PROCESSOR_VERSION = "1"
+private const val NODE_EXTRACTION_PROCESSOR_VERSION = "3"

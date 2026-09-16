@@ -17,6 +17,7 @@ func TestOpenAppliesAndPersistsMigrations(t *testing.T) {
 	assertSchemaVersion(t, db.sql, len(migrations))
 	assertUserColumn(t, db.sql, "recovery_key_hash")
 	assertUserColumn(t, db.sql, "recovery_envelope")
+	assertUserColumn(t, db.sql, "self_entity_id")
 	assertTable(t, db.sql, "library_items")
 	assertTable(t, db.sql, "profile_sync_state")
 	assertTable(t, db.sql, "storage_revisions")
@@ -109,6 +110,23 @@ INSERT INTO library_items(user_id,item_id,content_sha256,created_at,deleted_at) 
 	}
 	if snapshots != 1 || tombstones != 1 {
 		t.Fatalf("legacy migration changed data: snapshots=%d tombstones=%d", snapshots, tombstones)
+	}
+	user, err := db.FindUser("11111111-1111-4111-8111-111111111111")
+	if err != nil || user == nil || user.SelfEntityID == "" {
+		t.Fatalf("legacy profile has no Self entity: user=%#v error=%v", user, err)
+	}
+	stableSelfID := user.SelfEntityID
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	user, err = db.FindUser("11111111-1111-4111-8111-111111111111")
+	if err != nil || user.SelfEntityID != stableSelfID {
+		t.Fatalf("Self entity changed after reopen: user=%#v error=%v", user, err)
 	}
 }
 

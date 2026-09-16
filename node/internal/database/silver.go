@@ -8,6 +8,7 @@ import (
 
 type SilverRefinementSource struct {
 	SourceID, Name, SourceType, ContentSHA256, Plaintext string
+	AuthoredBySelf                                       bool
 	AcceptedAt                                           int64
 	RefinedProcessorVersion, RefinedModelID              *string
 	RefinedAt                                            *int64
@@ -48,21 +49,22 @@ WHERE user_id=? AND operation_id=?`, userID, operationID).Scan(&priorDigest, &pr
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return SilverRefinementSource{}, false, err
 	}
-	changed := errors.Is(err, sql.ErrNoRows) || stored.ContentSHA256 != source.ContentSHA256 || stored.RemovedAt != nil
+	changed := errors.Is(err, sql.ErrNoRows) || stored.ContentSHA256 != source.ContentSHA256 ||
+		stored.AuthoredBySelf != source.AuthoredBySelf || stored.RemovedAt != nil
 	if errors.Is(err, sql.ErrNoRows) {
 		_, err = tx.Exec(`INSERT INTO silver_refinement_sources(
-user_id,source_id,source_name,source_type,content_sha256,plaintext,accepted_at)
-VALUES(?,?,?,?,?,?,?)`, userID, source.SourceID, source.Name, source.SourceType,
-			source.ContentSHA256, source.Plaintext, source.AcceptedAt)
+user_id,source_id,source_name,source_type,content_sha256,plaintext,authored_by_self,accepted_at)
+VALUES(?,?,?,?,?,?,?,?)`, userID, source.SourceID, source.Name, source.SourceType,
+			source.ContentSHA256, source.Plaintext, source.AuthoredBySelf, source.AcceptedAt)
 	} else if changed {
 		_, err = tx.Exec(`UPDATE silver_refinement_sources SET
-source_name=?,source_type=?,content_sha256=?,plaintext=?,accepted_at=?,
+source_name=?,source_type=?,content_sha256=?,plaintext=?,authored_by_self=?,accepted_at=?,
 refined_processor_version=NULL,refined_model_id=NULL,refined_at=NULL,removed_at=NULL
 WHERE user_id=? AND source_id=?`, source.Name, source.SourceType, source.ContentSHA256,
-			source.Plaintext, source.AcceptedAt, userID, source.SourceID)
+			source.Plaintext, source.AuthoredBySelf, source.AcceptedAt, userID, source.SourceID)
 	} else {
-		_, err = tx.Exec(`UPDATE silver_refinement_sources SET source_name=?,source_type=?
-WHERE user_id=? AND source_id=?`, source.Name, source.SourceType, userID, source.SourceID)
+		_, err = tx.Exec(`UPDATE silver_refinement_sources SET source_name=?,source_type=?,authored_by_self=?
+WHERE user_id=? AND source_id=?`, source.Name, source.SourceType, source.AuthoredBySelf, userID, source.SourceID)
 	}
 	if err != nil {
 		return SilverRefinementSource{}, false, err
@@ -90,11 +92,11 @@ user_id,operation_id,request_digest,source_id,operation_kind) VALUES(?,?,?,?,'re
 
 func findSilverRefinementSourceTx(tx *sql.Tx, userID, sourceID string) (SilverRefinementSource, error) {
 	var source SilverRefinementSource
-	err := tx.QueryRow(`SELECT source_id,source_name,source_type,content_sha256,plaintext,
+	err := tx.QueryRow(`SELECT source_id,source_name,source_type,content_sha256,plaintext,authored_by_self,
 accepted_at,refined_processor_version,refined_model_id,refined_at,removed_at
 FROM silver_refinement_sources WHERE user_id=? AND source_id=?`, userID, sourceID).Scan(
 		&source.SourceID, &source.Name, &source.SourceType, &source.ContentSHA256,
-		&source.Plaintext, &source.AcceptedAt, &source.RefinedProcessorVersion,
+		&source.Plaintext, &source.AuthoredBySelf, &source.AcceptedAt, &source.RefinedProcessorVersion,
 		&source.RefinedModelID, &source.RefinedAt, &source.RemovedAt,
 	)
 	return source, err
@@ -222,11 +224,11 @@ FROM silver_refinement_sources WHERE user_id=?`, userID).Scan(&bytes)
 	return bytes, err
 }
 
-func (d *DB) IsCurrentSilverRefinementSource(userID, sourceID, contentSHA256 string) (bool, error) {
+func (d *DB) IsCurrentSilverRefinementSource(userID, sourceID, contentSHA256 string, authoredBySelf bool) (bool, error) {
 	var current int
 	err := d.sql.QueryRow(`SELECT EXISTS(
 SELECT 1 FROM silver_refinement_sources
-WHERE user_id=? AND source_id=? AND content_sha256=? AND removed_at IS NULL
-)`, userID, sourceID, contentSHA256).Scan(&current)
+WHERE user_id=? AND source_id=? AND content_sha256=? AND authored_by_self=? AND removed_at IS NULL
+)`, userID, sourceID, contentSHA256, authoredBySelf).Scan(&current)
 	return current == 1, err
 }

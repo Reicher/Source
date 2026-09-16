@@ -18,14 +18,16 @@ import (
 )
 
 const (
-	DatasetFormat          = "source-silver"
-	DatasetFormatVersion   = 1
-	Collection             = "silver-datasets"
-	ExtractionProcessorID  = "source.node.silver-extraction"
-	ExtractionVersion      = "2"
-	ResolutionProcessorID  = "source.node.silver-resolution"
-	ResolutionVersion      = "1"
-	ExtractionCompleteKind = "knowledge-extraction-complete"
+	DatasetFormat           = "source-silver"
+	DatasetFormatVersion    = 1
+	Collection              = "silver-datasets"
+	ExtractionProcessorID   = "source.node.silver-extraction"
+	ExtractionVersion       = "3"
+	ResolutionProcessorID   = "source.node.silver-resolution"
+	ResolutionVersion       = "2"
+	ProfileProcessorID      = "source.node.profile-identity"
+	ProfileProcessorVersion = "1"
+	ExtractionCompleteKind  = "knowledge-extraction-complete"
 )
 
 type Producer struct {
@@ -148,11 +150,15 @@ func DecodeDataset(raw []byte) (Dataset, error) {
 }
 
 func NewEvidence(sourceID, contentSHA string) (Evidence, error) {
+	return newEvidence(sourceID, contentSHA, nil, "")
+}
+
+func newEvidence(sourceID, contentSHA string, selector any, excerpt string) (Evidence, error) {
 	identity := map[string]any{
-		"bronzeContentSha256": contentSHA, "bronzeSourceId": sourceID, "selector": nil,
+		"bronzeContentSha256": contentSHA, "bronzeSourceId": sourceID, "selector": selector,
 	}
 	id, err := recordID("source-silver-evidence", identity)
-	return Evidence{ID: id, BronzeSourceID: sourceID, BronzeContentSHA256: contentSHA}, err
+	return Evidence{ID: id, BronzeSourceID: sourceID, BronzeContentSHA256: contentSHA, Selector: selector, Excerpt: excerpt}, err
 }
 
 func NewObservation(kind string, payload any, evidenceIDs []string, confidence *float64, producer Producer, now int64) (Observation, error) {
