@@ -18,6 +18,7 @@ import org.json.JSONObject
 import java.security.KeyStore
 import java.security.SecureRandom
 import java.util.UUID
+import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -80,26 +81,50 @@ class SecureVault(
         return session
     }
 
-    fun unlock(profileId: String, password: CharArray): VaultSession? {
-        if (profiles.none { it.id == profileId }) return null
-        var unlockedKey: ByteArray? = null
-        return runCatching {
+    fun unlock(profileId: String, password: CharArray): VaultSession? =
+        (unlockDetailed(profileId, password) as? VaultUnlockResult.Success)?.session
+
+    fun unlockDetailed(profileId: String, password: CharArray): VaultUnlockResult {
+        if (profiles.none { it.id == profileId }) return VaultUnlockResult.Unreadable
+        val envelopeData = try {
             val salt = storedBytes(profileId, KEY_SALT)
             val passwordNonce = storedBytes(profileId, KEY_PASSWORD_NONCE)
             val deviceNonce = storedBytes(profileId, KEY_DEVICE_NONCE)
-            val passwordEnvelope = keystoreDecrypt(storedBytes(profileId, KEY_WRAPPED_KEY), deviceNonce)
-            val passwordKey = SourceCrypto.derivePasswordKey(password, salt)
-            val vaultKey = try {
-                SourceCrypto.decrypt(passwordKey, passwordEnvelope, passwordNonce)
-            } finally {
-                passwordKey.fill(0)
-                passwordEnvelope.fill(0)
-            }
-            unlockedKey = vaultKey
-            val vault = decryptVault(profileId, vaultKey)
-            updateProfileName(profileId, vault.identity.userDisplayName)
-            VaultSession(profileId, vaultKey, vault)
-        }.onFailure { unlockedKey?.fill(0) }.getOrNull()
+            Triple(
+                keystoreDecrypt(storedBytes(profileId, KEY_WRAPPED_KEY), deviceNonce),
+                salt,
+                passwordNonce,
+            )
+        } catch (_: Exception) {
+            return VaultUnlockResult.Unreadable
+        }
+        val (envelope, salt, passwordNonce) = envelopeData
+        val passwordKey = try {
+            SourceCrypto.derivePasswordKey(password, salt)
+        } catch (_: Exception) {
+            envelope.fill(0)
+            return VaultUnlockResult.Unreadable
+        }
+        val vaultKey = try {
+            SourceCrypto.decrypt(passwordKey, envelope, passwordNonce)
+        } catch (_: AEADBadTagException) {
+            return VaultUnlockResult.IncorrectPassword
+        } catch (_: Exception) {
+            return VaultUnlockResult.Unreadable
+        } finally {
+            passwordKey.fill(0)
+            envelope.fill(0)
+        }
+        return try {
+            val decoded = decryptVault(profileId, vaultKey)
+            updateProfileName(profileId, decoded.vault.identity.userDisplayName)
+            val session = VaultSession(profileId, vaultKey, decoded.vault)
+            if (decoded.requiresMigration) persistVault(session)
+            VaultUnlockResult.Success(session)
+        } catch (_: Exception) {
+            vaultKey.fill(0)
+            VaultUnlockResult.Unreadable
+        }
     }
 
     fun save(session: VaultSession) = persistVault(session)
@@ -277,7 +302,7 @@ class SecureVault(
             .commit()) { "Could not persist encrypted Source data" }
     }
 
-    private fun decryptVault(profileId: String, key: ByteArray): UnlockedVault {
+    private fun decryptVault(profileId: String, key: ByteArray): DecodedVault {
         val plaintext = SourceCrypto.decrypt(key, storedBytes(profileId, KEY_VAULT_DATA), storedBytes(profileId, KEY_VAULT_NONCE))
         return try {
             decode(plaintext.toString(Charsets.UTF_8))
@@ -376,19 +401,37 @@ class SecureVault(
         vault.authoritativeNode?.let { put("authoritativeNode", encodeTrustedNode(it)) }
     }.toString()
 
-    private fun decode(raw: String): UnlockedVault {
+    private fun decode(raw: String): DecodedVault {
         val root = JSONObject(raw)
-        require(root.getInt("version") == 2)
+        val version = root.getInt("version")
+        require(version == 1 || version == 2)
         val identity = root.getJSONObject("identity").let {
             LocalIdentity(
                 it.getString("userId"), it.getString("userDisplayName"), it.getString("clientId"),
                 it.getString("clientDisplayName"), it.getString("clientPublicKey"), it.getString("clientPrivateKey"),
             )
         }
-        return UnlockedVault(
-            identity,
-            root.optJSONObject("authoritativeNode")?.let(::decodeTrustedNode),
+        val authoritativeNode = when {
+            version == 1 -> decodeSingleLegacyNode(root.getJSONArray("trustedNodes"))
+            root.has("nodeAuthority") -> decodeIntermediateNodeAuthority(root.getJSONObject("nodeAuthority"))
+            else -> root.optJSONObject("authoritativeNode")?.let(::decodeTrustedNode)
+        }
+        return DecodedVault(
+            vault = UnlockedVault(identity, authoritativeNode),
+            requiresMigration = version == 1 || root.has("nodeAuthority"),
         )
+    }
+
+    private fun decodeSingleLegacyNode(nodes: JSONArray): TrustedNode? {
+        require(nodes.length() <= 1) { "A legacy profile is bound to multiple Nodes" }
+        return if (nodes.length() == 1) decodeTrustedNode(nodes.getJSONObject(0)) else null
+    }
+
+    private fun decodeIntermediateNodeAuthority(authority: JSONObject): TrustedNode? = when (authority.getString("status")) {
+        "unpaired" -> null
+        "authoritative" -> decodeTrustedNode(authority.getJSONObject("node"))
+        "ambiguous_legacy" -> decodeSingleLegacyNode(authority.getJSONArray("nodes"))
+        else -> throw IllegalArgumentException("Unsupported Node authority status")
     }
 
     private fun encodeTrustedNode(node: TrustedNode): JSONObject = JSONObject().apply {
@@ -443,6 +486,17 @@ class SecureVault(
             KEY_CONVERSATION_DATA,
         )
     }
+}
+
+private data class DecodedVault(
+    val vault: UnlockedVault,
+    val requiresMigration: Boolean,
+)
+
+sealed interface VaultUnlockResult {
+    data class Success(val session: VaultSession) : VaultUnlockResult
+    data object IncorrectPassword : VaultUnlockResult
+    data object Unreadable : VaultUnlockResult
 }
 
 class VaultSession internal constructor(
