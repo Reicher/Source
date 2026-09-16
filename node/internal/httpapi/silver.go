@@ -82,10 +82,6 @@ func (h *Handler) controlSilverRefinementJob(w http.ResponseWriter, r *http.Requ
 	var job silver.Job
 	var err error
 	switch r.PathValue("action") {
-	case "pause":
-		job, err = h.silver.Pause(session.User.ID, jobID)
-	case "resume":
-		job, err = h.silver.Resume(session.User.ID, jobID)
 	case "cancel":
 		job, err = h.silver.Cancel(session.User.ID, jobID)
 	case "retry":

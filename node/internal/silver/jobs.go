@@ -194,14 +194,6 @@ func (s *Service) runJob(job database.SilverRefinementJob) {
 			s.failJob(job, err)
 			return
 		}
-		paused, pauseErr := s.db.PauseSilverRefinementJobAfterBatch(job.UserID, job.JobID, now)
-		if pauseErr != nil {
-			s.failJob(job, pauseErr)
-			return
-		}
-		if paused {
-			return
-		}
 		current, err = s.db.SilverRefinementJob(job.UserID, job.JobID)
 		if err != nil || current.State != "running" {
 			return
@@ -218,17 +210,11 @@ func (s *Service) runJob(job database.SilverRefinementJob) {
 		return
 	}
 
-	// Publishing and terminal controls share this lock. A cancel or pause that
-	// wins the lock prevents publication; once publication starts it completes
-	// atomically and the observer sees a completed job.
+	// Publishing and terminal controls share this lock. A cancel that wins the
+	// lock prevents publication; once publication starts it completes atomically.
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	paused, pauseErr := s.db.PauseSilverRefinementJobAfterBatch(job.UserID, job.JobID, now)
-	if pauseErr != nil {
-		s.failJob(job, pauseErr)
-		return
-	}
-	if paused || jobCtx.Err() != nil {
+	if jobCtx.Err() != nil {
 		return
 	}
 	current, err = s.db.SilverRefinementJob(job.UserID, job.JobID)
@@ -324,27 +310,6 @@ func (s *Service) Jobs(userID string) ([]Job, error) {
 		jobs[index] = wireJob(stored[index])
 	}
 	return jobs, nil
-}
-
-func (s *Service) Pause(userID, jobID string) (Job, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	stored, err := s.db.PauseSilverRefinementJob(userID, jobID, s.now().UnixMilli())
-	if errors.Is(err, sql.ErrNoRows) {
-		return Job{}, apperror.New(404, "refinement_job_not_found", "The refinement job does not exist.")
-	}
-	return wireJob(stored), err
-}
-
-func (s *Service) Resume(userID, jobID string) (Job, error) {
-	stored, err := s.db.ResumeSilverRefinementJob(userID, jobID, s.now().UnixMilli())
-	if errors.Is(err, sql.ErrNoRows) {
-		return Job{}, apperror.New(404, "refinement_job_not_found", "The refinement job does not exist.")
-	}
-	if err == nil {
-		s.signalWorker()
-	}
-	return wireJob(stored), err
 }
 
 func (s *Service) Cancel(userID, jobID string) (Job, error) {

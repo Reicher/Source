@@ -3,6 +3,13 @@ package com.source.client.ui
 import com.source.client.model.ChatConversation
 import com.source.client.model.ChatConversations
 import com.source.client.model.ChatMessage
+import com.source.client.knowledge.SILVER_EXTRACTION_COMPLETE_KIND
+import com.source.client.protocol.SilverRefinementJob
+import com.source.client.storage.SilverDataset
+import com.source.client.storage.SilverEvidence
+import com.source.client.storage.SilverJsonObject
+import com.source.client.storage.SilverObservation
+import com.source.client.storage.SilverProducer
 import com.source.client.storage.LibraryItem
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -53,9 +60,9 @@ class LibraryScreenTest {
                     mimeType = file.mimeType,
                     byteCount = file.byteCount,
                     createdAtMillis = file.createdAtMillis,
-                    syncState = LibrarySyncState.LOCAL_AND_SYNCED,
+                    bronzeContentSha256 = file.contentSha256,
+                    bronzeStatus = BronzeNodeStatus.STORED,
                     localAvailable = true,
-                    nodeAvailable = true,
                     canRemoveFromDevice = true,
                     canDeleteFromSource = true,
                     previewKind = null,
@@ -73,7 +80,7 @@ class LibraryScreenTest {
         assertEquals("conversation-1970-01-01-0000.json", presented.items[0].filename)
         assertEquals("archive.pdf", presented.items[1].filename)
         assertEquals(123L, presented.items[2].byteCount)
-        assertEquals(LibrarySyncState.LOCAL_ONLY, presented.items[2].syncState)
+        assertEquals(BronzeNodeStatus.NOT_ON_NODE, presented.items[2].bronzeStatus)
         assertEquals(true, presented.items[2].canDeleteFromSource)
     }
 
@@ -94,9 +101,9 @@ class LibraryScreenTest {
             mimeType = "text/plain",
             byteCount = 100,
             createdAtMillis = 100,
-            syncState = LibrarySyncState.LOCAL_AND_SYNCED,
+            bronzeContentSha256 = "a".repeat(64),
+            bronzeStatus = BronzeNodeStatus.STORED,
             localAvailable = true,
-            nodeAvailable = true,
             canRemoveFromDevice = true,
             canDeleteFromSource = true,
             previewKind = LibraryPreviewKind.TEXT,
@@ -104,11 +111,11 @@ class LibraryScreenTest {
 
         val presented = withSilverState(
             LibraryUiState(listOf(item)),
-            SilverUiState(syncFailed = setOf(item.id)),
+            SilverUiState(syncErrors = setOf(item.id)),
         ).items.single()
 
-        assertEquals(LibrarySyncState.LOCAL_AND_SYNCED, presented.syncState)
-        assertEquals(LibrarySyncState.FAILED, presented.silverSyncState)
+        assertEquals(BronzeNodeStatus.STORED, presented.bronzeStatus)
+        assertEquals(KnowledgeStatus.ERROR, presented.knowledgeStatus)
     }
 
     @Test
@@ -120,9 +127,9 @@ class LibraryScreenTest {
             mimeType = "text/csv",
             byteCount = 60_000,
             createdAtMillis = 100,
-            syncState = LibrarySyncState.LOCAL_AND_SYNCED,
+            bronzeContentSha256 = "b".repeat(64),
+            bronzeStatus = BronzeNodeStatus.STORED,
             localAvailable = true,
-            nodeAvailable = true,
             canRemoveFromDevice = true,
             canDeleteFromSource = true,
             previewKind = LibraryPreviewKind.TEXT,
@@ -131,14 +138,54 @@ class LibraryScreenTest {
         val presented = withSilverState(
             LibraryUiState(listOf(item)),
             SilverUiState(
-                processing = mapOf(item.id to SilverProcessingState.PROCESSING),
-                progress = mapOf(item.id to SilverBatchProgress(7, 25)),
-                refinementPaused = true,
+                jobs = mapOf(item.id to SilverRefinementJob(
+                    id = "00000000-0000-4000-8000-000000000001",
+                    sourceId = item.id,
+                    sourceContentSha256 = item.bronzeContentSha256,
+                    state = "running",
+                    completedBatches = 7,
+                    totalBatches = 25,
+                )),
             ),
         )
 
-        assertEquals(LibrarySyncState.LOCAL_AND_SYNCED, presented.items.single().syncState)
-        assertEquals(SilverBatchProgress(7, 25), presented.items.single().silverProgress)
-        assertEquals(true, presented.silverRefinementPaused)
+        assertEquals(BronzeNodeStatus.STORED, presented.items.single().bronzeStatus)
+        assertEquals(KnowledgeStatus.PROCESSING, presented.items.single().knowledgeStatus)
+        assertEquals(SilverBatchProgress(7, 25), presented.items.single().knowledgeProgress)
+    }
+
+    @Test
+    fun `Silver is current only for the current Bronze revision`() {
+        val item = LibraryUiItem(
+            id = "source-1",
+            filename = "notes.txt",
+            sourceType = "file",
+            mimeType = "text/plain",
+            byteCount = 100,
+            createdAtMillis = 100,
+            bronzeContentSha256 = "b".repeat(64),
+            bronzeStatus = BronzeNodeStatus.STORED,
+            localAvailable = true,
+            canRemoveFromDevice = true,
+            canDeleteFromSource = true,
+            previewKind = LibraryPreviewKind.TEXT,
+        )
+        fun dataset(contentSha256: String): SilverDataset {
+            val evidence = SilverEvidence.create(item.id, contentSha256)
+            val complete = SilverObservation.create(
+                kind = SILVER_EXTRACTION_COMPLETE_KIND,
+                payload = SilverJsonObject(emptyMap()),
+                evidenceIds = listOf(evidence.id),
+                producer = SilverProducer.create("source.node.silver-extraction", "1"),
+                createdAtMillis = 100,
+            )
+            return SilverDataset(evidence = listOf(evidence), observations = listOf(complete))
+        }
+
+        val stale = withSilverState(LibraryUiState(listOf(item)), SilverUiState(dataset("a".repeat(64))))
+        val current = withSilverState(LibraryUiState(listOf(item)), SilverUiState(dataset(item.bronzeContentSha256)))
+
+        assertEquals(KnowledgeStatus.WAITING, stale.items.single().knowledgeStatus)
+        assertEquals(KnowledgeStatus.CURRENT, current.items.single().knowledgeStatus)
     }
 }

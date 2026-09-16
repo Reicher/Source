@@ -26,13 +26,3 @@ internal fun testObservation(
     ),
     createdAtMillis = createdAtMillis,
 )
-
-internal fun testBatchResult(
-    evidence: SilverEvidence = testEvidence(),
-    observation: SilverObservation = testObservation(evidence),
-) = SilverBatchResult(
-    evidence = listOf(evidence),
-    observations = listOf(observation),
-    modelId = observation.producer.modelId ?: error("Test Observation must have a model"),
-    parameterCount = 4_000_000_000,
-)

@@ -27,6 +27,7 @@ func TestOpenAppliesAndPersistsMigrations(t *testing.T) {
 	assertTable(t, db.sql, "silver_refinement_operations")
 	assertTable(t, db.sql, "refinement_jobs")
 	assertTable(t, db.sql, "refinement_checkpoints")
+	assertMissingColumn(t, db.sql, "refinement_jobs", "pause_requested")
 	if err = db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -155,6 +156,53 @@ FROM silver_refinement_operations WHERE operation_id='22222222-2222-4222-8222-22
 	}
 }
 
+func TestOpenRemovesPausedRefinementState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "source.sqlite")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = raw.Exec(schemaVersionTable); err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range migrations[:7] {
+		if _, err = raw.Exec(migration.up); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = raw.Exec(`UPDATE schema_version SET version=7;
+INSERT INTO users(id,display_name,storage_namespace,quota_bytes,created_at)
+VALUES('11111111-1111-4111-8111-111111111111','Existing','namespace',1000,1);
+INSERT INTO refinement_jobs(
+    user_id,job_id,request_digest,source_id,source_name,source_type,content_sha256,plaintext,
+    processor_id,processor_version,model_id,output_layer,state,pause_requested,total_batches,accepted_at,updated_at
+) VALUES(
+    '11111111-1111-4111-8111-111111111111','22222222-2222-4222-8222-222222222222',
+    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','source-1','source.txt','file',
+    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb','text',
+    'processor','1','model','silver','paused',1,1,1,1
+);`); err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var state string
+	if err = db.sql.QueryRow(`SELECT state FROM refinement_jobs WHERE source_id='source-1'`).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "queued" {
+		t.Fatalf("migrated refinement state = %q, want queued", state)
+	}
+	assertMissingColumn(t, db.sql, "refinement_jobs", "pause_requested")
+}
+
 func TestOpenRejectsNewerSchemaVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "source.sqlite")
 	raw, err := sql.Open("sqlite", path)
@@ -217,5 +265,26 @@ func assertTable(t *testing.T, db *sql.DB, want string) {
 	var name string
 	if err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, want).Scan(&name); err != nil {
 		t.Fatalf("table %q is missing: %v", want, err)
+	}
+}
+
+func assertMissingColumn(t *testing.T, db *sql.DB, table, unwanted string) {
+	t.Helper()
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err = rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		if name == unwanted {
+			t.Fatalf("%s column %q still exists", table, unwanted)
+		}
+	}
+	if err = rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 }

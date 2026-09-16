@@ -362,43 +362,6 @@ interrupted:
 	}
 }
 
-func TestPauseFinishesCurrentBatchAndResumeKeepsCheckpoint(t *testing.T) {
-	db, user := refinementTestDatabase(t)
-	defer db.Close()
-	ai := &resumableAI{blockAt: 1, started: make(chan int, 4), release: make(chan struct{})}
-	now := time.UnixMilli(1_800_000_000_000)
-	service := New(db, storage.New(db, t.TempDir(), 20, func() time.Time { return now }), ai, 1024*1024, func() time.Time { return now })
-	defer service.Close()
-
-	request := refinementRequest(t, "33333333-3333-4333-8333-333333333333", strings.Repeat("pausable batch text ", 350))
-	accepted, err := service.Refine(context.Background(), user.ID, request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-ai.started:
-	case <-time.After(3 * time.Second):
-		t.Fatal("job did not start")
-	}
-	requested, err := service.Pause(user.ID, accepted.Job.ID)
-	if err != nil || requested.State != "running" {
-		t.Fatalf("pause request = %#v error=%v", requested, err)
-	}
-	close(ai.release)
-	paused := waitForJob(t, service, user.ID, accepted.Job.ID, "paused")
-	if paused.CompletedBatches != 1 {
-		t.Fatalf("paused after %d batches, want 1", paused.CompletedBatches)
-	}
-	ai.unblock()
-	if _, err = service.Resume(user.ID, accepted.Job.ID); err != nil {
-		t.Fatal(err)
-	}
-	completed := waitForJob(t, service, user.ID, accepted.Job.ID, "completed")
-	if got, want := ai.callCount(), completed.TotalBatches; got != want {
-		t.Fatalf("resume calls = %d, want %d", got, want)
-	}
-}
-
 func TestNodeRunsOneQueuedRefinementAtATimeAndCancelIsTerminal(t *testing.T) {
 	db, user := refinementTestDatabase(t)
 	defer db.Close()
@@ -477,51 +440,6 @@ func TestFailedOlderGenerationCannotOverwriteCompletedNewerSilver(t *testing.T) 
 	}
 	if got := silverHeadID(t, db, user.ID); got != newHead {
 		t.Fatalf("stale retry changed Silver head from %s to %s", newHead, got)
-	}
-}
-
-func TestPausedOlderGenerationCannotOverwriteCompletedNewerSilver(t *testing.T) {
-	db, user := refinementTestDatabase(t)
-	defer db.Close()
-	ai := &resumableAI{blockAt: 1, started: make(chan int, 4), release: make(chan struct{})}
-	now := time.UnixMilli(1_800_000_000_000)
-	store := storage.New(db, t.TempDir(), 20, func() time.Time { return now })
-	service := New(db, store, ai, 1024*1024, func() time.Time { return now })
-	defer service.Close()
-
-	v1, err := service.Refine(context.Background(), user.ID,
-		refinementRequest(t, "88888888-8888-4888-8888-888888888888", strings.Repeat("paused old generation ", 350)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-ai.started:
-	case <-time.After(3 * time.Second):
-		t.Fatal("old generation did not start")
-	}
-	if _, err = service.Pause(user.ID, v1.Job.ID); err != nil {
-		t.Fatal(err)
-	}
-	close(ai.release)
-	waitForJob(t, service, user.ID, v1.Job.ID, "paused")
-
-	v2, err := service.Refine(context.Background(), user.ID,
-		refinementRequest(t, "99999999-9999-4999-8999-999999999998", "newer source generation"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	waitForJob(t, service, user.ID, v2.Job.ID, "completed")
-	newHead := silverHeadID(t, db, user.ID)
-	ai.unblock()
-	if _, err = service.Resume(user.ID, v1.Job.ID); err != nil {
-		t.Fatal(err)
-	}
-	stale := waitForJob(t, service, user.ID, v1.Job.ID, "failed")
-	if stale.Error == nil || stale.Error.Code != "silver_generation_superseded" {
-		t.Fatalf("stale resume = %#v", stale)
-	}
-	if got := silverHeadID(t, db, user.ID); got != newHead {
-		t.Fatalf("stale resume changed Silver head from %s to %s", newHead, got)
 	}
 }
 

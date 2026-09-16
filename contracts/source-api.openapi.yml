@@ -365,7 +365,7 @@ paths:
           description: The matching Node-owned job is already complete.
           content: { application/json: { schema: { $ref: "#/components/schemas/SilverRefinementResult" } } }
         "202":
-          description: The Node owns the queued, running, paused, or retried job.
+          description: The Node owns the queued, running, or retried job.
           content: { application/json: { schema: { $ref: "#/components/schemas/SilverRefinementResult" } } }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
@@ -389,11 +389,11 @@ paths:
     post:
       operationId: controlSilverRefinementJob
       description: >-
-        Pause after the current batch, resume a paused job, terminally cancel a
-        job, or retry a failed job while retaining safe completed checkpoints.
+        Terminally cancel a job or retry a failed job while retaining safe
+        completed checkpoints.
       parameters:
         - { name: jobId, in: path, required: true, schema: { type: string, format: uuid } }
-        - { name: action, in: path, required: true, schema: { type: string, enum: [pause, resume, cancel, retry] } }
+        - { name: action, in: path, required: true, schema: { type: string, enum: [cancel, retry] } }
       responses:
         "200":
           description: Updated durable job state.
@@ -534,7 +534,7 @@ components:
         processorId: { type: string, minLength: 1 }
         processorVersion: { type: string, minLength: 1 }
         modelId: { type: string, minLength: 1 }
-        state: { type: string, enum: [queued, running, paused, completed, failed, cancelled] }
+        state: { type: string, enum: [queued, running, completed, failed, cancelled] }
         completedBatches: { type: integer, minimum: 0 }
         totalBatches: { type: integer, minimum: 1 }
         acceptedAtMillis: { type: integer, minimum: 1 }

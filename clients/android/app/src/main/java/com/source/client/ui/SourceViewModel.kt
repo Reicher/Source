@@ -134,8 +134,6 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             conversationSync = conversationSync,
             readableError = ::readableChatError,
             message = ::message,
-            onInteractiveInferenceStarted = { silverController.pauseForInteraction() },
-            onInteractiveInferenceFinished = { silverController.resumeAfterInteraction() },
             onStateChanged = ::publishChat,
         )
         libraryController = LibraryController(
@@ -311,7 +309,6 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
         pairingJob?.cancel()
         pairingJob = null
         chatController.reset()
-        silverController.pauseForInteraction()
         nodeConnection.clear()
         conversationSync.reset()
         session?.close()
@@ -420,19 +417,13 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
 
     fun clearLibraryFeedback() = libraryController.clearFeedback()
 
-    fun pauseSilverRefinement() = silverController.pauseRefinement()
-
-    fun resumeSilverRefinement() = silverController.resumeRefinement()
-
     fun onForeground() {
         foreground = true
-        silverController.resumeAfterBackground()
         nodeConnection.onForeground()
     }
 
     fun onBackground() {
         foreground = false
-        silverController.pauseForBackground()
         pairingJob?.cancel()
         nodeConnection.onBackground()
     }
@@ -662,6 +653,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
 
     private suspend fun bronzeTextSources(): List<BronzeTextSource> =
         libraryController.bronzeTextSources() + chatController.conversations.conversations.mapNotNull { conversation ->
+            if (!conversationSync.isBackedUp) return@mapNotNull null
             val text = ChatData.refinementText(conversation)
             if (text.isBlank()) null else BronzeTextSource(
                 id = "conversation:${conversation.id}",

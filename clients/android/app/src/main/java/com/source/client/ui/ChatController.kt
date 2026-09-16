@@ -31,8 +31,6 @@ internal class ChatController(
     private val conversationSync: SourceDataSync<ChatConversations>,
     private val readableError: (Exception) -> String,
     private val message: (Int) -> String,
-    private val onInteractiveInferenceStarted: () -> Unit = {},
-    private val onInteractiveInferenceFinished: () -> Unit = {},
     private val onStateChanged: (ChatUiState) -> Unit,
 ) {
     private var inferenceJob: Job? = null
@@ -120,7 +118,6 @@ internal class ChatController(
             return
         }
         val activeSession = session() ?: return
-        onInteractiveInferenceStarted()
         val runId = UUID.randomUUID().toString()
         activeRunId = runId
         updateMessages(
@@ -173,7 +170,6 @@ internal class ChatController(
                     session(), connectedNode(), conversations, ::applySynchronizedConversations,
                 )
                 onStateChanged(state)
-                onInteractiveInferenceFinished()
             }
         }
     }

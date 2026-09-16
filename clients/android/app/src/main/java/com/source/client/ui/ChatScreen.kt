@@ -86,8 +86,6 @@ internal fun MainScreen(
     clearLibraryFeedback: () -> Unit,
     openKnowledgeSource: (String) -> Unit,
     closeKnowledgeSource: () -> Unit,
-    pauseSilverRefinement: () -> Unit,
-    resumeSilverRefinement: () -> Unit,
 ) {
     state.libraryPreview?.let { preview ->
         LibraryPreviewScreen(preview, closeLibraryPreview)
@@ -208,8 +206,6 @@ internal fun MainScreen(
                     onOpen = openLibraryItem,
                     onOpenKnowledge = openKnowledgeSource,
                     onFeedbackShown = clearLibraryFeedback,
-                    onPauseRefinement = pauseSilverRefinement,
-                    onResumeRefinement = resumeSilverRefinement,
                     modifier = Modifier.fillMaxWidth().weight(1f),
                 )
             }
