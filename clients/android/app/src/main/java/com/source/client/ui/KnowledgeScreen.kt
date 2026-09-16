@@ -1,10 +1,8 @@
 package com.source.client.ui
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.background
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,16 +16,25 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.Label
+import androidx.compose.material.icons.outlined.Business
+import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.Event
+import androidx.compose.material.icons.outlined.LocationOn
+import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -82,21 +89,24 @@ data class SilverInspectorEntityUi(
     val id: String,
     val name: String,
     val type: String,
-    val colorIndex: Int,
+    val icon: SilverInspectorEntityIcon,
 )
+
+enum class SilverInspectorEntityIcon { PERSON, LOCATION, ORGANIZATION, EVENT, DOCUMENT, GENERIC }
 
 data class SilverInspectorClaimUi(
     val id: String,
+    val subjectEntityId: String,
     val subjectName: String,
     val predicate: String,
     val objectDisplay: String,
+    val objectEntityId: String?,
+    val objectEntityIcon: SilverInspectorEntityIcon?,
     val state: String,
     val confidence: Double?,
     val competing: Boolean,
     val supportingObservationIds: List<String>,
     val producer: SilverInspectorProducerUi,
-    val subjectColorIndex: Int,
-    val objectColorIndex: Int?,
 )
 
 data class SilverInspectorSourceUi(
@@ -115,6 +125,9 @@ data class SilverInspectorSourceUi(
                 it.status == SilverInspectorObservationStatus.PARTIAL
         }
     val competingCount: Int get() = claims.count(SilverInspectorClaimUi::competing)
+
+    fun claimsFor(entityId: String): List<SilverInspectorClaimUi> =
+        claims.filter { it.subjectEntityId == entityId }
 }
 
 data class KnowledgeUiState(val sources: List<SilverInspectorSourceUi> = emptyList())
@@ -126,10 +139,6 @@ internal fun buildKnowledgeUiState(
     val libraryById = library.items.associateBy(LibraryUiItem::id)
     val sourceIds = (libraryById.keys + silver.evidence.map(SilverEvidence::bronzeSourceId)).toSortedSet()
     val entitiesById = silver.entities.associateBy(SilverEntity::id)
-    val entityColorIndices = silver.entities
-        .sortedBy(SilverEntity::id)
-        .mapIndexed { index, entity -> entity.id to index % ENTITY_COLORS.size }
-        .toMap()
     val activeClaims = silver.claims.filter { it.state == SilverClaimState.ACTIVE }
     val entityNames = silver.entities.associate { entity ->
         entity.id to preferredClaimText(activeClaims, entity.id, SILVER_NAME_PREDICATE, "Unknown entity")
@@ -176,9 +185,9 @@ internal fun buildKnowledgeUiState(
                     id = entity.id,
                     name = checkNotNull(entityNames[entity.id]),
                     type = checkNotNull(entityTypes[entity.id]),
-                    colorIndex = checkNotNull(entityColorIndices[entity.id]),
+                    icon = entityIcon(entityTypes[entity.id]),
                 )
-            },
+            }.sortedWith(compareBy(SilverInspectorEntityUi::name, SilverInspectorEntityUi::type, SilverInspectorEntityUi::id)),
             claims = sourceClaims
                 .filterNot { it.predicate == SILVER_NAME_PREDICATE || it.predicate == SILVER_ENTITY_TYPE_PREDICATE }
                 .groupBy { Triple(it.subjectEntityId, it.predicate, it.objectIdentity()) }
@@ -189,10 +198,13 @@ internal fun buildKnowledgeUiState(
                     ) ?: error("A displayed Claim group cannot be empty")
                     SilverInspectorClaimUi(
                         id = claim.id,
+                        subjectEntityId = claim.subjectEntityId,
                         subjectName = entityNames[claim.subjectEntityId] ?: "Unknown entity",
                         predicate = claim.predicate,
                         objectDisplay = claim.objectEntityId?.let { entityNames[it] ?: "Unknown entity" }
                             ?: checkNotNull(claim.value).displayScalar(),
+                        objectEntityId = claim.objectEntityId,
+                        objectEntityIcon = claim.objectEntityId?.let { entityIcon(entityTypes[it]) },
                         state = claim.state.storageValue,
                         confidence = (
                             matchingClaims.mapNotNull(SilverClaim::confidence) +
@@ -205,8 +217,6 @@ internal fun buildKnowledgeUiState(
                             .distinct()
                             .sorted(),
                         producer = claim.producer.toUi(),
-                        subjectColorIndex = checkNotNull(entityColorIndices[claim.subjectEntityId]),
-                        objectColorIndex = claim.objectEntityId?.let(entityColorIndices::get),
                     )
                 }
                 .sortedWith(compareBy(SilverInspectorClaimUi::subjectName, SilverInspectorClaimUi::predicate)),
@@ -220,79 +230,123 @@ internal fun KnowledgeScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    BackHandler(onBack = onBack)
+    var selectedEntityId by rememberSaveable(source.id) { mutableStateOf<String?>(null) }
+    val selectedEntity = source.entities.firstOrNull { it.id == selectedEntityId }
+    val goBack = {
+        if (selectedEntity == null) onBack() else selectedEntityId = null
+    }
+    BackHandler(onBack = goBack)
     Column(modifier.statusBarsPadding().fillMaxSize()) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) {
+            IconButton(onClick = goBack) {
                 Icon(Icons.AutoMirrored.Outlined.ArrowBack, stringResource(R.string.back))
             }
-            Column(Modifier.weight(1f)) {
-                Text(source.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                Text(
-                    listOf(
-                        source.sourceType.displayLabel(),
-                        "${source.claims.size} ${if (source.claims.size == 1) "fact" else "facts"}",
-                        "${source.entities.size} ${if (source.entities.size == 1) "entity" else "entities"}",
-                    ).joinToString(" · "),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = Ink.copy(alpha = .56f),
-                )
-            }
+            KnowledgeHeader(source, selectedEntity, Modifier.weight(1f))
         }
-        LazyColumn(Modifier.fillMaxSize()) {
-            item { InspectorSectionTitle("Facts · ${source.claims.size}") }
-            if (source.claims.isEmpty()) {
-                item { InspectorEmptyState("No facts have been identified in this source yet.") }
-            } else {
-                items(source.claims, key = SilverInspectorClaimUi::id) { claim ->
-                    InspectorCard(claim.subjectName, claim.subjectColorIndex) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("${claim.predicate.displayLabel()} ", style = MaterialTheme.typography.bodyMedium)
-                            claim.objectColorIndex?.let {
-                                EntityMarker(it)
-                                Spacer(Modifier.width(6.dp))
-                            }
-                            Text(
-                                claim.objectDisplay.withoutDecorativeQuotes(),
-                                style = MaterialTheme.typography.bodyMedium,
-                            )
-                        }
-                        val details = listOfNotNull(
-                            "Conflicting information".takeIf { claim.competing },
-                            claim.confidence?.let { "${(it * 100).toInt()}% confidence" },
-                        )
-                        if (details.isNotEmpty()) InspectorMetadata(details.joinToString(" · "))
-                    }
+        if (selectedEntity == null) EntityList(source) { selectedEntityId = it.id }
+        else EntityClaims(source, selectedEntity)
+    }
+}
+
+@Composable
+private fun KnowledgeHeader(
+    source: SilverInspectorSourceUi,
+    entity: SilverInspectorEntityUi?,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier) {
+        if (entity == null) {
+            Text(source.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+            Text(
+                "${source.sourceType.displayLabel()} · ${source.entities.size} " +
+                    if (source.entities.size == 1) "entity" else "entities",
+                style = MaterialTheme.typography.labelMedium,
+                color = Ink.copy(alpha = .56f),
+            )
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                EntityTypeIcon(entity.icon, entity.type)
+                Spacer(Modifier.width(8.dp))
+                Column {
+                    Text(entity.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        entity.type.displayLabel(),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Ink.copy(alpha = .56f),
+                    )
                 }
             }
-            item { InspectorSectionTitle("Entities · ${source.entities.size}") }
+        }
+    }
+}
+
+@Composable
+private fun EntityList(source: SilverInspectorSourceUi, onSelect: (SilverInspectorEntityUi) -> Unit) {
+    LazyColumn(Modifier.fillMaxSize()) {
+        item { InspectorSectionTitle("Entities · ${source.entities.size}") }
+        if (source.entities.isEmpty()) {
+            item { InspectorEmptyState("No entities have been identified in this source yet.") }
+        } else {
             items(source.entities, key = SilverInspectorEntityUi::id) { entity ->
-                InspectorCard(entity.name, entity.colorIndex) {
-                    InspectorMetadata(entity.type.displayLabel())
-                }
-            }
-            val needsReview = source.observations.filter {
-                it.status == SilverInspectorObservationStatus.UNRESOLVED ||
-                    it.status == SilverInspectorObservationStatus.PARTIAL
-            }
-            if (needsReview.isNotEmpty()) {
-                item { InspectorSectionTitle("Needs review · ${needsReview.size}") }
-                items(needsReview, key = SilverInspectorObservationUi::id) { observation ->
-                    InspectorCard(observation.summary) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { onSelect(entity) }
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    EntityTypeIcon(entity.icon, entity.type)
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(entity.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
                         Text(
-                            when (observation.status) {
-                                SilverInspectorObservationStatus.PARTIAL -> "Only part of this observation could be connected."
-                                else -> "This observation could not be connected to an entity."
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Ink.copy(alpha = .64f),
+                            entity.type.displayLabel(),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Ink.copy(alpha = .58f),
                         )
-                        observation.confidence?.let { InspectorMetadata("${(it * 100).toInt()}% confidence") }
                     }
                 }
+                HorizontalDivider(color = Ink.copy(alpha = .08f))
             }
-            item { Spacer(Modifier.height(88.dp)) }
         }
+        item { Spacer(Modifier.height(88.dp)) }
+    }
+}
+
+@Composable
+private fun EntityClaims(source: SilverInspectorSourceUi, entity: SilverInspectorEntityUi) {
+    val claims = source.claimsFor(entity.id)
+    LazyColumn(Modifier.fillMaxSize()) {
+        item { InspectorSectionTitle("Claims · ${claims.size}") }
+        if (claims.isEmpty()) {
+            item { InspectorEmptyState("No claims about this entity are supported by this source.") }
+        } else {
+            items(claims, key = SilverInspectorClaimUi::id) { claim ->
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        claim.predicate.displayLabel(),
+                        modifier = Modifier.weight(.42f),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Ink.copy(alpha = .7f),
+                    )
+                    Text("→", modifier = Modifier.padding(horizontal = 8.dp), color = Ink.copy(alpha = .42f))
+                    claim.objectEntityIcon?.let {
+                        EntityTypeIcon(it, claim.objectDisplay)
+                        Spacer(Modifier.width(7.dp))
+                    }
+                    Text(
+                        claim.objectDisplay.withoutDecorativeQuotes(),
+                        modifier = Modifier.weight(.58f),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+                HorizontalDivider(color = Ink.copy(alpha = .08f))
+            }
+        }
+        item { Spacer(Modifier.height(88.dp)) }
     }
 }
 
@@ -305,38 +359,11 @@ private fun InspectorSectionTitle(title: String) = Text(
 )
 
 @Composable
-private fun InspectorCard(
-    title: String,
-    entityColorIndex: Int? = null,
-    content: @Composable () -> Unit,
-) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            entityColorIndex?.let {
-                EntityMarker(it)
-                Spacer(Modifier.width(7.dp))
-            }
-            Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-        }
-        Spacer(Modifier.height(4.dp))
-        content()
-    }
-    HorizontalDivider(color = Ink.copy(alpha = .08f))
-}
-
-@Composable
-private fun EntityMarker(colorIndex: Int) = Box(
-    Modifier
-        .size(10.dp)
-        .clip(CircleShape)
-        .background(ENTITY_COLORS[colorIndex % ENTITY_COLORS.size]),
-)
-
-@Composable
-private fun InspectorMetadata(value: String) = Text(
-    value,
-    style = MaterialTheme.typography.labelSmall,
-    color = Ink.copy(alpha = .58f),
+private fun EntityTypeIcon(icon: SilverInspectorEntityIcon, description: String) = Icon(
+    imageVector = icon.imageVector(),
+    contentDescription = description.displayLabel(),
+    modifier = Modifier.size(18.dp),
+    tint = Ink.copy(alpha = .68f),
 )
 
 @Composable
@@ -473,14 +500,31 @@ internal fun String.displayLabel(): String = replace('-', ' ')
 private fun String.withoutDecorativeQuotes(): String =
     if (length >= 2 && first() == '“' && last() == '”') substring(1, lastIndex) else this
 
+internal fun entityIcon(type: String?): SilverInspectorEntityIcon {
+    val normalized = type.orEmpty().lowercase().replace('-', ' ').replace('_', ' ')
+    val words = normalized.split(' ').filter(String::isNotBlank).toSet()
+    return when {
+        words.any { it in PERSON_TYPES } -> SilverInspectorEntityIcon.PERSON
+        words.any { it in LOCATION_TYPES } -> SilverInspectorEntityIcon.LOCATION
+        words.any { it in ORGANIZATION_TYPES } -> SilverInspectorEntityIcon.ORGANIZATION
+        words.any { it in EVENT_TYPES } -> SilverInspectorEntityIcon.EVENT
+        words.any { it in DOCUMENT_TYPES } -> SilverInspectorEntityIcon.DOCUMENT
+        else -> SilverInspectorEntityIcon.GENERIC
+    }
+}
+
+private fun SilverInspectorEntityIcon.imageVector(): ImageVector = when (this) {
+    SilverInspectorEntityIcon.PERSON -> Icons.Outlined.Person
+    SilverInspectorEntityIcon.LOCATION -> Icons.Outlined.LocationOn
+    SilverInspectorEntityIcon.ORGANIZATION -> Icons.Outlined.Business
+    SilverInspectorEntityIcon.EVENT -> Icons.Outlined.Event
+    SilverInspectorEntityIcon.DOCUMENT -> Icons.Outlined.Description
+    SilverInspectorEntityIcon.GENERIC -> Icons.AutoMirrored.Outlined.Label
+}
+
 private val CANDIDATE_KINDS = setOf(SILVER_ATTRIBUTE_CANDIDATE_KIND, SILVER_RELATIONSHIP_CANDIDATE_KIND)
-private val ENTITY_COLORS = listOf(
-    Color(0xFF2F6B57),
-    Color(0xFF9A4D42),
-    Color(0xFF4A6496),
-    Color(0xFF8A5A90),
-    Color(0xFF9A6A24),
-    Color(0xFF2D728F),
-    Color(0xFF7A5C3E),
-    Color(0xFF6B6F3C),
-)
+private val PERSON_TYPES = setOf("person", "people", "human", "user", "contact", "author", "artist")
+private val LOCATION_TYPES = setOf("location", "place", "city", "country", "region", "address", "venue")
+private val ORGANIZATION_TYPES = setOf("organization", "organisation", "company", "business", "team", "group", "institution")
+private val EVENT_TYPES = setOf("event", "meeting", "conference")
+private val DOCUMENT_TYPES = setOf("document", "book", "article", "file", "note")
