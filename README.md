@@ -1,47 +1,32 @@
 # Source
 
 Source is a private, local-first system for personal data, storage, and AI.
-This repository owns the official Android Source Client, the Source Node
-implementation and reference deployment, and the versioned Source API contract.
-The long-term product direction is described in [`VISION.md`](VISION.md).
+It consists of an Android Client, a local Source Node, and a versioned Source API.
+The long-term direction is described in [`VISION.md`](VISION.md).
 
-Source may run on a machine managed by a separate infrastructure repository,
-such as `homeLab`, but it remains a standalone installation. This repository
-owns Source's services, internal networks, data layout, local CA, models,
-administration, API contract, backup, and restore. Host infrastructure only
-reserves the LAN and loopback ports, maintains the physical machine and
-firewall, and ensures Source is not routed through public services. The two
-deployments must not share Compose networks, volumes, routes, or secrets.
+Source is designed to run on hardware you control and keep normal operation
+inside your local network. The Client works independently; a paired Node adds
+storage, synchronization, processing, and more capable local AI.
 
 ## Current status
 
-This is a working prototype, not the complete Source vision. Today Source Node
-provides:
+Source is a working prototype. It currently includes:
 
-- a LAN-only HTTPS endpoint backed by a local certificate authority;
-- localhost-only first-run administration and health dashboard;
-- temporary QR invitations, Ed25519 client pairing, and administrator-approved
-  recovery of an existing user on a replacement client;
-- isolated users created together with their first key-proven client, with
-  per-user quotas and a data model prepared for additional client identities;
-- opaque storage for client-encrypted snapshots and streamed raw Library items,
-  protected by a node-specific recovery key held by the user;
-- authenticated chat through a pinned local llama.cpp runtime;
-- a versioned OpenAPI contract.
+* an Android Client with local identity, encrypted storage, chat, Library,
+  LAN discovery, QR pairing, and automatic reconnect;
+* a LAN-only Source Node with localhost-only administration;
+* authenticated local AI through llama.cpp;
+* Client-to-Node Bronze storage and synchronization;
+* Node-authoritative Silver refinement with synchronized Client caching;
+* user isolation, quotas, recovery, backup, and restore;
+* a versioned OpenAPI contract.
 
-The first Android Source Client now lives in [`clients/android`](clients/android/README.md).
-It implements local identity, LAN discovery, QR pairing, automatic trusted
-reconnect, encrypted local-first chat, and a raw Source Library with generic
-file ingestion, hash deduplication, deletion tombstones, and Client-to-Node
-sync. Chat and Library metadata share the generic versioned encrypted-data
-path; knowledge extraction and the broader personal-data model are not
-implemented yet. Thoughts is the first intended
-Source-compatible application.
+The Android Client lives in [`clients/android`](clients/android/README.md).
 
 ## Install Source Node
 
-Requirements: Docker with Docker Compose, a stable LAN address, and enough disk
-and memory for the selected local model.
+Requirements: Linux with Docker and Docker Compose, a stable LAN address, and
+enough memory and disk space for the selected local model.
 
 ```sh
 cp .env.example .env
@@ -52,36 +37,46 @@ cp .env.example .env
 ./scripts/export-ca.sh
 ```
 
-Open `http://127.0.0.1:9090` on the Node itself to initialize and administer
-it. An administrator authorizes a quota-limited pairing invitation; the user
-and first client are persisted only after the client proves its private key.
-This port is always published on host loopback only.
+By default Source binds only to loopback. To use it from a phone on your LAN,
+set `SOURCE_BIND_IP` and `SOURCE_GATEWAY_HOST` in `.env` to the same LAN address.
 
-The defaults bind HTTPS only to `127.0.0.1:8443`. Before using a LAN client,
-set `SOURCE_BIND_IP` and `SOURCE_GATEWAY_HOST` in `.env` to the same reserved
-LAN address. Never forward the Source port from a router to the public internet.
+Open `http://127.0.0.1:9090` on the Node machine to complete setup, administer
+users, and create a temporary QR pairing invitation.
 
-See [`docs/operations.md`](docs/operations.md) for setup, user administration,
-security boundaries, verification, automatic deployment from GitHub Actions,
-backup, and restore guidance.
+Do not expose Source through router port forwarding or a public reverse proxy.
+See [`docs/operations.md`](docs/operations.md) for setup, security, backup,
+restore, and deployment details.
 
-The canonical cross-Client storage, synchronization, conflict, and deletion
-semantics are specified in
-[`docs/STORAGE_AND_SYNC.md`](docs/STORAGE_AND_SYNC.md). The Node and Android
-Client implement its canonical revision, journal, cursor, conflict, and receipt
-model for conversations and Library manifests. Whole snapshots and the
-feature-specific Library blob transport remain compatibility paths during the
-incremental migration. Persistent Silver is produced by the authoritative Node
-and synchronized to Android as an offline cache.
+## Install the Android Client
+
+Build and deploy Source Client to one authorized USB-connected Android device:
+
+```sh
+./scripts/deploy-android.sh
+```
+
+Pair the Client by scanning a QR invitation created from the Node's local
+administration interface. After pairing, the Client reconnects automatically
+to that specific Node on the local network.
+
+See [`clients/android/README.md`](clients/android/README.md) for Android build,
+model installation, and device-test details.
+
+## Data model
+
+Source separates personal data into three conceptual layers:
+
+* **Bronze** — original or imported source material;
+* **Silver** — Source's derived, revisable knowledge;
+* **Gold** — rebuildable projections for search, AI, timelines, and other views.
+
+The Node is authoritative for persistent Silver. Clients keep local Bronze and
+cache relevant Silver for responsive and offline use.
+
+See [`docs/SILVER.md`](docs/SILVER.md) and
+[`docs/STORAGE_AND_SYNC.md`](docs/STORAGE_AND_SYNC.md) for the canonical rules.
 
 ## Development
-
-### Project language
-
-Use English throughout the repository: source code, comments, logs, API error
-messages, administration and client interfaces, tests, and documentation.
-Android user-facing text must be defined in `res/values/strings.xml`, even when
-English is the only supported language.
 
 Source Node requires Go 1.25 or newer:
 
@@ -91,22 +86,9 @@ go test ./...
 go run ./cmd/source-node
 ```
 
-Direct `go run ./cmd/source-node` binds both plain-HTTP listeners to loopback and leaves
-DNS-SD discovery disabled by default. A non-container LAN deployment must add
-an HTTPS gateway backed by the Node's local CA, keep administration on host
-loopback, and explicitly enable discovery only after the advertised HTTPS
-endpoint works. The Compose deployment above supplies those boundaries.
-
-The QR renderer is compiled into the Source Node binary and never contacts an
-external service at runtime.
-
-To build and deploy Source Client to one authorized USB-connected Android
-device, run `./scripts/deploy-android.sh` from the repository root. Once the
-model recorded in `models/source-ai-models.json` is installed, subsequent runs
-with the same Android `versionCode` retain it and update only the Client APK.
-Version changes reinstall the complete split APK set without clearing app data.
-See the [Android Client README](clients/android/README.md) for details and device
-tests.
+Repository content uses English. Android user-facing strings belong in
+`res/values/strings.xml`. The versioned API contract lives in
+[`contracts/`](contracts/README.md).
 
 ## License
 
