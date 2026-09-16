@@ -21,11 +21,12 @@ import (
 )
 
 type Source struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	SourceType    string `json:"sourceType"`
-	ContentSHA256 string `json:"contentSha256"`
-	Text          string `json:"text"`
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	SourceType     string `json:"sourceType"`
+	ContentSHA256  string `json:"contentSha256"`
+	Text           string `json:"text"`
+	AuthoredBySelf bool   `json:"authoredBySelf,omitempty"`
 }
 
 type RefineRequest struct {
@@ -101,7 +102,8 @@ func (s *Service) Refine(_ context.Context, userID string, request RefineRequest
 	job, changed, err := s.db.AcceptSilverRefinementJob(userID, request.OperationID,
 		hex.EncodeToString(digest[:]), database.SilverRefinementSource{
 			SourceID: request.Source.ID, Name: request.Source.Name, SourceType: request.Source.SourceType,
-			ContentSHA256: request.Source.ContentSHA256, Plaintext: request.Source.Text, AcceptedAt: now,
+			ContentSHA256: request.Source.ContentSHA256, Plaintext: request.Source.Text,
+			AuthoredBySelf: request.Source.AuthoredBySelf, AcceptedAt: now,
 		}, ExtractionProcessorID, ExtractionVersion, modelID, "silver", len(chunks), now)
 	s.mu.Unlock()
 	if err != nil {
@@ -244,7 +246,7 @@ func (s *Service) currentDataset(userID string) (Dataset, error) {
 	return dataset, validateDataset(dataset)
 }
 
-func generationComplete(dataset Dataset, sourceID, contentSHA, modelID string) bool {
+func generationComplete(dataset Dataset, sourceID, contentSHA, modelID string, authoredBySelf bool) bool {
 	evidence := map[string]bool{}
 	for _, item := range dataset.Evidence {
 		if item.BronzeSourceID == sourceID && item.BronzeContentSHA256 == contentSHA {
@@ -256,6 +258,10 @@ func generationComplete(dataset Dataset, sourceID, contentSHA, modelID string) b
 			item.Producer.ProcessorVersion != ExtractionVersion || item.Producer.ModelID == nil || *item.Producer.ModelID != modelID {
 			continue
 		}
+		payload, ok := item.Payload.(map[string]any)
+		if !ok || payload["authoredBySelf"] != authoredBySelf {
+			continue
+		}
 		for _, evidenceID := range item.EvidenceIDs {
 			if evidence[evidenceID] {
 				return true
@@ -265,9 +271,17 @@ func generationComplete(dataset Dataset, sourceID, contentSHA, modelID string) b
 	return false
 }
 
-func replaceGeneration(dataset Dataset, source Source, generation extractedGeneration, now int64) (Dataset, error) {
+func replaceGeneration(dataset Dataset, profile ProfileContext, source Source, generation extractedGeneration, now int64) (Dataset, error) {
 	if now <= dataset.ModifiedAtMillis {
 		now = dataset.ModifiedAtMillis + 1
+	}
+	for index := range generation.Observations {
+		generation.Observations[index].CreatedAtMillis = now
+	}
+	var err error
+	dataset, err = ensureProfileIdentity(dataset, profile, now)
+	if err != nil {
+		return Dataset{}, err
 	}
 	oldEvidence := map[string]Evidence{}
 	for _, item := range dataset.Evidence {
@@ -279,7 +293,8 @@ func replaceGeneration(dataset Dataset, source Source, generation extractedGener
 	}
 	dataset.Evidence = mergeEvidence(dataset.Evidence, generation.Evidence)
 	dataset.Observations = mergeObservations(dataset.Observations, generation.Observations)
-	resolvedEntities, resolvedClaims, err := resolve(dataset, generation.Observations, now)
+	resolutionInputs := candidateObservations(dataset, generation.Observations)
+	resolvedEntities, resolvedClaims, err := resolve(dataset, resolutionInputs, profile, now)
 	if err != nil {
 		return Dataset{}, err
 	}
@@ -306,6 +321,11 @@ func replaceGeneration(dataset Dataset, source Source, generation extractedGener
 	}
 	dataset.Entities = mergeEntities(dataset.Entities, resolvedEntities)
 	dataset.Claims = mergeClaims(dataset.Claims, resolvedClaims)
+	strengthened, err := strengthenClaims(dataset, now)
+	if err != nil {
+		return Dataset{}, err
+	}
+	dataset.Claims = mergeClaims(dataset.Claims, strengthened)
 	dataset.ModifiedAtMillis = now
 	delete(dataset.RemovedSources, source.ID)
 	return dataset, validateDataset(dataset)

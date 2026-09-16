@@ -180,6 +180,10 @@ func TestSourceAPIEndToEnd(t *testing.T) {
 	if meBody["user"].(map[string]any)["displayName"] != "Robin" {
 		t.Fatal("paired user identity changed")
 	}
+	selfEntityID := meBody["user"].(map[string]any)["selfEntityId"].(string)
+	if paired["user"].(map[string]any)["selfEntityId"] != selfEntityID || !syncmodel.ValidUUID(selfEntityID) {
+		t.Fatal("paired user Self entity is missing or unstable")
+	}
 	nonce, _ := security.GenerateToken()
 	identity := jsonRequest(t, http.MethodPost, api.URL+"/api/v1/identity/challenge", map[string]string{"Authorization": "Bearer " + credential}, map[string]any{"protocol": 1, "nonce": nonce})
 	wantStatus(t, identity, 200)

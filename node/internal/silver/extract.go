@@ -41,7 +41,7 @@ func extract(ctx context.Context, ai localai.Backend, source Source, modelID str
 	}
 	outputs := make([]string, len(chunks))
 	for index, chunk := range chunks {
-		output, err := extractBatch(ctx, ai, chunk)
+		output, err := extractBatch(ctx, ai, chunk, source.AuthoredBySelf)
 		if err != nil {
 			return extractedGeneration{}, err
 		}
@@ -50,9 +50,9 @@ func extract(ctx context.Context, ai localai.Backend, source Source, modelID str
 	return generationFromBatchOutputs(source, modelID, now, chunks, outputs)
 }
 
-func extractBatch(ctx context.Context, ai localai.Backend, chunk string) (string, error) {
+func extractBatch(ctx context.Context, ai localai.Backend, chunk string, authoredBySelf bool) (string, error) {
 	var output strings.Builder
-	err := ai.StreamChat(ctx, []localai.Message{{Role: "user", Content: extractionPrompt(chunk)}}, localai.ChatOptions{
+	err := ai.StreamChat(ctx, []localai.Message{{Role: "user", Content: extractionPrompt(chunk, authoredBySelf)}}, localai.ChatOptions{
 		Temperature: 0.1,
 		TopP:        0.8,
 		Reasoning:   true,
@@ -104,6 +104,9 @@ func generationFromBatchOutputs(source Source, modelID string, now int64, chunks
 			if claim.Excerpt != "" {
 				payload["evidenceExcerpt"] = claim.Excerpt
 			}
+			if source.AuthoredBySelf {
+				payload["authoredBySelf"] = true
+			}
 			confidence := claim.Confidence
 			observation, createErr := NewObservation(kind, payload, []string{evidence.ID}, &confidence, producer, now)
 			if createErr != nil {
@@ -114,7 +117,9 @@ func generationFromBatchOutputs(source Source, modelID string, now int64, chunks
 			}
 		}
 	}
-	complete, err := NewObservation(ExtractionCompleteKind, map[string]any{}, []string{evidence.ID}, nil, producer, now)
+	complete, err := NewObservation(ExtractionCompleteKind, map[string]any{
+		"authoredBySelf": source.AuthoredBySelf,
+	}, []string{evidence.ID}, nil, producer, now)
 	if err != nil {
 		return extractedGeneration{}, err
 	}
@@ -274,10 +279,15 @@ func trailingContext(text string, maximum int) string {
 	return strings.TrimSpace(text[start:])
 }
 
-func extractionPrompt(chunk string) string {
+func extractionPrompt(chunk string, authoredBySelf bool) string {
+	authorContext := "No verified author identity is available. Do not assume first-person references identify the Source profile owner."
+	if authoredBySelf {
+		authorContext = "The Source profile owner is the verified author. Preserve clear singular first-person references as an entity named I with type person; the resolver will bind that mention to the profile's Self entity."
+	}
 	return `Extract all explicitly stated factual information from the Bronze text as entity attributes or relationships. Return compact JSON only, with this shape:
 {"entities":[{"key":"e1","name":"Robin","type":"person"},{"key":"e2","name":"Source","type":"project"}],"claims":[{"subjectKey":"e1","predicate":"created","objectKey":"e2","confidence":0.95,"evidenceExcerpt":"Robin created Source"},{"subjectKey":"e2","predicate":"status","value":"active","confidence":0.8,"evidenceExcerpt":"Source is active"}]}
 Resolve references such as pronouns and possessives when their referent is clear from the provided text. If a reference is ambiguous, do not guess.
+` + authorContext + `
 Every claim must have exactly one objectKey or scalar value. Do not infer facts that are not stated in or clearly entailed by the text. Types and predicates should be short lowercase labels. If nothing useful exists, return empty arrays.
 
 Bronze text:

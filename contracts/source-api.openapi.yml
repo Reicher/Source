@@ -516,6 +516,10 @@ components:
             sourceType: { type: string, minLength: 1, maxLength: 64 }
             contentSha256: { type: string, pattern: "^[0-9a-f]{64}$" }
             text: { type: string, minLength: 1 }
+            authoredBySelf:
+              type: boolean
+              default: false
+              description: Verified source context indicating that singular first-person references may resolve to the profile Self entity.
     SilverRefinementResult:
       type: object
       additionalProperties: false
@@ -743,10 +747,14 @@ components:
     User:
       type: object
       additionalProperties: false
-      required: [id, displayName]
+      required: [id, displayName, selfEntityId]
       properties:
         id: { type: string, format: uuid }
         displayName: { type: string, minLength: 1, maxLength: 100 }
+        selfEntityId:
+          type: string
+          format: uuid
+          description: Stable Entity identifier for the person who owns this Source profile.
     PairingStart:
       type: object
       additionalProperties: false
