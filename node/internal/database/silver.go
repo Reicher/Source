@@ -221,3 +221,12 @@ func (d *DB) SilverRefinementBytes(userID string) (int64, error) {
 FROM silver_refinement_sources WHERE user_id=?`, userID).Scan(&bytes)
 	return bytes, err
 }
+
+func (d *DB) IsCurrentSilverRefinementSource(userID, sourceID, contentSHA256 string) (bool, error) {
+	var current int
+	err := d.sql.QueryRow(`SELECT EXISTS(
+SELECT 1 FROM silver_refinement_sources
+WHERE user_id=? AND source_id=? AND content_sha256=? AND removed_at IS NULL
+)`, userID, sourceID, contentSHA256).Scan(&current)
+	return current == 1, err
+}

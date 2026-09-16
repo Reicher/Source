@@ -69,6 +69,7 @@ internal class SilverController(
     private var pausedForInteraction = false
     private var pausedForBackground = false
     private var pausedByUser = false
+    private var pausedByNode = false
     private var checkpoints = SilverCheckpointDataset()
     private val activeNodeJobs = mutableMapOf<String, String>()
     private val checkpointStoreMutex = Mutex()
@@ -89,6 +90,7 @@ internal class SilverController(
         pausedForInteraction = false
         pausedForBackground = false
         pausedByUser = false
+        pausedByNode = false
         activeNodeJobs.clear()
         datasetMutex.withLock {
             sync.reset()
@@ -165,8 +167,9 @@ internal class SilverController(
     }
 
     fun resumeRefinement() {
-        if (!pausedByUser) return
+        if (!pausedByUser && !pausedByNode) return
         pausedByUser = false
+        pausedByNode = false
         checkpoints = checkpoints.copy(refinementPaused = false)
         state = state.copy(refinementPaused = false)
         publish()
@@ -373,30 +376,43 @@ internal class SilverController(
     ): SilverRefinementJob {
         var job = initial
         while (true) {
+            if (job.state != "paused" && pausedByNode) {
+                pausedByNode = false
+            }
             state = state.copy(
                 processing = state.processing + (
                     sourceId to if (job.state == "running") SilverProcessingState.PROCESSING else SilverProcessingState.QUEUED
                 ),
                 progress = state.progress + (sourceId to SilverBatchProgress(job.completedBatches, job.totalBatches)),
+                refinementPaused = pausedByUser || pausedByNode,
             )
             publish()
             when (job.state) {
-                "completed", "cancelled" -> return job
-                "failed" -> throw SourceApiException(
-                    job.errorCode ?: "silver_refinement_failed",
-                    "The Node could not refine knowledge from this source.",
-                )
+                "completed", "cancelled" -> {
+                    pausedByNode = false
+                    state = state.copy(refinementPaused = pausedByUser)
+                    publish()
+                    return job
+                }
+                "failed" -> {
+                    pausedByNode = false
+                    state = state.copy(refinementPaused = pausedByUser)
+                    publish()
+                    throw SourceApiException(
+                        job.errorCode ?: "silver_refinement_failed",
+                        "The Node could not refine knowledge from this source.",
+                    )
+                }
                 "paused" -> {
-                    if (pausedByUser) {
-                        delay(JOB_POLL_MILLIS)
-                    } else {
-                        job = nodeApi.controlSilverRefinementJob(
-                            connected.discovered.apiBaseUrl,
-                            connected.trusted,
-                            job.id,
-                            "resume",
-                        )
-                    }
+                    pausedByNode = true
+                    state = state.copy(refinementPaused = true)
+                    publish()
+                    delay(JOB_POLL_MILLIS)
+                    job = nodeApi.silverRefinementJob(
+                        connected.discovered.apiBaseUrl,
+                        connected.trusted,
+                        job.id,
+                    )
                 }
                 else -> {
                     delay(JOB_POLL_MILLIS)
@@ -430,7 +446,7 @@ internal class SilverController(
 
     private fun nextModifiedAt(): Long = maxOf(clock().coerceAtLeast(1), state.dataset.modifiedAtMillis + 1)
 
-    private fun refinementIsPaused(): Boolean = pausedForInteraction || pausedForBackground || pausedByUser
+    private fun refinementIsPaused(): Boolean = pausedForInteraction || pausedForBackground || pausedByUser || pausedByNode
 
     private fun cancelWorker() {
         worker?.cancel()

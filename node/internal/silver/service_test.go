@@ -441,6 +441,124 @@ func TestNodeRunsOneQueuedRefinementAtATimeAndCancelIsTerminal(t *testing.T) {
 	}
 }
 
+func TestFailedOlderGenerationCannotOverwriteCompletedNewerSilver(t *testing.T) {
+	db, user := refinementTestDatabase(t)
+	defer db.Close()
+	ai := &resumableAI{failAt: 2}
+	now := time.UnixMilli(1_800_000_000_000)
+	store := storage.New(db, t.TempDir(), 20, func() time.Time { return now })
+	service := New(db, store, ai, 1024*1024, func() time.Time { return now })
+	defer service.Close()
+
+	v1, err := service.Refine(context.Background(), user.ID,
+		refinementRequest(t, "66666666-6666-4666-8666-666666666666", strings.Repeat("old generation text ", 350)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForJob(t, service, user.ID, v1.Job.ID, "failed")
+	ai.mu.Lock()
+	ai.failAt = 0
+	ai.mu.Unlock()
+
+	v2, err := service.Refine(context.Background(), user.ID,
+		refinementRequest(t, "77777777-7777-4777-8777-777777777777", "new generation text"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForJob(t, service, user.ID, v2.Job.ID, "completed")
+	newHead := silverHeadID(t, db, user.ID)
+
+	if _, err = service.Retry(user.ID, v1.Job.ID); err != nil {
+		t.Fatal(err)
+	}
+	stale := waitForJob(t, service, user.ID, v1.Job.ID, "failed")
+	if stale.Error == nil || stale.Error.Code != "silver_generation_superseded" {
+		t.Fatalf("stale retry = %#v", stale)
+	}
+	if got := silverHeadID(t, db, user.ID); got != newHead {
+		t.Fatalf("stale retry changed Silver head from %s to %s", newHead, got)
+	}
+}
+
+func TestPausedOlderGenerationCannotOverwriteCompletedNewerSilver(t *testing.T) {
+	db, user := refinementTestDatabase(t)
+	defer db.Close()
+	ai := &resumableAI{blockAt: 1, started: make(chan int, 4), release: make(chan struct{})}
+	now := time.UnixMilli(1_800_000_000_000)
+	store := storage.New(db, t.TempDir(), 20, func() time.Time { return now })
+	service := New(db, store, ai, 1024*1024, func() time.Time { return now })
+	defer service.Close()
+
+	v1, err := service.Refine(context.Background(), user.ID,
+		refinementRequest(t, "88888888-8888-4888-8888-888888888888", strings.Repeat("paused old generation ", 350)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ai.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("old generation did not start")
+	}
+	if _, err = service.Pause(user.ID, v1.Job.ID); err != nil {
+		t.Fatal(err)
+	}
+	close(ai.release)
+	waitForJob(t, service, user.ID, v1.Job.ID, "paused")
+
+	v2, err := service.Refine(context.Background(), user.ID,
+		refinementRequest(t, "99999999-9999-4999-8999-999999999998", "newer source generation"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForJob(t, service, user.ID, v2.Job.ID, "completed")
+	newHead := silverHeadID(t, db, user.ID)
+	ai.unblock()
+	if _, err = service.Resume(user.ID, v1.Job.ID); err != nil {
+		t.Fatal(err)
+	}
+	stale := waitForJob(t, service, user.ID, v1.Job.ID, "failed")
+	if stale.Error == nil || stale.Error.Code != "silver_generation_superseded" {
+		t.Fatalf("stale resume = %#v", stale)
+	}
+	if got := silverHeadID(t, db, user.ID); got != newHead {
+		t.Fatalf("stale resume changed Silver head from %s to %s", newHead, got)
+	}
+}
+
+func TestJobFromOlderProcessorVersionFailsBeforeUsingCheckpoints(t *testing.T) {
+	db, user := refinementTestDatabase(t)
+	defer db.Close()
+	ai := &resumableAI{}
+	now := time.UnixMilli(1_800_000_000_000)
+	text := "processor upgrade"
+	contentSHA := sha256Text(text)
+	stored, _, err := db.AcceptSilverRefinementJob(
+		user.ID, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", strings.Repeat("a", 64),
+		database.SilverRefinementSource{
+			SourceID: "source-1", Name: "source.txt", SourceType: "file",
+			ContentSHA256: contentSHA, Plaintext: text, AcceptedAt: now.UnixMilli(),
+		}, ExtractionProcessorID, "previous-version", "test-model", "silver", 1, now.UnixMilli(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := New(db, storage.New(db, t.TempDir(), 20, func() time.Time { return now }), ai, 1024*1024, func() time.Time { return now })
+	defer service.Close()
+	job := waitForJob(t, service, user.ID, stored.JobID, "failed")
+	if job.Error == nil || job.Error.Code != "silver_processor_changed" || ai.callCount() != 0 {
+		t.Fatalf("old processor job = %#v calls=%d", job, ai.callCount())
+	}
+}
+
+func silverHeadID(t *testing.T, db *database.DB, userID string) string {
+	t.Helper()
+	heads, err := db.SyncHeads(userID, Collection, canonicalObjectID(Collection))
+	if err != nil || len(heads) != 1 {
+		t.Fatalf("Silver heads = %#v error=%v", heads, err)
+	}
+	return heads[0].RevisionID
+}
+
 func refinementTestDatabase(t *testing.T) (*database.DB, *database.User) {
 	return refinementTestDatabaseAt(t, ":memory:")
 }

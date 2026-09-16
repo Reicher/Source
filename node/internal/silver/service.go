@@ -97,11 +97,13 @@ func (s *Service) Refine(_ context.Context, userID string, request RefineRequest
 		return RefineResult{}, apperror.New(503, "silver_model_unavailable", "The Node has no Silver refinement model.")
 	}
 	chunks := textChunks(request.Source.Text, maximumChunkBytes)
+	s.mu.Lock()
 	job, changed, err := s.db.AcceptSilverRefinementJob(userID, request.OperationID,
 		hex.EncodeToString(digest[:]), database.SilverRefinementSource{
 			SourceID: request.Source.ID, Name: request.Source.Name, SourceType: request.Source.SourceType,
 			ContentSHA256: request.Source.ContentSHA256, Plaintext: request.Source.Text, AcceptedAt: now,
 		}, ExtractionProcessorID, ExtractionVersion, modelID, "silver", len(chunks), now)
+	s.mu.Unlock()
 	if err != nil {
 		return RefineResult{}, mapDatabaseError(err)
 	}

@@ -130,6 +130,10 @@ func (s *Service) runJob(job database.SilverRefinementJob) {
 	if err != nil || current.State != "running" {
 		return
 	}
+	if job.ProcessorID != ExtractionProcessorID || job.ProcessorVersion != ExtractionVersion {
+		s.failJob(job, apperror.New(409, "silver_processor_changed", "The refinement processor no longer matches the accepted job."))
+		return
+	}
 	modelID, _ := s.ai.Capabilities()["modelId"].(string)
 	if modelID == "" || modelID != job.ModelID {
 		s.failJob(job, apperror.New(503, "silver_model_changed", "The refinement model no longer matches the accepted job."))
@@ -229,6 +233,15 @@ func (s *Service) runJob(job database.SilverRefinementJob) {
 	}
 	current, err = s.db.SilverRefinementJob(job.UserID, job.JobID)
 	if err != nil || current.State != "running" {
+		return
+	}
+	currentGeneration, err := s.db.IsCurrentSilverRefinementSource(job.UserID, job.SourceID, job.ContentSHA256)
+	if err != nil {
+		s.failJob(job, err)
+		return
+	}
+	if !currentGeneration {
+		s.failJob(job, apperror.New(409, "silver_generation_superseded", "A newer Bronze generation superseded this refinement job."))
 		return
 	}
 	dataset, err := s.currentDataset(job.UserID)

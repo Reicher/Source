@@ -73,7 +73,9 @@ Clients read lifecycle and progress from `GET /api/v1/silver/refinements` or
 `GET /api/v1/silver/refinements/{job}`, and control jobs with the `pause`,
 `resume`, `cancel`, and `retry` action endpoints. Only a fully successful job
 atomically commits the sole `silver-datasets` head with the Node identity as
-origin; staged batch output is never authoritative Silver. Clients synchronize
+origin; staged batch output is never authoritative Silver. Publication rejects
+jobs superseded by newer Bronze, and checkpoint reuse requires the accepted
+processor ID/version and model ID to match the running Node. Clients synchronize
 that head through the canonical change API and store only an offline cache.
 Client-side Bronze deletion is submitted to `POST /api/v1/silver/removals`;
 the Node persists the tombstone and commits the dependent Silver invalidation.

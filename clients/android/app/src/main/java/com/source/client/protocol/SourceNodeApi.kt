@@ -808,7 +808,8 @@ class SourceNodeApi {
             "The local AI model on the Node is unavailable."
         "inference_failed" -> "The AI runtime could not complete the response."
         "timeout" -> "The AI runtime timed out."
-        "silver_model_unavailable", "silver_model_changed", "silver_refinement_failed" ->
+        "silver_model_unavailable", "silver_model_changed", "silver_processor_changed",
+        "silver_generation_superseded", "silver_refinement_failed" ->
             "The Node could not refine knowledge from this source."
         "chat_rate_limited" -> "Too many AI requests. Wait a moment."
         "background_ai_rate_limited" -> "Too many background AI requests. Wait a moment."
