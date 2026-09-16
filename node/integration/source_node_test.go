@@ -87,7 +87,9 @@ func TestSourceAPIEndToEnd(t *testing.T) {
 	ai := &fakeAI{}
 	pairs := pairing.New(db, cfg)
 	logger := log.New(io.Discard, "", 0)
-	api := httptest.NewServer(httpapi.New(db, cfg, ai, pairs, logger))
+	apiHandler := httpapi.New(db, cfg, ai, pairs, logger)
+	defer apiHandler.Close()
+	api := httptest.NewServer(apiHandler)
 	defer api.Close()
 	adm := httptest.NewServer(admin.New(db, cfg, ai, pairs, logger))
 	defer adm.Close()
@@ -209,16 +211,31 @@ func TestSourceAPIEndToEnd(t *testing.T) {
 		},
 	}
 	refined := jsonRequest(t, http.MethodPost, api.URL+"/api/v1/silver/refinements", map[string]string{"Authorization": "Bearer " + credential}, refinementBody)
-	wantStatus(t, refined, 201)
+	wantStatus(t, refined, 202)
 	var refinedBody map[string]any
 	decode(t, refined.Body, &refinedBody)
-	if refinedBody["refined"] != true || refinedBody["bronzeAccepted"] != true {
+	if refinedBody["bronzeAccepted"] != true {
 		t.Fatalf("unexpected Silver refinement result: %#v", refinedBody)
+	}
+	jobID := refinedBody["job"].(map[string]any)["id"].(string)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		jobResponse := request(t, http.MethodGet, api.URL+"/api/v1/silver/refinements/"+jobID, map[string]string{"Authorization": "Bearer " + credential}, nil)
+		wantStatus(t, jobResponse, 200)
+		var job map[string]any
+		decode(t, jobResponse.Body, &job)
+		if job["state"] == "completed" {
+			break
+		}
+		if job["state"] == "failed" || time.Now().After(deadline) {
+			t.Fatalf("Silver job did not complete: %#v", job)
+		}
+		time.Sleep(time.Millisecond)
 	}
 	retriedRefinement := jsonRequest(t, http.MethodPost, api.URL+"/api/v1/silver/refinements", map[string]string{"Authorization": "Bearer " + credential}, refinementBody)
 	wantStatus(t, retriedRefinement, 200)
 	decode(t, retriedRefinement.Body, &refinedBody)
-	if refinedBody["refined"] != false {
+	if refinedBody["job"].(map[string]any)["id"] != jobID || refinedBody["job"].(map[string]any)["state"] != "completed" {
 		t.Fatalf("Silver retry created a competing revision: %#v", refinedBody)
 	}
 	silverChanges := jsonRequest(t, http.MethodPost, api.URL+"/api/v1/sync/changes", map[string]string{"Authorization": "Bearer " + credential}, map[string]any{

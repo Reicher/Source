@@ -164,6 +164,13 @@ WHERE user_id=? AND source_id=?`, now, userID, sourceID)
 	if err != nil {
 		return false, false, err
 	}
+	if changed {
+		if _, err = tx.Exec(`UPDATE refinement_jobs SET state='cancelled',pause_requested=0,
+plaintext='',updated_at=?,completed_at=? WHERE user_id=? AND source_id=? AND state IN ('queued','running','paused','failed')`,
+			now, now, userID, sourceID); err != nil {
+			return false, false, err
+		}
+	}
 	completedAt = nil
 	if !changed {
 		completedAt = &now
@@ -213,4 +220,13 @@ func (d *DB) SilverRefinementBytes(userID string) (int64, error) {
 	err := d.sql.QueryRow(`SELECT COALESCE(SUM(length(CAST(plaintext AS BLOB))),0)
 FROM silver_refinement_sources WHERE user_id=?`, userID).Scan(&bytes)
 	return bytes, err
+}
+
+func (d *DB) IsCurrentSilverRefinementSource(userID, sourceID, contentSHA256 string) (bool, error) {
+	var current int
+	err := d.sql.QueryRow(`SELECT EXISTS(
+SELECT 1 FROM silver_refinement_sources
+WHERE user_id=? AND source_id=? AND content_sha256=? AND removed_at IS NULL
+)`, userID, sourceID, contentSHA256).Scan(&current)
+	return current == 1, err
 }

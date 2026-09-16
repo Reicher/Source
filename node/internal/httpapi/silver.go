@@ -6,7 +6,24 @@ import (
 	"source.local/node/internal/apperror"
 	"source.local/node/internal/auth"
 	"source.local/node/internal/silver"
+	"source.local/node/internal/syncmodel"
 )
+
+func (h *Handler) silverRefinements(w http.ResponseWriter, r *http.Request, session *auth.Session) {
+	switch r.Method {
+	case http.MethodGet:
+		jobs, err := h.silver.Jobs(session.User.ID)
+		if err != nil {
+			h.fail(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs})
+	case http.MethodPost:
+		h.refineSilver(w, r, session)
+	default:
+		h.notFound(w, r)
+	}
+}
 
 func (h *Handler) refineSilver(w http.ResponseWriter, r *http.Request, session *auth.Session) {
 	if !h.background.Take(session.User.ID) {
@@ -27,11 +44,61 @@ func (h *Handler) refineSilver(w http.ResponseWriter, r *http.Request, session *
 		h.fail(w, err)
 		return
 	}
-	status := http.StatusOK
-	if result.Refined {
-		status = http.StatusCreated
+	status := http.StatusAccepted
+	if result.Job.State == "completed" {
+		status = http.StatusOK
 	}
 	writeJSON(w, status, result)
+}
+
+func (h *Handler) silverRefinementJob(w http.ResponseWriter, r *http.Request, session *auth.Session) {
+	if r.Method != http.MethodGet {
+		h.notFound(w, r)
+		return
+	}
+	jobID := r.PathValue("job")
+	if !syncmodel.ValidUUID(jobID) {
+		h.fail(w, apperror.New(400, "invalid_refinement_job", "The refinement job identifier is invalid."))
+		return
+	}
+	job, err := h.silver.Job(session.User.ID, jobID)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
+}
+
+func (h *Handler) controlSilverRefinementJob(w http.ResponseWriter, r *http.Request, session *auth.Session) {
+	if r.Method != http.MethodPost {
+		h.notFound(w, r)
+		return
+	}
+	jobID := r.PathValue("job")
+	if !syncmodel.ValidUUID(jobID) {
+		h.fail(w, apperror.New(400, "invalid_refinement_job", "The refinement job identifier is invalid."))
+		return
+	}
+	var job silver.Job
+	var err error
+	switch r.PathValue("action") {
+	case "pause":
+		job, err = h.silver.Pause(session.User.ID, jobID)
+	case "resume":
+		job, err = h.silver.Resume(session.User.ID, jobID)
+	case "cancel":
+		job, err = h.silver.Cancel(session.User.ID, jobID)
+	case "retry":
+		job, err = h.silver.Retry(session.User.ID, jobID)
+	default:
+		h.notFound(w, r)
+		return
+	}
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
 }
 
 func (h *Handler) removeSilver(w http.ResponseWriter, r *http.Request, session *auth.Session) {

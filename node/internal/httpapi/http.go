@@ -63,7 +63,7 @@ func (w *statusWriter) Flush() {
 	}
 }
 
-func New(db *database.DB, cfg config.Config, ai localai.Backend, p *pairing.Service, logger *log.Logger) http.Handler {
+func New(db *database.DB, cfg config.Config, ai localai.Backend, p *pairing.Service, logger *log.Logger) *Handler {
 	canonicalStorage := storage.New(db, cfg.StorageRoot, cfg.SnapshotRetention, cfg.Now)
 	h := &Handler{
 		db: db, cfg: cfg, ai: ai, pairing: p,
@@ -78,6 +78,8 @@ func New(db *database.DB, cfg config.Config, ai localai.Backend, p *pairing.Serv
 	h.registerRoutes()
 	return h
 }
+
+func (h *Handler) Close() { h.silver.Close() }
 
 func (h *Handler) registerRoutes() {
 	h.mux.HandleFunc("/healthz", h.method(http.MethodGet, h.health))
@@ -96,7 +98,9 @@ func (h *Handler) registerRoutes() {
 	h.mux.HandleFunc("/api/v1/sync/changes", h.method(http.MethodPost, h.requireClient(h.syncChanges)))
 	h.mux.HandleFunc("/api/v1/sync/ack", h.method(http.MethodPost, h.requireClient(h.ackSyncCursor)))
 	h.mux.HandleFunc("/api/v1/sync/revisions/{revision}/payload", h.method(http.MethodGet, h.requireClient(h.syncPayload)))
-	h.mux.HandleFunc("/api/v1/silver/refinements", h.method(http.MethodPost, h.requireClient(h.refineSilver)))
+	h.mux.HandleFunc("/api/v1/silver/refinements", h.requireClient(h.silverRefinements))
+	h.mux.HandleFunc("/api/v1/silver/refinements/{job}", h.requireClient(h.silverRefinementJob))
+	h.mux.HandleFunc("/api/v1/silver/refinements/{job}/{action}", h.requireClient(h.controlSilverRefinementJob))
 	h.mux.HandleFunc("/api/v1/silver/removals", h.method(http.MethodPost, h.requireClient(h.removeSilver)))
 	h.mux.HandleFunc("/", h.unmatched)
 }
