@@ -410,6 +410,14 @@ cache: they are never uploaded to the canonical Silver namespace, and the first
 Node-produced `silver-datasets` head replaces them. Refinement working state and
 retry checkpoints live only on the Node.
 
+Every profile has one stable `selfEntityId` in its Node-owned user metadata.
+The corresponding Entity is seeded into Silver from the profile identity,
+with ordinary `name` and `entity-type = person` Claims supported by profile
+Evidence and a `profile-identity` Observation. Self is metadata, not an
+`is-self` Claim. A verified `authoredBySelf` source context allows singular
+first-person mentions to resolve to this Entity; without that context they
+remain unresolved.
+
 The Node `source.node.silver-extraction` processor version `3` emits one
 `attribute-candidate` or `relationship-candidate` Observation for each valid
 finding. It retains the compatible candidate payload schema:
@@ -422,6 +430,10 @@ finding. It retains the compatible candidate payload schema:
   "evidenceExcerpt": "Robin created Source"
 }
 ```
+
+Candidates from verified profile-authored sources additionally carry
+`"authoredBySelf": true`. The flag records source context and is not inferred
+from pronouns.
 
 Silver extraction uses low-randomness sampling, enables a bounded amount of the
 model's internal reasoning, and constrains visible output to the candidate JSON
@@ -484,6 +496,14 @@ independently of the Client session.
 
 Entity resolution remains deliberately separate: candidate Observations do not
 create global Entities by themselves. The Node owns the conservative resolution
-step, its opaque Entity UUIDs, and its evidence-backed Claims. Candidate excerpts may
-later be promoted into fragment-level Evidence while remaining optional display
-metadata. Existing Bronze data remains canonical throughout processing.
+step, its opaque Entity UUIDs, and its evidence-backed Claims. When a new
+generation arrives, the resolver also revisits still-unresolved candidates from
+the current generation of other sources. Unique typed person-name extensions
+such as `Martin` and `Martin Broström` can enrich the same Entity, while
+ambiguous matches remain unresolved. Equivalent Claims supported by multiple
+sources gain an additional active Claim carrying the combined Observation set;
+the original Claims and all provenance remain intact. This is an incremental,
+local resolver pass and does not send the accumulated Silver dataset back
+through the model. Candidate excerpts may later be promoted into fragment-level
+Evidence while remaining optional display metadata. Existing Bronze data
+remains canonical throughout processing.

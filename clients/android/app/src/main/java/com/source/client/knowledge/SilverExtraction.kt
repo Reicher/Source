@@ -30,6 +30,7 @@ data class BronzeTextSource(
     val sourceType: String,
     val contentSha256: String,
     val text: String,
+    val authoredBySelf: Boolean = false,
 )
 
 data class ExtractedSilver(

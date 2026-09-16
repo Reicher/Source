@@ -145,7 +145,7 @@ func TestTextChunksUseBoundedOverlap(t *testing.T) {
 
 func TestExtractionStopsAsSoonAsCompleteJSONArrives(t *testing.T) {
 	ai := &trailingWhitespaceAI{}
-	output, err := extractBatch(context.Background(), ai, "No facts here.")
+	output, err := extractBatch(context.Background(), ai, "No facts here.", false)
 	if err != nil {
 		t.Fatal(err)
 	}

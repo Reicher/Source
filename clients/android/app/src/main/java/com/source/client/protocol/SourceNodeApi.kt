@@ -498,6 +498,7 @@ class SourceNodeApi {
                     put("sourceType", source.sourceType)
                     put("contentSha256", source.contentSha256)
                     put("text", source.text)
+                    put("authoredBySelf", source.authoredBySelf)
                 })
             },
             trusted.tlsCaCertificate,

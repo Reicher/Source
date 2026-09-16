@@ -178,7 +178,7 @@ func (s *Service) runJob(job database.SilverRefinementJob) {
 		}
 		var output string
 		for {
-			output, err = extractBatch(jobCtx, s.ai, chunk)
+			output, err = extractBatch(jobCtx, s.ai, chunk, job.AuthoredBySelf)
 			if !errors.Is(err, localai.ErrBackgroundPreempted) {
 				break
 			}
@@ -210,7 +210,7 @@ func (s *Service) runJob(job database.SilverRefinementJob) {
 	now := s.now().UnixMilli()
 	generation, err := generationFromBatchOutputs(Source{
 		ID: job.SourceID, Name: job.SourceName, SourceType: job.SourceType,
-		ContentSHA256: job.ContentSHA256, Text: job.Plaintext,
+		ContentSHA256: job.ContentSHA256, Text: job.Plaintext, AuthoredBySelf: job.AuthoredBySelf,
 	}, job.ModelID, now, chunks, outputs)
 	if err != nil {
 		s.failJob(job, err)
@@ -228,7 +228,7 @@ func (s *Service) runJob(job database.SilverRefinementJob) {
 	if err != nil || current.State != "running" {
 		return
 	}
-	currentGeneration, err := s.db.IsCurrentSilverRefinementSource(job.UserID, job.SourceID, job.ContentSHA256)
+	currentGeneration, err := s.db.IsCurrentSilverRefinementSource(job.UserID, job.SourceID, job.ContentSHA256, job.AuthoredBySelf)
 	if err != nil {
 		s.failJob(job, err)
 		return
@@ -242,15 +242,25 @@ func (s *Service) runJob(job database.SilverRefinementJob) {
 		s.failJob(job, err)
 		return
 	}
-	if generationComplete(dataset, job.SourceID, job.ContentSHA256, job.ModelID) {
+	if generationComplete(dataset, job.SourceID, job.ContentSHA256, job.ModelID, job.AuthoredBySelf) {
 		_ = s.db.MarkCurrentSilverSourceRefined(job.UserID, job.SourceID, job.ContentSHA256,
-			job.ProcessorVersion, job.ModelID, now)
+			job.ProcessorVersion, job.ModelID, job.AuthoredBySelf, now)
 		_ = s.db.CompleteSilverRefinementJob(job.UserID, job.JobID, "", now)
 		return
 	}
-	dataset, err = replaceGeneration(dataset, Source{
+	user, err := s.db.FindUser(job.UserID)
+	if err != nil || user == nil {
+		if err == nil {
+			err = errors.New("Silver profile is unavailable")
+		}
+		s.failJob(job, err)
+		return
+	}
+	dataset, err = replaceGeneration(dataset, ProfileContext{
+		UserID: user.ID, DisplayName: user.DisplayName, SelfEntityID: user.SelfEntityID,
+	}, Source{
 		ID: job.SourceID, Name: job.SourceName, SourceType: job.SourceType,
-		ContentSHA256: job.ContentSHA256, Text: job.Plaintext,
+		ContentSHA256: job.ContentSHA256, Text: job.Plaintext, AuthoredBySelf: job.AuthoredBySelf,
 	}, generation, now)
 	if err != nil {
 		s.failJob(job, err)
@@ -279,7 +289,7 @@ func (s *Service) runJob(job database.SilverRefinementJob) {
 		return
 	}
 	if err = s.db.MarkCurrentSilverSourceRefined(job.UserID, job.SourceID, job.ContentSHA256,
-		job.ProcessorVersion, job.ModelID, now); err != nil {
+		job.ProcessorVersion, job.ModelID, job.AuthoredBySelf, now); err != nil {
 		s.failJob(job, err)
 		return
 	}

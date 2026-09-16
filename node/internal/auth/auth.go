@@ -21,8 +21,9 @@ type Service struct {
 type Session struct {
 	ClientID string
 	User     struct {
-		ID          string `json:"id"`
-		DisplayName string `json:"displayName"`
+		ID           string `json:"id"`
+		DisplayName  string `json:"displayName"`
+		SelfEntityID string `json:"selfEntityId"`
 	} `json:"user"`
 }
 
@@ -44,6 +45,7 @@ func (s *Service) Authenticate(credential string) (*Session, error) {
 	session := &Session{ClientID: client.ID}
 	session.User.ID = client.UserID
 	session.User.DisplayName = client.UserDisplayName
+	session.User.SelfEntityID = client.UserSelfEntityID
 	return session, nil
 }
 

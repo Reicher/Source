@@ -243,6 +243,14 @@ CREATE INDEX refinement_jobs_generation_idx ON refinement_jobs(
     user_id,source_id,content_sha256,processor_id,processor_version,model_id,output_layer,sequence
 );`,
 	},
+	{
+		version: 9,
+		up: `
+ALTER TABLE users ADD COLUMN self_entity_id TEXT;
+CREATE UNIQUE INDEX users_self_entity_idx ON users(self_entity_id) WHERE self_entity_id IS NOT NULL;
+ALTER TABLE silver_refinement_sources ADD COLUMN authored_by_self INTEGER NOT NULL DEFAULT 0 CHECK(authored_by_self IN (0,1));
+ALTER TABLE refinement_jobs ADD COLUMN authored_by_self INTEGER NOT NULL DEFAULT 0 CHECK(authored_by_self IN (0,1));`,
+	},
 }
 
 const schemaVersionTable = `

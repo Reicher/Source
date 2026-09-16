@@ -158,8 +158,14 @@ func TestNodeRefinementIsAuthoritativeAndIdempotentAcrossReconnect(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(dataset.Evidence) != 1 || len(dataset.Observations) != 2 || len(dataset.Claims) != 3 ||
-		dataset.Observations[0].Producer.ProcessorID != ExtractionProcessorID {
+	if !hasEntity(dataset, user.SelfEntityID) || !hasScalarClaim(dataset, user.SelfEntityID, "name", "Robin") {
+		t.Fatalf("profile Self entity is not anchored in Silver: user=%#v dataset=%#v", user, dataset)
+	}
+	hasExtraction := false
+	for _, observation := range dataset.Observations {
+		hasExtraction = hasExtraction || observation.Producer.ProcessorID == ExtractionProcessorID
+	}
+	if len(dataset.Evidence) != 2 || len(dataset.Observations) != 3 || len(dataset.Entities) != 2 || len(dataset.Claims) != 5 || !hasExtraction {
 		t.Fatalf("unexpected authoritative dataset: %#v", dataset)
 	}
 
@@ -213,7 +219,7 @@ func TestNodeRefinementIsAuthoritativeAndIdempotentAcrossReconnect(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(dataset.Evidence) != 0 || len(dataset.Observations) != 0 || len(dataset.Claims) != 0 ||
+	if len(dataset.Evidence) != 1 || len(dataset.Observations) != 1 || len(dataset.Entities) != 1 || len(dataset.Claims) != 2 ||
 		dataset.RemovedSources["source-1"] == 0 {
 		t.Fatalf("source remained in authoritative Silver: %#v", dataset)
 	}

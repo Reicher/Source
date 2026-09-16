@@ -230,7 +230,7 @@ func (s *Service) Complete(body CompleteRequest) (map[string]any, error) {
 	id := inv.id
 	s.active = nil
 	s.last = map[string]any{"id": id, "state": "paired", "userId": user.ID, "clientId": persisted.ID}
-	result := map[string]any{"protocol": 1, "nodeId": mustNodeID(s.db), "user": map[string]any{"id": user.ID, "displayName": user.DisplayName}, "client": map[string]any{"id": persisted.ID, "displayName": persisted.ClientDisplayName}, "clientCredential": credential}
+	result := map[string]any{"protocol": 1, "nodeId": mustNodeID(s.db), "user": map[string]any{"id": user.ID, "displayName": user.DisplayName, "selfEntityId": user.SelfEntityID}, "client": map[string]any{"id": persisted.ID, "displayName": persisted.ClientDisplayName}, "clientCredential": credential}
 	if inv.kind == "recover" && user.RecoveryEnvelope != nil {
 		result["recoveryEnvelope"] = *user.RecoveryEnvelope
 	}

@@ -9,6 +9,7 @@ type SilverRefinementJob struct {
 	UserID, JobID, RequestDigest         string
 	SourceID, SourceName, SourceType     string
 	ContentSHA256, Plaintext             string
+	AuthoredBySelf                       bool
 	ProcessorID, ProcessorVersion        string
 	ModelID, OutputLayer, State          string
 	Sequence                             int64
@@ -26,14 +27,14 @@ type SilverRefinementCheckpoint struct {
 }
 
 const silverJobColumns = `sequence,user_id,job_id,request_digest,source_id,source_name,source_type,
-content_sha256,plaintext,processor_id,processor_version,model_id,output_layer,state,completed_batches,total_batches,
+content_sha256,plaintext,authored_by_self,processor_id,processor_version,model_id,output_layer,state,completed_batches,total_batches,
 accepted_at,started_at,updated_at,completed_at,error_code,error_message,receipt_json`
 
 func scanSilverJob(scanner interface{ Scan(...any) error }) (SilverRefinementJob, error) {
 	var job SilverRefinementJob
 	err := scanner.Scan(&job.Sequence, &job.UserID, &job.JobID, &job.RequestDigest,
 		&job.SourceID, &job.SourceName, &job.SourceType, &job.ContentSHA256, &job.Plaintext,
-		&job.ProcessorID, &job.ProcessorVersion, &job.ModelID, &job.OutputLayer, &job.State,
+		&job.AuthoredBySelf, &job.ProcessorID, &job.ProcessorVersion, &job.ModelID, &job.OutputLayer, &job.State,
 		&job.CompletedBatches, &job.TotalBatches, &job.AcceptedAt, &job.StartedAt,
 		&job.UpdatedAt, &job.CompletedAt, &job.ErrorCode, &job.ErrorMessage, &job.ReceiptJSON)
 	return job, err
@@ -82,13 +83,14 @@ FROM silver_refinement_operations WHERE user_id=? AND operation_id=?`, userID, o
 	// Operations accepted before the durable job schema may be replayed after a
 	// newer Bronze generation or a removal. Attach a terminal historical job,
 	// but never let that replay roll the current accepted source backward.
-	if priorOperation && findErr == nil && (stored.ContentSHA256 != source.ContentSHA256 || stored.RemovedAt != nil) {
+	if priorOperation && findErr == nil && (stored.ContentSHA256 != source.ContentSHA256 ||
+		stored.AuthoredBySelf != source.AuthoredBySelf || stored.RemovedAt != nil) {
 		_, err = tx.Exec(`INSERT INTO refinement_jobs(
-user_id,job_id,request_digest,source_id,source_name,source_type,content_sha256,plaintext,
+user_id,job_id,request_digest,source_id,source_name,source_type,content_sha256,plaintext,authored_by_self,
 processor_id,processor_version,model_id,output_layer,state,total_batches,accepted_at,updated_at,completed_at)
-VALUES(?,?,?,?,?,?,?,'',?,?,?,?,'cancelled',?,?,?,?)`, userID, operationID, requestDigest,
+VALUES(?,?,?,?,?,?,?,'',?,?,?, ?,?,'cancelled',?,?,?,?)`, userID, operationID, requestDigest,
 			source.SourceID, source.Name, source.SourceType, source.ContentSHA256,
-			processorID, processorVersion, modelID, outputLayer, totalBatches, now, now, now)
+			source.AuthoredBySelf, processorID, processorVersion, modelID, outputLayer, totalBatches, now, now, now)
 		if err != nil {
 			return SilverRefinementJob{}, false, err
 		}
@@ -102,21 +104,29 @@ WHERE user_id=? AND operation_id=?`, operationID, userID, operationID); err != n
 		}
 		return job, false, tx.Commit()
 	}
-	changed := errors.Is(findErr, sql.ErrNoRows) || stored.ContentSHA256 != source.ContentSHA256 || stored.RemovedAt != nil
+	changed := errors.Is(findErr, sql.ErrNoRows) || stored.ContentSHA256 != source.ContentSHA256 ||
+		stored.AuthoredBySelf != source.AuthoredBySelf || stored.RemovedAt != nil
+	if findErr == nil && stored.ContentSHA256 == source.ContentSHA256 && stored.AuthoredBySelf != source.AuthoredBySelf {
+		if _, err = tx.Exec(`DELETE FROM refinement_checkpoints
+WHERE user_id=? AND source_id=? AND content_sha256=? AND processor_id=? AND processor_version=? AND model_id=? AND output_layer=?`,
+			userID, source.SourceID, source.ContentSHA256, processorID, processorVersion, modelID, outputLayer); err != nil {
+			return SilverRefinementJob{}, false, err
+		}
+	}
 	if errors.Is(findErr, sql.ErrNoRows) {
 		_, err = tx.Exec(`INSERT INTO silver_refinement_sources(
-user_id,source_id,source_name,source_type,content_sha256,plaintext,accepted_at)
-VALUES(?,?,?,?,?,?,?)`, userID, source.SourceID, source.Name, source.SourceType,
-			source.ContentSHA256, source.Plaintext, source.AcceptedAt)
+user_id,source_id,source_name,source_type,content_sha256,plaintext,authored_by_self,accepted_at)
+VALUES(?,?,?,?,?,?,?,?)`, userID, source.SourceID, source.Name, source.SourceType,
+			source.ContentSHA256, source.Plaintext, source.AuthoredBySelf, source.AcceptedAt)
 	} else if changed {
 		_, err = tx.Exec(`UPDATE silver_refinement_sources SET
-source_name=?,source_type=?,content_sha256=?,plaintext=?,accepted_at=?,
+source_name=?,source_type=?,content_sha256=?,plaintext=?,authored_by_self=?,accepted_at=?,
 refined_processor_version=NULL,refined_model_id=NULL,refined_at=NULL,removed_at=NULL
 WHERE user_id=? AND source_id=?`, source.Name, source.SourceType, source.ContentSHA256,
-			source.Plaintext, source.AcceptedAt, userID, source.SourceID)
+			source.Plaintext, source.AuthoredBySelf, source.AcceptedAt, userID, source.SourceID)
 	} else {
-		_, err = tx.Exec(`UPDATE silver_refinement_sources SET source_name=?,source_type=?
-WHERE user_id=? AND source_id=?`, source.Name, source.SourceType, userID, source.SourceID)
+		_, err = tx.Exec(`UPDATE silver_refinement_sources SET source_name=?,source_type=?,authored_by_self=?
+WHERE user_id=? AND source_id=?`, source.Name, source.SourceType, source.AuthoredBySelf, userID, source.SourceID)
 	}
 	if err != nil {
 		return SilverRefinementJob{}, false, err
@@ -130,18 +140,18 @@ WHERE user_id=? AND source_id=? AND operation_kind='removal' AND completed_at IS
 	}
 
 	job, findErr := findReusableSilverRefinementJobTx(tx, userID, source.SourceID,
-		source.ContentSHA256, processorID, processorVersion, modelID, outputLayer, !changed)
+		source.ContentSHA256, source.AuthoredBySelf, processorID, processorVersion, modelID, outputLayer, !changed)
 	if findErr != nil && !errors.Is(findErr, sql.ErrNoRows) {
 		return SilverRefinementJob{}, false, findErr
 	}
 	if errors.Is(findErr, sql.ErrNoRows) {
 		jobID := operationID
 		_, err = tx.Exec(`INSERT INTO refinement_jobs(
-user_id,job_id,request_digest,source_id,source_name,source_type,content_sha256,plaintext,
+user_id,job_id,request_digest,source_id,source_name,source_type,content_sha256,plaintext,authored_by_self,
 processor_id,processor_version,model_id,output_layer,state,total_batches,accepted_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)`, userID, jobID, requestDigest, source.SourceID,
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)`, userID, jobID, requestDigest, source.SourceID,
 			source.Name, source.SourceType, source.ContentSHA256, source.Plaintext,
-			processorID, processorVersion, modelID, outputLayer, totalBatches, now, now)
+			source.AuthoredBySelf, processorID, processorVersion, modelID, outputLayer, totalBatches, now, now)
 		if err != nil {
 			return SilverRefinementJob{}, false, err
 		}
@@ -176,15 +186,15 @@ VALUES(?,?,?,?,'refinement',?)`, userID, operationID, requestDigest, source.Sour
 	return job, changed, tx.Commit()
 }
 
-func findReusableSilverRefinementJobTx(tx *sql.Tx, userID, sourceID, contentSHA, processorID, processorVersion, modelID, outputLayer string, includeCompleted bool) (SilverRefinementJob, error) {
+func findReusableSilverRefinementJobTx(tx *sql.Tx, userID, sourceID, contentSHA string, authoredBySelf bool, processorID, processorVersion, modelID, outputLayer string, includeCompleted bool) (SilverRefinementJob, error) {
 	completed := 0
 	if includeCompleted {
 		completed = 1
 	}
 	return scanSilverJob(tx.QueryRow(`SELECT `+silverJobColumns+` FROM refinement_jobs
-WHERE user_id=? AND source_id=? AND content_sha256=? AND processor_id=? AND processor_version=? AND model_id=? AND output_layer=?
+WHERE user_id=? AND source_id=? AND content_sha256=? AND authored_by_self=? AND processor_id=? AND processor_version=? AND model_id=? AND output_layer=?
 AND state<>'cancelled' AND (state<>'completed' OR ?=1) ORDER BY sequence LIMIT 1`,
-		userID, sourceID, contentSHA, processorID, processorVersion, modelID, outputLayer, completed))
+		userID, sourceID, contentSHA, authoredBySelf, processorID, processorVersion, modelID, outputLayer, completed))
 }
 
 func findSilverRefinementJobTx(tx *sql.Tx, userID, jobID string) (SilverRefinementJob, error) {
@@ -356,11 +366,11 @@ AND processor_id=? AND processor_version=? AND model_id=? AND output_layer=? ORD
 }
 
 func (d *DB) MarkCurrentSilverSourceRefined(
-	userID, sourceID, contentSHA256, processorVersion, modelID string, now int64,
+	userID, sourceID, contentSHA256, processorVersion, modelID string, authoredBySelf bool, now int64,
 ) error {
 	_, err := d.sql.Exec(`UPDATE silver_refinement_sources SET
 refined_processor_version=?,refined_model_id=?,refined_at=?
-WHERE user_id=? AND source_id=? AND content_sha256=? AND removed_at IS NULL`,
-		processorVersion, modelID, now, userID, sourceID, contentSHA256)
+WHERE user_id=? AND source_id=? AND content_sha256=? AND authored_by_self=? AND removed_at IS NULL`,
+		processorVersion, modelID, now, userID, sourceID, contentSHA256, authoredBySelf)
 	return err
 }
