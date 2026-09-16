@@ -22,7 +22,7 @@ const (
 	DatasetFormatVersion   = 1
 	Collection             = "silver-datasets"
 	ExtractionProcessorID  = "source.node.silver-extraction"
-	ExtractionVersion      = "1"
+	ExtractionVersion      = "2"
 	ResolutionProcessorID  = "source.node.silver-resolution"
 	ResolutionVersion      = "1"
 	ExtractionCompleteKind = "knowledge-extraction-complete"

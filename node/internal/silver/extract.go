@@ -15,9 +15,10 @@ import (
 )
 
 const (
-	maximumChunkBytes       = 2400
+	maximumChunkBytes       = 6000
+	chunkOverlapBytes       = 600
 	maximumRefinementChunks = 8
-	maximumRefinementBytes  = maximumChunkBytes * maximumRefinementChunks
+	maximumRefinementBytes  = 19_200
 )
 
 type extractedGeneration struct {
@@ -34,7 +35,7 @@ type candidateClaim struct {
 }
 
 func extract(ctx context.Context, ai localai.Backend, source Source, modelID string, now int64) (extractedGeneration, error) {
-	chunks := textChunks(source.Text, maximumChunkBytes)
+	chunks := textChunks(source.Text, maximumChunkBytes, chunkOverlapBytes)
 	if len(chunks) == 0 {
 		return extractedGeneration{}, errors.New("Bronze text is empty")
 	}
@@ -51,7 +52,12 @@ func extract(ctx context.Context, ai localai.Backend, source Source, modelID str
 
 func extractBatch(ctx context.Context, ai localai.Backend, chunk string) (string, error) {
 	var output strings.Builder
-	err := ai.StreamChat(ctx, []localai.Message{{Role: "user", Content: extractionPrompt(chunk)}}, func(event localai.Event) error {
+	err := ai.StreamChat(ctx, []localai.Message{{Role: "user", Content: extractionPrompt(chunk)}}, localai.ChatOptions{
+		Temperature: 0.1,
+		TopP:        0.8,
+		Reasoning:   true,
+		JSONSchema:  extractionJSONSchema(),
+	}, func(event localai.Event) error {
 		if event.Type == "delta" {
 			output.WriteString(event.Text)
 		}
@@ -207,7 +213,7 @@ func scalar(value any) any {
 	return nil
 }
 
-func textChunks(text string, maximum int) []string {
+func textChunks(text string, maximum, overlap int) []string {
 	text = strings.TrimSpace(text)
 	var chunks []string
 	for len(text) > 0 {
@@ -235,18 +241,95 @@ func textChunks(text string, maximum int) []string {
 		if chunk != "" {
 			chunks = append(chunks, chunk)
 		}
-		text = strings.TrimSpace(text[preferred:])
+		remainder := strings.TrimSpace(text[preferred:])
+		if remainder == "" {
+			break
+		}
+		context := trailingContext(chunk, overlap)
+		if context == "" {
+			text = remainder
+		} else {
+			text = context + "\n" + remainder
+		}
 	}
 	return chunks
 }
 
+func trailingContext(text string, maximum int) string {
+	if maximum <= 0 {
+		return ""
+	}
+	if len([]byte(text)) <= maximum {
+		return text
+	}
+	start := len(text) - maximum
+	for start < len(text) && !utf8.RuneStart(text[start]) {
+		start++
+	}
+	for index, character := range text[start:] {
+		if unicode.IsSpace(character) {
+			return strings.TrimSpace(text[start+index:])
+		}
+	}
+	return strings.TrimSpace(text[start:])
+}
+
 func extractionPrompt(chunk string) string {
-	return `Extract entity mentions and factual relationship or attribute candidates from the Bronze text below. Return compact JSON only, with this shape:
+	return `Extract all explicitly stated factual information from the Bronze text as entity attributes or relationships. Return compact JSON only, with this shape:
 {"entities":[{"key":"e1","name":"Robin","type":"person"},{"key":"e2","name":"Source","type":"project"}],"claims":[{"subjectKey":"e1","predicate":"created","objectKey":"e2","confidence":0.95,"evidenceExcerpt":"Robin created Source"},{"subjectKey":"e2","predicate":"status","value":"active","confidence":0.8,"evidenceExcerpt":"Source is active"}]}
-Every claim must have exactly one objectKey or scalar value. Do not infer unstated facts. Types and predicates should be short lowercase labels. If nothing useful exists, return empty arrays.
+Resolve references such as pronouns and possessives when their referent is clear from the provided text. If a reference is ambiguous, do not guess.
+Every claim must have exactly one objectKey or scalar value. Do not infer facts that are not stated in or clearly entailed by the text. Types and predicates should be short lowercase labels. If nothing useful exists, return empty arrays.
 
 Bronze text:
 ` + chunk
+}
+
+func extractionJSONSchema() map[string]any {
+	entity := map[string]any{
+		"type": "object", "additionalProperties": false,
+		"required": []string{"key", "name", "type"},
+		"properties": map[string]any{
+			"key":  map[string]any{"type": "string", "minLength": 1},
+			"name": map[string]any{"type": "string", "minLength": 1},
+			"type": map[string]any{"type": "string", "minLength": 1},
+		},
+	}
+	sharedClaimProperties := map[string]any{
+		"subjectKey":      map[string]any{"type": "string", "minLength": 1},
+		"predicate":       map[string]any{"type": "string", "minLength": 1},
+		"confidence":      map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+		"evidenceExcerpt": map[string]any{"type": "string"},
+	}
+	claimProperties := func(objectProperty string, objectSchema map[string]any) map[string]any {
+		properties := make(map[string]any, len(sharedClaimProperties)+1)
+		for key, value := range sharedClaimProperties {
+			properties[key] = value
+		}
+		properties[objectProperty] = objectSchema
+		return properties
+	}
+	claim := map[string]any{
+		"oneOf": []any{
+			map[string]any{
+				"type": "object", "additionalProperties": false,
+				"required":   []string{"subjectKey", "predicate", "objectKey", "confidence", "evidenceExcerpt"},
+				"properties": claimProperties("objectKey", map[string]any{"type": "string", "minLength": 1}),
+			},
+			map[string]any{
+				"type": "object", "additionalProperties": false,
+				"required":   []string{"subjectKey", "predicate", "value", "confidence", "evidenceExcerpt"},
+				"properties": claimProperties("value", map[string]any{"type": []string{"string", "number", "boolean"}}),
+			},
+		},
+	}
+	return map[string]any{
+		"type": "object", "additionalProperties": false,
+		"required": []string{"entities", "claims"},
+		"properties": map[string]any{
+			"entities": map[string]any{"type": "array", "items": entity},
+			"claims":   map[string]any{"type": "array", "items": claim},
+		},
+	}
 }
 
 func cleanInline(value string, maximum int) string {

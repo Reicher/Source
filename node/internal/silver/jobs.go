@@ -139,7 +139,7 @@ func (s *Service) runJob(job database.SilverRefinementJob) {
 		s.failJob(job, apperror.New(503, "silver_model_changed", "The refinement model no longer matches the accepted job."))
 		return
 	}
-	chunks := textChunks(job.Plaintext, maximumChunkBytes)
+	chunks := textChunks(job.Plaintext, maximumChunkBytes, chunkOverlapBytes)
 	if len(chunks) != job.TotalBatches {
 		s.failJob(job, errors.New("immutable refinement input no longer matches its batch plan"))
 		return
