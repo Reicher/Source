@@ -256,9 +256,7 @@ to forcing a false entity match.
 ## Initial entity resolution
 
 The initial Node resolver is intentionally conservative. It consumes candidate
-Observations and the current authoritative Silver Entity and Claim state. The
-current Android prototype expresses the same policy through the
-`SilverObservationResolver` interface while ownership moves to Node.
+Observations and the current authoritative Silver Entity and Claim state.
 
 - A mention reuses an Entity only when its normalized name and type match one
   existing Entity uniquely.
@@ -404,20 +402,18 @@ Gothenburg`.
 - Gold may show the conflict or choose a view-specific interpretation. Silver
   retains both claims and their provenance.
 
-## Current implementation transition
+## Implementation and transition
 
-The Android prototype currently persists Client-produced Evidence, Observation,
-Entity, and Claim records. That is transitional behavior, not the ownership
-model for new work. The Node-authoritative refinement work must define how those
-local snapshots are migrated, invalidated, or rebuilt from Bronze before they
-can participate in synchronization. Until then, the existing Android behavior
-must not be treated as permission for another Client Silver producer. Bronze,
-Library, and conversation data remain separate from this transition.
+Earlier Android builds persisted Client-produced Evidence, Observation, Entity,
+and Claim records. Those snapshots remain readable offline only as a migration
+cache: they are never uploaded to the canonical Silver namespace, and the first
+Node-produced `silver-datasets` head replaces them. Old Android refinement
+checkpoints are discarded while the user's paused/refinement preference is
+preserved.
 
-For compatibility with those existing snapshots, the Android
-`source.android.silver-extraction` processor version `3` emits one
+The Node `source.node.silver-extraction` processor version `1` emits one
 `attribute-candidate` or `relationship-candidate` Observation for each valid
-local finding. Its transitional payload schema is:
+finding. It retains the compatible candidate payload schema:
 
 ```json
 {
@@ -436,22 +432,26 @@ Bronze text before retaining them. Every candidate references Evidence for the
 exact Bronze item and content hash; fragment selectors can be added without
 changing the record model.
 
-In the current prototype, each completed source also receives a
+Each completed source also receives a
 `knowledge-extraction-complete` Observation with an empty payload. It is a
 durable, deterministic processing receipt, including when the processor found
 no candidates, and prevents an unchanged source and producer version from being
 processed repeatedly.
 
-The current Android implementation assembles and validates one complete
-extraction result in memory before atomically replacing the stored snapshot.
-Interrupted batch work remains in a separate checkpoint store and is never
-exposed as Silver. These facts describe the prototype being replaced; they are
-not additional Silver record types or an exception to Node ownership.
+The Client submits plaintext text Bronze to its authenticated authoritative
+Node. The Node durably accepts and hash-verifies that Bronze before invoking the
+refinement model, then atomically commits the complete `source-silver` dataset
+as a Node-originated canonical revision. A lost response or disconnect may
+repeat the submission, but operation identity plus source/content identity make
+both Bronze acceptance and Silver generation idempotent.
+
+One refinement request is bounded to eight deterministic 2,400-byte chunks
+(19,200 UTF-8 bytes total). The Node rejects larger requests before accepting
+Bronze or invoking the model, preventing a single HTTP request from expanding
+into hundreds of sequential model calls without a durable checkpoint.
 
 Entity resolution remains deliberately separate: candidate Observations do not
-create global Entities by themselves. In the current Android prototype, a
-resolution step may create opaque Entity UUIDs and evidence-backed Claims in
-the transitional local snapshot. The Node-authoritative implementation will
-own that step and its resulting persistent records. Candidate excerpts may
+create global Entities by themselves. The Node owns the conservative resolution
+step, its opaque Entity UUIDs, and its evidence-backed Claims. Candidate excerpts may
 later be promoted into fragment-level Evidence while remaining optional display
 metadata. Existing Bronze data remains canonical throughout processing.

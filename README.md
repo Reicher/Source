@@ -71,7 +71,8 @@ semantics are specified in
 Client implement its canonical revision, journal, cursor, conflict, and receipt
 model for conversations and Library manifests. Whole snapshots and the
 feature-specific Library blob transport remain compatibility paths during the
-incremental migration; persistent Silver migration is owned by #41.
+incremental migration. Persistent Silver is produced by the authoritative Node
+and synchronized to Android as an offline cache.
 
 ## Development
 

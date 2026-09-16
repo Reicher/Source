@@ -447,10 +447,10 @@ The current prototype predates this model:
 - snapshot selection can use `modifiedAtMillis`;
 - random upload IDs and snapshot creation time act as history metadata;
 - Library has a feature-specific item path and tombstones; and
-- Android currently persists transitional Client-produced Silver.
+- earlier Android builds persisted transitional Client-produced Silver.
 
-Those behaviors remain supported until migration work replaces them, but they
-are not canonical semantics. In particular, `modifiedAtMillis` MUST NOT be
+Those legacy behaviors have compatibility reads where stated, but they are not
+canonical semantics. In particular, `modifiedAtMillis` MUST NOT be
 carried forward as a conflict winner, a snapshot upload MUST NOT be treated as
 a canonical commit receipt, and Client-produced Silver MUST NOT be admitted to
 the authoritative Silver history.
@@ -459,10 +459,13 @@ The versioned wire schema, durable Client journals and scoped cursors, Node
 storage tables, and compatibility reads now provide incremental migration for
 conversation and Library-manifest data. Existing raw Library objects retain
 their idempotent feature transport until their streaming Client path moves to
-canonical mutations. Transitional Client-produced Silver remains on the legacy
-path and is migrated or invalidated by the Node-authoritative Silver work in
-#41. This document does not require a big-bang migration or add Node-to-Node
-synchronization.
+canonical mutations. Transitional Client-produced Silver remains readable as a
+local offline cache until the Client reconnects and the Node has produced the
+first canonical `silver-datasets` head. The Client never uploads that legacy
+snapshot into the canonical namespace. The first Node-produced head explicitly
+replaces it, and obsolete Client batch checkpoints are discarded. Reprocessing
+an unchanged Bronze content hash is a no-op, so reconnect cannot fork the Silver
+history. This migration does not add Node-to-Node synchronization.
 
 ## Required conformance scenarios
 

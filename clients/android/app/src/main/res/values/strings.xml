@@ -112,6 +112,7 @@
     <string name="error_node_model_unavailable">The local AI model on the Node is unavailable.</string>
     <string name="error_chat_rate_limited">Too many AI requests. Wait a moment.</string>
     <string name="error_storage_quota_exceeded">The user storage space on the Node is full.</string>
+    <string name="error_silver_source_too_large">This source is too large for one automatic knowledge refinement.</string>
     <string name="error_library_import_failed">The selected file could not be copied into Source.</string>
     <string name="error_library_preview_failed">This item could not be opened.</string>
     <string name="error_qr_invalid_size">The QR code has an invalid size.</string>

@@ -147,14 +147,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             message = ::message,
             onStateChanged = ::publishLibrary,
         )
-        val silverAiRuntime = AiRuntimeRouter(
-            local = app.localAiRuntime,
-            nodeApi = app.nodeApi,
-            connectedNode = { nodeConnection.current?.takeIf { it.aiModel != null } },
-            onNodeUnavailable = { nodeConnection.disconnect(it.trusted) },
-        )
         silverController = SilverController(
-            aiRuntime = silverAiRuntime,
             scope = viewModelScope,
             localStore = sourceDataStore,
             nodeApi = app.nodeApi,
@@ -666,7 +659,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
                 id = "conversation:${conversation.id}",
                 name = conversationFilename(conversation.createdAtMillis),
                 sourceType = "conversation",
-                contentSha256 = ChatData.conversationContentSha256(conversation),
+                contentSha256 = ChatData.refinementContentSha256(conversation),
                 text = text,
             )
         }
@@ -695,6 +688,7 @@ class SourceViewModel(application: Application) : AndroidViewModel(application) 
             "model_unavailable" -> R.string.error_node_model_unavailable
             "chat_rate_limited" -> R.string.error_chat_rate_limited
             "storage_quota_exceeded" -> R.string.error_storage_quota_exceeded
+            "silver_source_too_large" -> R.string.error_silver_source_too_large
             "node_stream_interrupted_after_output" -> R.string.error_node_stream_interrupted
             else -> fallback
         },

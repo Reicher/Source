@@ -55,6 +55,11 @@ object ChatData : SourceData<ChatConversations> {
         .filter { it.role == ChatRole.USER }
         .joinToString("\n\n") { "User: ${it.content}" }
 
+    /** The Bronze identity must cover exactly the plaintext sent to the Node for refinement. */
+    fun refinementContentSha256(conversation: ChatConversation): String = MessageDigest.getInstance("SHA-256")
+        .digest(refinementText(conversation).toByteArray(Charsets.UTF_8))
+        .joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
+
     override fun decode(value: ByteArray): ChatConversations {
         val root = JSONObject(value.toString(Charsets.UTF_8))
         return when (val version = root.getInt("version")) {

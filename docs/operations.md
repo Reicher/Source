@@ -115,21 +115,23 @@ either Source port.
 - Snapshots are written atomically and may be checked against a SHA-256 header.
 - llama.cpp has no published port or normal outbound network.
 
-The currently implemented snapshot API stores client-encrypted blobs and gives
-the normal Node service no decryption key. That defense-in-depth property must
-not be described or relied on as protection from the trusted Node host or its
-administrator, and the storage contract may evolve to give Node the plaintext
-access required for authoritative Silver refinement. Future protection from a
-malicious/root Node administrator requires a separate design.
+The legacy snapshot API stores client-encrypted blobs and gives the normal Node
+service no decryption key. Silver refinement is an explicit exception: the
+authenticated Client submits hash-verified plaintext Bronze that is stored in
+the profile's Node database. Snapshot encryption must therefore not be described
+or relied on as protection from the trusted Node host or its administrator.
+Future protection from a malicious/root Node administrator requires a separate
+design.
 
 The Source-level semantics are specified in
 [`STORAGE_AND_SYNC.md`](STORAGE_AND_SYNC.md). Canonical revisions are committed
 under the `canonical` storage subtree and their graph, operation receipts,
 authority epoch, change sequence, and Client acknowledgements are part of the
-SQLite backup unit. Conversation and Library-manifest Clients use this path.
-The old whole-snapshot API, feature-specific Library blob transport, and
-Client-produced Silver remain explicit transitional compatibility behavior;
-they do not define canonical conflict, backup, or deletion semantics.
+SQLite backup unit. Conversation, Library-manifest, and Node-produced Silver
+use this path. The old whole-snapshot API and feature-specific Library blob
+transport remain explicit transitional compatibility behavior; legacy
+Client-produced Silver is only a replaceable offline cache and never enters the
+canonical history.
 
 ## Installation
 

@@ -23,6 +23,8 @@ func TestOpenAppliesAndPersistsMigrations(t *testing.T) {
 	assertTable(t, db.sql, "storage_heads")
 	assertTable(t, db.sql, "storage_operations")
 	assertTable(t, db.sql, "client_sync_cursors")
+	assertTable(t, db.sql, "silver_refinement_sources")
+	assertTable(t, db.sql, "silver_refinement_operations")
 	if err = db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -104,6 +106,50 @@ INSERT INTO library_items(user_id,item_id,content_sha256,created_at,deleted_at) 
 	}
 	if snapshots != 1 || tombstones != 1 {
 		t.Fatalf("legacy migration changed data: snapshots=%d tombstones=%d", snapshots, tombstones)
+	}
+}
+
+func TestOpenMigratesVersionFiveSilverOperations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "source.sqlite")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = raw.Exec(schemaVersionTable); err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range migrations[:5] {
+		if _, err = raw.Exec(migration.up); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = raw.Exec(`UPDATE schema_version SET version=5;
+INSERT INTO users(id,display_name,storage_namespace,quota_bytes,created_at)
+VALUES('11111111-1111-4111-8111-111111111111','Existing','namespace',1000,1);
+INSERT INTO silver_refinement_operations(user_id,operation_id,request_digest,source_id)
+VALUES('11111111-1111-4111-8111-111111111111','22222222-2222-4222-8222-222222222222','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','source-1');`); err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	assertSchemaVersion(t, db.sql, len(migrations))
+	var kind string
+	var requiresChange int
+	var completedAt *int64
+	if err = db.sql.QueryRow(`SELECT operation_kind,requires_silver_change,completed_at
+FROM silver_refinement_operations WHERE operation_id='22222222-2222-4222-8222-222222222222'`).
+		Scan(&kind, &requiresChange, &completedAt); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "refinement" || requiresChange != 0 || completedAt != nil {
+		t.Fatalf("migrated operation = kind:%q requires:%d completed:%v", kind, requiresChange, completedAt)
 	}
 }
 
