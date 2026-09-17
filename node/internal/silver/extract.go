@@ -15,10 +15,11 @@ import (
 )
 
 const (
-	maximumChunkBytes       = 6000
-	chunkOverlapBytes       = 600
-	maximumRefinementChunks = 8
-	maximumRefinementBytes  = 19_200
+	maximumChunkBytes         = 6000
+	chunkOverlapBytes         = 600
+	maximumRefinementChunks   = 8
+	maximumRefinementBytes    = 19_200
+	maximumExtractionAttempts = 2
 )
 
 type extractedGeneration struct {
@@ -51,33 +52,41 @@ func extract(ctx context.Context, ai localai.Backend, source Source, modelID str
 }
 
 func extractBatch(ctx context.Context, ai localai.Backend, chunk string, authoredBySelf bool) (string, error) {
-	var output strings.Builder
-	err := ai.StreamChat(localai.WithWorkload(ctx, localai.WorkloadBackground), []localai.Message{{Role: "user", Content: extractionPrompt(chunk, authoredBySelf)}}, localai.ChatOptions{
-		Temperature:           0.1,
-		TopP:                  0.8,
-		Reasoning:             true,
-		ReasoningBudgetTokens: 256,
-		JSONSchema:            extractionJSONSchema(),
-	}, func(event localai.Event) error {
-		if event.Type == "delta" {
-			output.WriteString(event.Text)
-			if _, parseErr := parseExtraction(output.String(), chunk); parseErr == nil {
-				return localai.ErrStreamComplete
+	messages := []localai.Message{{Role: "user", Content: extractionPrompt(chunk, authoredBySelf)}}
+	var lastErr error
+	for attempt := 0; attempt < maximumExtractionAttempts; attempt++ {
+		var output strings.Builder
+		err := ai.StreamChat(localai.WithWorkload(ctx, localai.WorkloadBackground), messages, localai.ChatOptions{
+			Temperature:           0.1,
+			TopP:                  0.8,
+			Reasoning:             true,
+			ReasoningBudgetTokens: 256,
+			JSONSchema:            extractionJSONSchema(),
+		}, func(event localai.Event) error {
+			if event.Type == "delta" {
+				output.WriteString(event.Text)
+				if _, parseErr := parseExtraction(output.String(), chunk); parseErr == nil {
+					return localai.ErrStreamComplete
+				}
 			}
+			return nil
+		})
+		if errors.Is(err, localai.ErrStreamComplete) {
+			err = nil
 		}
-		return nil
-	})
-	if errors.Is(err, localai.ErrStreamComplete) {
-		err = nil
+		if err != nil {
+			return "", err
+		}
+		result := output.String()
+		if _, lastErr = parseExtraction(result, chunk); lastErr == nil {
+			return result, nil
+		}
+		messages = append(messages,
+			localai.Message{Role: "assistant", Content: result},
+			localai.Message{Role: "user", Content: extractionCorrection(lastErr)},
+		)
 	}
-	if err != nil {
-		return "", err
-	}
-	result := output.String()
-	if _, err = parseExtraction(result, chunk); err != nil {
-		return "", err
-	}
-	return result, nil
+	return "", lastErr
 }
 
 func generationFromBatchOutputs(source Source, modelID string, now int64, chunks, outputs []string) (extractedGeneration, error) {
@@ -186,11 +195,9 @@ func parseExtraction(raw, bronze string) ([]parsedClaim, error) {
 			if _, ok := entities[objectKey]; !ok || rawClaim.Value != nil {
 				continue
 			}
-		} else if text, ok := rawClaim.Value.(string); ok {
-			candidate := strings.TrimSpace(text)
-			if _, exists := entities[candidate]; exists {
-				objectKey = candidate
-				rawClaim.Value = nil
+			subject, object := entities[rawClaim.SubjectKey], entities[objectKey]
+			if objectKey == rawClaim.SubjectKey || sameMention(subject, object) {
+				return nil, fmt.Errorf("claim %q relates a subject to itself; use a scalar value for attributes", predicate)
 			}
 		}
 		value := scalar(rawClaim.Value)
@@ -292,15 +299,24 @@ func extractionPrompt(chunk string, authoredBySelf bool) string {
 		authorContext = "The Source profile owner is the verified author. Preserve clear singular first-person references as an entity named I with type person; the resolver will bind that mention to the profile's Self entity."
 	}
 	return `Extract all explicitly stated factual information from the Bronze text as entity attributes or relationships. Return compact JSON only, with this shape:
-{"entities":[{"key":"e1","name":"Robin","type":"person"},{"key":"e2","name":"Source","type":"project"}],"claims":[{"subjectKey":"e1","predicate":"created","objectKey":"e2","confidence":0.95,"evidenceExcerpt":"Robin created Source"},{"subjectKey":"e2","predicate":"status","value":"active","confidence":0.8,"evidenceExcerpt":"Source is active"}]}
+{"entities":[{"key":"e1","name":"Robin","type":"person"},{"key":"e2","name":"Source","type":"project"}],"claims":[{"subjectKey":"e2","predicate":"status","value":"active","confidence":0.8,"evidenceExcerpt":"Source is active"},{"subjectKey":"e1","predicate":"created","objectKey":"e2","confidence":0.95,"evidenceExcerpt":"Robin created Source"}]}
 Resolve references such as pronouns and possessives when their referent is clear from the provided text. If a reference is ambiguous, do not guess.
 ` + authorContext + `
 Every claim must have exactly one objectKey or scalar value. Do not infer facts that are not stated in or clearly entailed by the text. Types and predicates should be short lowercase labels. If nothing useful exists, return empty arrays.
 
-Use value for attributes of the subject, including structured-data fields such as first name, last name, email, phone, photo URL, starred, birthday, address text, labels, identifiers, and boolean flags. Use objectKey only when the source explicitly relates the subject to a distinct entity, such as a parent, sibling, employer, organization, place, or project. A scalar field must never use the subject's own key as objectKey. For example, a contact row with Josefin's phone number must produce {"subjectKey":"josefin","predicate":"phone","value":"072-244 77 29",...}, not an objectKey pointing back to Josefin. Empty structured-data fields produce no claim.
+An attribute assigns a literal string, number, or boolean directly to its subject. Preserve that literal in value. A relationship connects the subject to a different, independently named entity and uses objectKey. Never create an entity merely to stand for a literal value, and never point objectKey back to the subject. Empty values produce no claim.
 
 Bronze text:
 ` + chunk
+}
+
+func extractionCorrection(parseErr error) string {
+	return "The previous JSON violated the extraction contract: " + parseErr.Error() +
+		". Correct it using value for literal attributes and objectKey only for a different entity. Return the complete corrected JSON only."
+}
+
+func sameMention(left, right candidateEntity) bool {
+	return matchText(left.Name) == matchText(right.Name) && matchText(left.Type) == matchText(right.Type)
 }
 
 func extractionJSONSchema() map[string]any {
@@ -331,13 +347,19 @@ func extractionJSONSchema() map[string]any {
 		"oneOf": []any{
 			map[string]any{
 				"type": "object", "additionalProperties": false,
-				"required":   []string{"subjectKey", "predicate", "objectKey", "confidence", "evidenceExcerpt"},
-				"properties": claimProperties("objectKey", map[string]any{"type": "string", "minLength": 1}),
+				"required": []string{"subjectKey", "predicate", "value", "confidence", "evidenceExcerpt"},
+				"properties": claimProperties("value", map[string]any{
+					"type":        []string{"string", "number", "boolean"},
+					"description": "Literal attribute value assigned directly to the subject.",
+				}),
 			},
 			map[string]any{
 				"type": "object", "additionalProperties": false,
-				"required":   []string{"subjectKey", "predicate", "value", "confidence", "evidenceExcerpt"},
-				"properties": claimProperties("value", map[string]any{"type": []string{"string", "number", "boolean"}}),
+				"required": []string{"subjectKey", "predicate", "objectKey", "confidence", "evidenceExcerpt"},
+				"properties": claimProperties("objectKey", map[string]any{
+					"type": "string", "minLength": 1,
+					"description": "Key of a different independently named entity related to the subject.",
+				}),
 			},
 		},
 	}

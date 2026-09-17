@@ -36,6 +36,25 @@ func TestProfileIdentityAnchorsAuthoredFirstPersonToSelf(t *testing.T) {
 	}
 }
 
+func TestResolutionDropsSelfRelationshipCandidates(t *testing.T) {
+	source := Source{ID: "source-1", Name: "raw.txt", SourceType: "file", ContentSHA256: strings.Repeat("a", 64)}
+	mention := map[string]any{"name": "Josefin Broström", "type": "person"}
+	generation := testGeneration(t, source, 1, map[string]any{
+		"subject":   mention,
+		"predicate": "email",
+		"object":    mention,
+	})
+	dataset, err := replaceGeneration(EmptyDataset(), ProfileContext{
+		UserID: "profile-1", DisplayName: "Robin", SelfEntityID: testSelfEntityID,
+	}, source, generation, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimByPredicate(dataset, "email") != nil {
+		t.Fatalf("self-relationship was committed: %#v", dataset.Claims)
+	}
+}
+
 func TestUnverifiedFirstPersonDoesNotResolveToSelf(t *testing.T) {
 	source := Source{
 		ID: "import-1", Name: "import.txt", SourceType: "file", ContentSHA256: strings.Repeat("b", 64),

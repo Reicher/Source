@@ -22,7 +22,7 @@ const (
 	DatasetFormatVersion    = 1
 	Collection              = "silver-datasets"
 	ExtractionProcessorID   = "source.node.silver-extraction"
-	ExtractionVersion       = "4"
+	ExtractionVersion       = "5"
 	ResolutionProcessorID   = "source.node.silver-resolution"
 	ResolutionVersion       = "2"
 	ProfileProcessorID      = "source.node.profile-identity"
@@ -175,6 +175,9 @@ func NewObservation(kind string, payload any, evidenceIDs []string, confidence *
 func NewClaim(subjectID, predicate string, objectID *string, value any, observations []string, confidence *float64, producer Producer, now int64) (Claim, error) {
 	if (objectID == nil) == (value == nil) {
 		return Claim{}, errors.New("Silver Claim requires exactly one object")
+	}
+	if objectID != nil && *objectID == subjectID {
+		return Claim{}, errors.New("Silver Claim cannot relate an Entity to itself")
 	}
 	object := map[string]any{"scalar": value}
 	if objectID != nil {
