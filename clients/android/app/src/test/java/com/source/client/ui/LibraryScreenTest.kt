@@ -198,6 +198,52 @@ class LibraryScreenTest {
     }
 
     @Test
+    fun `new refinement job takes precedence over a previous complete Silver generation`() {
+        val item = LibraryUiItem(
+            id = "source-1",
+            filename = "contacts.csv",
+            sourceType = "file",
+            mimeType = "text/csv",
+            byteCount = 100,
+            createdAtMillis = 100,
+            bronzeContentSha256 = "b".repeat(64),
+            bronzeStatus = BronzeNodeStatus.STORED,
+            localAvailable = true,
+            canRemoveFromDevice = true,
+            canDeleteFromSource = true,
+            previewKind = LibraryPreviewKind.TEXT,
+        )
+        val evidence = SilverEvidence.create(item.id, item.bronzeContentSha256)
+        val previousComplete = SilverObservation.create(
+            kind = SILVER_EXTRACTION_COMPLETE_KIND,
+            payload = SilverJsonObject(emptyMap()),
+            evidenceIds = listOf(evidence.id),
+            producer = SilverProducer.create("source.node.silver-extraction", "3"),
+            createdAtMillis = 100,
+        )
+        fun state(jobState: String, completedBatches: Int = 0): SilverUiState = SilverUiState(
+            dataset = SilverDataset(evidence = listOf(evidence), observations = listOf(previousComplete)),
+            jobs = mapOf(item.id to SilverRefinementJob(
+                id = "00000000-0000-4000-8000-000000000001",
+                sourceId = item.id,
+                sourceContentSha256 = item.bronzeContentSha256,
+                state = jobState,
+                completedBatches = completedBatches,
+                totalBatches = 1,
+            )),
+        )
+
+        val processing = withSilverState(LibraryUiState(listOf(item)), state("running")).items.single()
+        val syncing = withSilverState(LibraryUiState(listOf(item)), state("completed", 1)).items.single()
+        val failed = withSilverState(LibraryUiState(listOf(item)), state("failed")).items.single()
+
+        assertEquals(KnowledgeStatus.PROCESSING, processing.knowledgeStatus)
+        assertEquals(SilverBatchProgress(0, 1), processing.knowledgeProgress)
+        assertEquals(KnowledgeStatus.SYNCING_TO_CLIENT, syncing.knowledgeStatus)
+        assertEquals(KnowledgeStatus.ERROR, failed.knowledgeStatus)
+    }
+
+    @Test
     fun `Silver summary counts source entities and user meaningful facts`() {
         val item = LibraryUiItem(
             id = "source-1",

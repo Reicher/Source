@@ -436,12 +436,20 @@ internal fun withSilverState(library: LibraryUiState, silver: SilverUiState): Li
         }
         val job = silver.jobs[item.id]?.takeIf { it.sourceContentSha256 == item.bronzeContentSha256 }
         item.copy(
-            knowledgeStatus = when {
-                currentSilver -> KnowledgeStatus.CURRENT
-                item.id in silver.syncErrors || job?.state == "failed" -> KnowledgeStatus.ERROR
-                job?.state == "completed" -> KnowledgeStatus.SYNCING_TO_CLIENT
-                job?.state == "running" -> KnowledgeStatus.PROCESSING
-                else -> KnowledgeStatus.WAITING
+            knowledgeStatus = when (job?.state) {
+                "queued" -> KnowledgeStatus.WAITING
+                "running" -> KnowledgeStatus.PROCESSING
+                "completed" -> if (item.id in silver.syncErrors) {
+                    KnowledgeStatus.ERROR
+                } else {
+                    KnowledgeStatus.SYNCING_TO_CLIENT
+                }
+                "failed" -> KnowledgeStatus.ERROR
+                else -> when {
+                    item.id in silver.syncErrors -> KnowledgeStatus.ERROR
+                    currentSilver -> KnowledgeStatus.CURRENT
+                    else -> KnowledgeStatus.WAITING
+                }
             },
             knowledgeProgress = job?.takeIf { it.state == "running" }?.let {
                 SilverBatchProgress(it.completedBatches, it.totalBatches)
