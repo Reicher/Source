@@ -46,3 +46,20 @@ func TestCanonicalSilverObjectIDMatchesAndroid(t *testing.T) {
 		t.Fatalf("canonical object ID = %s", got)
 	}
 }
+
+func TestClaimRejectsSelfRelationship(t *testing.T) {
+	entityID := "entity-1"
+	_, err := NewClaim(
+		entityID,
+		"related-to",
+		&entityID,
+		nil,
+		[]string{"observation-1"},
+		nil,
+		Producer{ProcessorID: ResolutionProcessorID, ProcessorVersion: ResolutionVersion},
+		1,
+	)
+	if err == nil {
+		t.Fatal("self-referential Silver Claim was accepted")
+	}
+}

@@ -65,6 +65,9 @@ func resolve(dataset Dataset, observations []Observation, profileContext Profile
 			if resolved == "" {
 				continue
 			}
+			if resolved == subjectID {
+				continue
+			}
 			if objectEntity != nil {
 				entities[objectEntity.ID] = *objectEntity
 				profiles = append(profiles, objectProfile)
