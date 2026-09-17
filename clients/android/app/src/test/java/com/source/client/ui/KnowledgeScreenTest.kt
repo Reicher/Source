@@ -206,6 +206,38 @@ class KnowledgeScreenTest {
     }
 
     @Test
+    fun `global entity Claims present scalar values and related entities but omit inactive Claims`() {
+        val observations = listOf(
+            attributeCandidate("Josefin Broström", "FirstName", "Josefin"),
+            attributeCandidate("Josefin Broström", "Email", "josefin@example.com"),
+            attributeCandidate("Josefin Broström", "Phone", "+46 70 123 45 67"),
+            relationshipCandidate("Josefin Broström", "Brother", "Martin Broström"),
+        )
+        val base = dataset(observations)
+        val resolved = base.with(resolver.resolve(base, observations, 200))
+        val silver = resolved.copy(claims = resolved.claims.map { claim ->
+            when (claim.predicate) {
+                "Email" -> claim.copy(state = SilverClaimState.SUPERSEDED)
+                "Phone" -> claim.copy(state = SilverClaimState.RETRACTED)
+                else -> claim
+            }
+        })
+
+        val entities = buildKnowledgeUiState(silver, library()).entities.associateBy(SilverBrowserEntityUi::name)
+        val josefin = entities.getValue("Josefin Broström")
+        val martin = entities.getValue("Martin Broström")
+        val firstName = josefin.claims.single { it.predicate == "FirstName" }
+        val brother = josefin.claims.single { it.predicate == "Brother" }
+
+        assertEquals("“Josefin”", firstName.objectDisplay)
+        assertEquals(null, firstName.objectEntityId)
+        assertEquals("Martin Broström", brother.objectDisplay)
+        assertEquals(martin.id, brother.objectEntityId)
+        assertEquals(2, josefin.activeClaimCount)
+        assertFalse(josefin.claims.any { it.predicate == "Email" || it.predicate == "Phone" })
+    }
+
+    @Test
     fun `global Silver search filters display names case insensitively`() {
         val observation = relationshipCandidate()
         val base = dataset(listOf(observation))
@@ -263,13 +295,21 @@ class KnowledgeScreenTest {
         value: String,
         confidence: Double = .9,
         evidence: SilverEvidence = testEvidence(),
-    ): SilverObservation {
-        return SilverObservation.create(
+    ): SilverObservation = attributeCandidate("Source", predicate, value, "project", confidence, evidence)
+
+    private fun attributeCandidate(
+        subjectName: String,
+        predicate: String,
+        value: String,
+        subjectType: String = "person",
+        confidence: Double = .9,
+        evidence: SilverEvidence = testEvidence(),
+    ): SilverObservation = SilverObservation.create(
             kind = SILVER_ATTRIBUTE_CANDIDATE_KIND,
             payload = SilverJsonObject(mapOf(
                 "subject" to SilverJsonObject(mapOf(
-                    "name" to SilverJsonString("Source"),
-                    "type" to SilverJsonString("project"),
+                    "name" to SilverJsonString(subjectName),
+                    "type" to SilverJsonString(subjectType),
                 )),
                 "predicate" to SilverJsonString(predicate),
                 "value" to SilverJsonString(value),
@@ -279,21 +319,27 @@ class KnowledgeScreenTest {
             producer = SilverProducer.create("source.android.silver-extraction", "3", "model-4b"),
             createdAtMillis = 100,
         )
-    }
 
-    private fun relationshipCandidate(): SilverObservation {
-        val evidence = testEvidence()
-        return SilverObservation.create(
+    private fun relationshipCandidate(): SilverObservation = relationshipCandidate("Robin", "rests-at", "Cozy place", "cat", "place")
+
+    private fun relationshipCandidate(
+        subjectName: String,
+        predicate: String,
+        objectName: String,
+        subjectType: String = "person",
+        objectType: String = "person",
+        evidence: SilverEvidence = testEvidence(),
+    ): SilverObservation = SilverObservation.create(
             kind = SILVER_RELATIONSHIP_CANDIDATE_KIND,
             payload = SilverJsonObject(mapOf(
                 "subject" to SilverJsonObject(mapOf(
-                    "name" to SilverJsonString("Robin"),
-                    "type" to SilverJsonString("cat"),
+                    "name" to SilverJsonString(subjectName),
+                    "type" to SilverJsonString(subjectType),
                 )),
-                "predicate" to SilverJsonString("rests-at"),
+                "predicate" to SilverJsonString(predicate),
                 "object" to SilverJsonObject(mapOf(
-                    "name" to SilverJsonString("Cozy place"),
-                    "type" to SilverJsonString("place"),
+                    "name" to SilverJsonString(objectName),
+                    "type" to SilverJsonString(objectType),
                 )),
             )),
             evidenceIds = listOf(evidence.id),
@@ -301,7 +347,6 @@ class KnowledgeScreenTest {
             producer = SilverProducer.create("source.android.silver-extraction", "3", "model-4b"),
             createdAtMillis = 100,
         )
-    }
 
     private fun library() = LibraryUiState(items = listOf(LibraryUiItem(
         id = "source-1",

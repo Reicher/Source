@@ -42,6 +42,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -123,7 +124,9 @@ data class SilverBrowserEntityUi(
     val type: String,
     val icon: SilverInspectorEntityIcon,
     val claims: List<SilverInspectorClaimUi>,
-)
+) {
+    val activeClaimCount: Int get() = claims.size
+}
 
 data class SilverInspectorSourceUi(
     val id: String,
@@ -212,30 +215,11 @@ internal fun buildKnowledgeUiState(
                 .groupBy { Triple(it.subjectEntityId, it.predicate, it.objectIdentity()) }
                 .values
                 .map { matchingClaims ->
-                    val claim = matchingClaims.maxWithOrNull(
-                        compareBy<SilverClaim>({ it.confidence ?: -1.0 }, SilverClaim::id),
-                    ) ?: error("A displayed Claim group cannot be empty")
-                    SilverInspectorClaimUi(
-                        id = claim.id,
-                        subjectEntityId = claim.subjectEntityId,
-                        subjectName = entityNames[claim.subjectEntityId] ?: "Unknown entity",
-                        predicate = claim.predicate,
-                        objectDisplay = claim.objectEntityId?.let { entityNames[it] ?: "Unknown entity" }
-                            ?: checkNotNull(claim.value).displayScalar(),
-                        objectEntityId = claim.objectEntityId,
-                        objectEntityIcon = claim.objectEntityId?.let { entityIcon(entityTypes[it]) },
-                        state = claim.state.storageValue,
-                        confidence = (
-                            matchingClaims.mapNotNull(SilverClaim::confidence) +
-                                matchingClaims.flatMap(SilverClaim::supportingObservationIds)
-                                    .mapNotNull(observationConfidenceById::get)
-                            ).maxOrNull(),
-                        competing = matchingClaims.any { it.id in competingClaimIds },
-                        supportingObservationIds = matchingClaims
-                            .flatMap(SilverClaim::supportingObservationIds)
-                            .distinct()
-                            .sorted(),
-                        producer = claim.producer.toUi(),
+                    matchingClaims.toUiClaim(
+                        entityNames = entityNames,
+                        entityTypes = entityTypes,
+                        observationConfidenceById = observationConfidenceById,
+                        competingClaimIds = competingClaimIds,
                     )
                 }
                 .sortedWith(compareBy(SilverInspectorClaimUi::subjectName, SilverInspectorClaimUi::predicate)),
@@ -256,30 +240,11 @@ internal fun buildKnowledgeUiState(
                 .groupBy { it.predicate to it.objectIdentity() }
                 .values
                 .map { matchingClaims ->
-                    val claim = matchingClaims.maxWithOrNull(
-                        compareBy<SilverClaim>({ it.confidence ?: -1.0 }, SilverClaim::id),
-                    ) ?: error("A displayed Claim group cannot be empty")
-                    SilverInspectorClaimUi(
-                        id = claim.id,
-                        subjectEntityId = claim.subjectEntityId,
-                        subjectName = checkNotNull(entityNames[entity.id]),
-                        predicate = claim.predicate,
-                        objectDisplay = claim.objectEntityId?.let { entityNames[it] ?: "Unknown entity" }
-                            ?: checkNotNull(claim.value).displayScalar(),
-                        objectEntityId = claim.objectEntityId,
-                        objectEntityIcon = claim.objectEntityId?.let { entityIcon(entityTypes[it]) },
-                        state = claim.state.storageValue,
-                        confidence = (
-                            matchingClaims.mapNotNull(SilverClaim::confidence) +
-                                matchingClaims.flatMap(SilverClaim::supportingObservationIds)
-                                    .mapNotNull(observationConfidenceById::get)
-                            ).maxOrNull(),
-                        competing = matchingClaims.any { it.id in competingClaimIds },
-                        supportingObservationIds = matchingClaims
-                            .flatMap(SilverClaim::supportingObservationIds)
-                            .distinct()
-                            .sorted(),
-                        producer = claim.producer.toUi(),
+                    matchingClaims.toUiClaim(
+                        entityNames = entityNames,
+                        entityTypes = entityTypes,
+                        observationConfidenceById = observationConfidenceById,
+                        competingClaimIds = competingClaimIds,
                     )
                 }
                 .sortedWith(compareBy(SilverInspectorClaimUi::predicate, SilverInspectorClaimUi::id)),
@@ -468,7 +433,11 @@ internal fun SilverBrowserScreen(
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text(
-                                entity.name,
+                                "${entity.name} · ${pluralStringResource(
+                                    R.plurals.knowledge_claim_count,
+                                    entity.activeClaimCount,
+                                    entity.activeClaimCount,
+                                )}",
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 style = MaterialTheme.typography.bodyLarge,
@@ -670,6 +639,40 @@ private fun evidenceUi(evidence: SilverEvidence) = SilverInspectorEvidenceUi(
     selector = evidence.selector?.displayJson(),
     excerpt = evidence.excerpt,
 )
+
+private fun List<SilverClaim>.toUiClaim(
+    entityNames: Map<String, String>,
+    entityTypes: Map<String, String>,
+    observationConfidenceById: Map<String, Double?>,
+    competingClaimIds: Set<String>,
+): SilverInspectorClaimUi {
+    val claim = maxWithOrNull(
+        compareBy<SilverClaim>({ it.confidence ?: -1.0 }, SilverClaim::id),
+    ) ?: error("A displayed Claim group cannot be empty")
+    val relatedEntityId = claim.objectEntityId
+    val objectDisplay = if (relatedEntityId == null) {
+        checkNotNull(claim.value).displayScalar()
+    } else {
+        entityNames[relatedEntityId] ?: "Unknown entity"
+    }
+    return SilverInspectorClaimUi(
+        id = claim.id,
+        subjectEntityId = claim.subjectEntityId,
+        subjectName = entityNames[claim.subjectEntityId] ?: "Unknown entity",
+        predicate = claim.predicate,
+        objectDisplay = objectDisplay,
+        objectEntityId = relatedEntityId,
+        objectEntityIcon = relatedEntityId?.let { entityIcon(entityTypes[it]) },
+        state = claim.state.storageValue,
+        confidence = (
+            mapNotNull(SilverClaim::confidence) +
+                flatMap(SilverClaim::supportingObservationIds).mapNotNull(observationConfidenceById::get)
+            ).maxOrNull(),
+        competing = any { it.id in competingClaimIds },
+        supportingObservationIds = flatMap(SilverClaim::supportingObservationIds).distinct().sorted(),
+        producer = claim.producer.toUi(),
+    )
+}
 
 private fun preferredClaimText(
     claims: List<SilverClaim>,
