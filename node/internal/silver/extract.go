@@ -297,6 +297,8 @@ Resolve references such as pronouns and possessives when their referent is clear
 ` + authorContext + `
 Every claim must have exactly one objectKey or scalar value. Do not infer facts that are not stated in or clearly entailed by the text. Types and predicates should be short lowercase labels. If nothing useful exists, return empty arrays.
 
+Use value for attributes of the subject, including structured-data fields such as first name, last name, email, phone, photo URL, starred, birthday, address text, labels, identifiers, and boolean flags. Use objectKey only when the source explicitly relates the subject to a distinct entity, such as a parent, sibling, employer, organization, place, or project. A scalar field must never use the subject's own key as objectKey. For example, a contact row with Josefin's phone number must produce {"subjectKey":"josefin","predicate":"phone","value":"072-244 77 29",...}, not an objectKey pointing back to Josefin. Empty structured-data fields produce no claim.
+
 Bronze text:
 ` + chunk
 }

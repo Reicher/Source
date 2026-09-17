@@ -418,7 +418,7 @@ Evidence and a `profile-identity` Observation. Self is metadata, not an
 first-person mentions to resolve to this Entity; without that context they
 remain unresolved.
 
-The Node `source.node.silver-extraction` processor version `3` emits one
+The Node `source.node.silver-extraction` processor version `4` emits one
 `attribute-candidate` or `relationship-candidate` Observation for each valid
 finding. It retains the compatible candidate payload schema:
 
@@ -437,7 +437,9 @@ from pronouns.
 
 Silver extraction uses low-randomness sampling, enables a bounded amount of the
 model's internal reasoning, and constrains visible output to the candidate JSON
-schema. These settings are private to background refinement; normal chat
+schema. Structured-data fields describing the subject, such as names, email,
+phone, photo URL, and boolean flags, are scalar attributes; only references to
+distinct entities become relationships. These settings are private to background refinement; normal chat
 continues to run with reasoning disabled.
 
 The subject and object are local mentions, not Entity identities. An attribute
