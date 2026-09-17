@@ -76,6 +76,8 @@ func TestExtractionPreservesClearReferencesWithoutGuessingAmbiguousOnes(t *testi
 		"Extract all explicitly stated factual information",
 		"pronouns and possessives",
 		"If a reference is ambiguous, do not guess",
+		"structured-data fields such as first name, last name, email, phone, photo URL, starred",
+		"A scalar field must never use the subject's own key as objectKey",
 	} {
 		if !strings.Contains(ai.messages[0].Content, instruction) {
 			t.Fatalf("extraction prompt is missing %q", instruction)

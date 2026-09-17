@@ -344,7 +344,7 @@ internal fun needsSilverRefinement(
 }
 
 private const val NODE_EXTRACTION_PROCESSOR_ID = "source.node.silver-extraction"
-internal const val NODE_EXTRACTION_PROCESSOR_VERSION = "3"
+internal const val NODE_EXTRACTION_PROCESSOR_VERSION = "4"
 
 internal fun silverRemovalOperationId(sourceId: String): String = UUID.nameUUIDFromBytes(
     "source-silver-removal\u0000$sourceId".toByteArray(Charsets.UTF_8),
