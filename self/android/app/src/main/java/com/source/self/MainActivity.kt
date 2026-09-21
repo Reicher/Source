@@ -56,8 +56,8 @@ class MainActivity : Activity() {
         override fun run() {
             if (state.source() != null) {
                 if (address != null) connect() else if (discovery == null) startDiscovery()
-                handler.postDelayed(this, 10_000)
             }
+            handler.postDelayed(this, 10_000)
         }
     }
 

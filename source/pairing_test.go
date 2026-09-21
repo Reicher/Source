@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -68,7 +69,7 @@ func TestPairRestartAndTrustedReconnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, err := i.token()
+	token, _, err := i.token()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +93,7 @@ func TestPairRestartAndTrustedReconnect(t *testing.T) {
 	if got := postPair(t, other, s.URL, i.id, token).StatusCode; got != http.StatusConflict {
 		t.Fatalf("second Self: %d", got)
 	}
-	if _, err := i.token(); err == nil {
+	if _, _, err := i.token(); err == nil {
 		t.Fatal("paired Source returned QR token")
 	}
 	oldPin := i.certPin
@@ -128,7 +129,7 @@ func TestExpiredQRAndLocalSetup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, err := i.token()
+	token, _, err := i.token()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,6 +152,28 @@ func TestExpiredQRAndLocalSetup(t *testing.T) {
 	setup.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "image/png" {
 		t.Fatalf("local QR: %d", response.Code)
+	}
+	scriptRequest := httptest.NewRequest(http.MethodGet, "/setup.js", nil)
+	scriptRequest.Host = "127.0.0.1:8081"
+	scriptRequest.RemoteAddr = "127.0.0.1:12345"
+	scriptResponse := httptest.NewRecorder()
+	setup.ServeHTTP(scriptResponse, scriptRequest)
+	if scriptResponse.Code != http.StatusOK || !strings.Contains(scriptResponse.Body.String(), "X-QR-Expires-In-Ms") {
+		t.Fatal("setup script does not schedule QR rotation from its expiration")
+	}
+	if !strings.Contains(scriptResponse.Header().Get("Content-Security-Policy"), "connect-src 'self'") {
+		t.Fatal("setup policy blocks its QR and pairing status requests")
+	}
+	remaining, err := strconv.ParseInt(response.Header().Get("X-QR-Expires-In-Ms"), 10, 64)
+	if err != nil || remaining <= 0 || remaining > qrLifetime.Milliseconds() {
+		t.Fatalf("invalid QR expiry header: %q", response.Header().Get("X-QR-Expires-In-Ms"))
+	}
+	newToken, _, err := i.token()
+	if err != nil || newToken == token {
+		t.Fatalf("expired QR was not rotated: %v", err)
+	}
+	if got := postPair(t, testHTTPClient(testClientCert(t)), s.URL, i.id, newToken).StatusCode; got != http.StatusOK {
+		t.Fatalf("rotated QR: %d", got)
 	}
 	request.Host = "attacker.invalid"
 	response = httptest.NewRecorder()

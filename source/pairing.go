@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -20,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -27,6 +29,9 @@ import (
 )
 
 const qrLifetime = 2 * time.Minute
+
+//go:embed setup.js
+var setupScript string
 
 type diskState struct {
 	ID       string `json:"id"`
@@ -158,21 +163,21 @@ func (i *identity) tlsConfig() *tls.Config {
 	return &tls.Config{MinVersion: tls.VersionTLS12, ClientAuth: tls.RequireAnyClientCert}
 }
 
-func (i *identity) token() (string, error) {
+func (i *identity) token() (string, time.Time, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.state.SelfPin != "" {
-		return "", errors.New("already paired")
+		return "", time.Time{}, errors.New("already paired")
 	}
 	if time.Now().After(i.qrExpires) {
 		var err error
 		i.qrToken, err = randomString(32)
 		if err != nil {
-			return "", err
+			return "", time.Time{}, err
 		}
 		i.qrExpires = time.Now().Add(qrLifetime)
 	}
-	return i.qrToken, nil
+	return i.qrToken, i.qrExpires, nil
 }
 
 func (i *identity) lanHandler() http.Handler {
@@ -262,7 +267,7 @@ func (i *identity) setupHandler(host string) http.Handler {
 			_, _ = w.Write([]byte("<!doctype html><title>Source</title><h1>connected</h1>"))
 			return
 		}
-		_, _ = w.Write([]byte("<!doctype html><title>Source setup</title><meta http-equiv=refresh content=30><style>body{text-align:center;font:24px system-ui;margin:5vh auto}img{width:min(80vw,520px)}</style><h1>Pair Self with Source</h1><p>Scan this QR code in Self. It changes every two minutes.</p><img alt='Pairing QR code' src='/qr.png'><script src='/setup.js'></script>"))
+		_, _ = w.Write([]byte("<!doctype html><title>Source setup</title><meta http-equiv=refresh content=30><style>body{text-align:center;font:24px system-ui;margin:5vh auto}img{width:min(80vw,520px)}</style><h1>Pair Self with Source</h1><p>Scan this QR code in Self. It changes every two minutes.</p><img id='pairing-qr' alt='Pairing QR code' src='/qr.png'><script src='/setup.js'></script>"))
 	})
 	mux.HandleFunc("GET /paired", func(w http.ResponseWriter, _ *http.Request) {
 		i.mu.Lock()
@@ -276,10 +281,10 @@ func (i *identity) setupHandler(host string) http.Handler {
 	})
 	mux.HandleFunc("GET /setup.js", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-		_, _ = w.Write([]byte("setInterval(async()=>{try{if(await(await fetch('/paired')).text()==='yes'){document.body.innerHTML='<h1>connected</h1>'}}catch{}},1000)"))
+		_, _ = w.Write([]byte(setupScript))
 	})
 	mux.HandleFunc("GET /qr.png", func(w http.ResponseWriter, _ *http.Request) {
-		token, err := i.token()
+		token, expires, err := i.token()
 		if err != nil {
 			http.Error(w, "already paired", http.StatusGone)
 			return
@@ -291,6 +296,7 @@ func (i *identity) setupHandler(host string) http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("X-QR-Expires-In-Ms", strconv.FormatInt(max(0, time.Until(expires).Milliseconds()), 10))
 		_, _ = w.Write(png)
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -301,7 +307,7 @@ func (i *identity) setupHandler(host string) http.Handler {
 		}
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; img-src 'self'; script-src 'self'; style-src 'unsafe-inline'")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; connect-src 'self'; img-src 'self' blob:; script-src 'self'; style-src 'unsafe-inline'")
 		mux.ServeHTTP(w, r)
 	})
 }
