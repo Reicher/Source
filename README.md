@@ -19,6 +19,20 @@ On a clean installation, open `http://127.0.0.1:8081` in a browser **on the Sour
 
 Source keeps its private key, certificate and the one-person/one-Self pairing record in `source/data/pairing/` when started from `source/`. Keep this directory across restarts. `-data`, `-listen`, and `-setup` can override the defaults. Losing only part of that directory is treated as an error, not as permission to create a new identity. The QR token is valid for two minutes and is never persisted. LAN discovery alone does not authenticate a peer: Self pins the certificate fingerprint from the QR code and Source pins Self's certificate at pairing.
 
+## Deploy Source on the home server
+
+Every push to `main` starts the [Deploy workflow](.github/workflows/deploy.yml) on the repository's Linux runner labeled `source-node`. The runner needs Docker Compose and access to the Docker daemon. It builds the V1 Go server, starts it with host networking for mDNS, and checks both the loopback setup page and the TLS health endpoint. Self is an Android app and is built by CI rather than installed on the server.
+
+The deployment keeps Source's identity and pairing record in `$HOME/.local/share/source-v1/pairing` on the runner host. Set `SOURCE_DATA_ROOT` to another **absolute** directory before running `./scripts/deploy.sh` if needed. Keep that directory across deployments and backups. The container runs as the runner account, and the script can also be run manually from a checkout on the server. It needs no model download because V1 does not run inference yet.
+
+On the server, port 8443 serves the LAN TLS pairing API. Port 8081 is bound only to host loopback. To open setup from another computer, use an SSH tunnel, then visit `http://127.0.0.1:8081` locally:
+
+```sh
+ssh -L 8081:127.0.0.1:8081 <server-ssh-user>@<server-LAN-IP>
+```
+
+The previous prototype's Compose stack can be stopped after the V1 health checks pass. Its data is not reused by V1; keep a backup until the migration is complete. Do not expose port 8081 through a router or public proxy.
+
 ## Build and start Self
 
 Install Java 17 and Android SDK 36. The Gradle wrapper installs the required Gradle version.
