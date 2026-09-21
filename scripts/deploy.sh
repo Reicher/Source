@@ -38,8 +38,10 @@ while :; do
     container_id=$(docker compose ps -q source)
     if [ -n "$container_id" ] && \
         [ "$(docker inspect --format '{{.State.Status}}' "$container_id")" = running ] && \
-        curl --fail --silent --output /dev/null --noproxy '*' http://127.0.0.1:8081/ && \
+        curl --fail --silent --output /dev/null --noproxy '*' \
+            --connect-timeout 3 --max-time 10 http://127.0.0.1:8081/ && \
         curl --fail --silent --insecure --output /dev/null --noproxy '*' \
+            --connect-timeout 3 --max-time 10 \
             --cert "$SOURCE_DATA_ROOT/pairing/source.crt" \
             --key "$SOURCE_DATA_ROOT/pairing/source.key" \
             https://127.0.0.1:8443/healthz; then
