@@ -5,44 +5,67 @@ import (
 	"errors"
 	"flag"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/grandcat/zeroconf"
 )
 
-func handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	})
-	return mux
-}
+const serviceType = "_sourceself._tcp"
 
 func main() {
-	address := flag.String("listen", "127.0.0.1:8080", "local address to listen on")
+	listen := flag.String("listen", ":8080", "LAN HTTPS address for Self")
+	setup := flag.String("setup", "127.0.0.1:8081", "loopback HTTP address for setup")
+	data := flag.String("data", "data/pairing", "directory for the persistent Source identity")
 	flag.Parse()
 
-	server := &http.Server{
-		Addr:              *address,
-		Handler:           handler(),
-		ReadHeaderTimeout: 5 * time.Second,
+	setupHost, _, err := net.SplitHostPort(*setup)
+	if err != nil || net.ParseIP(setupHost) == nil || !net.ParseIP(setupHost).IsLoopback() {
+		log.Fatal("setup must bind to an explicit loopback IP address")
 	}
+	identity, err := loadIdentity(*data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	lan, err := net.Listen("tcp", *listen)
+	if err != nil {
+		log.Fatal(err)
+	}
+	local, err := net.Listen("tcp", *setup)
+	if err != nil {
+		log.Fatal(err)
+	}
+	port := lan.Addr().(*net.TCPAddr).Port
+	mdns, err := zeroconf.Register("Source-"+identity.id, serviceType, "local.", port, []string{"id=" + identity.id}, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer mdns.Shutdown()
 
+	lanServer := &http.Server{Handler: identity.lanHandler(), ReadHeaderTimeout: 5 * time.Second, TLSConfig: identity.tlsConfig()}
+	localServer := &http.Server{Handler: identity.setupHandler(local.Addr().String()), ReadHeaderTimeout: 5 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			log.Printf("shutdown: %v", err)
+		_ = lanServer.Shutdown(shutdownCtx)
+		_ = localServer.Shutdown(shutdownCtx)
+	}()
+	go func() {
+		log.Printf("Source setup: http://%s", local.Addr())
+		if err := localServer.Serve(local); !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("setup server: %v", err)
+			stop()
 		}
 	}()
-
-	log.Printf("Source listening on %s", *address)
-	if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+	log.Printf("Source HTTPS on %s, advertised via mDNS", lan.Addr())
+	if err := lanServer.ServeTLS(lan, identity.certPath, identity.keyPath); !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
 }
