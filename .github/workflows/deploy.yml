@@ -1,0 +1,26 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: [self-hosted, linux, source-node]
+    environment: source-node
+    timeout-minutes: 20
+    concurrency:
+      group: source-v1-deployment
+      cancel-in-progress: false
+    steps:
+      - name: Check out deployment revision
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          clean: false
+          persist-credentials: false
+      - name: Deploy Source
+        run: ./scripts/deploy.sh

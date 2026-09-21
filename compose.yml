@@ -1,0 +1,23 @@
+name: source-v1
+
+services:
+  source:
+    build:
+      context: ./source
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:-unknown}
+    image: source/v1:local
+    user: "${SOURCE_UID:?}:${SOURCE_GID:?}"
+    restart: unless-stopped
+    # Source advertises its LAN address with mDNS, which needs the host network.
+    network_mode: host
+    command: ["-listen", ":8080", "-setup", "127.0.0.1:8081", "-data", "/data/pairing"]
+    volumes:
+      - "${SOURCE_DATA_ROOT:?}/pairing:/data/pairing"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
