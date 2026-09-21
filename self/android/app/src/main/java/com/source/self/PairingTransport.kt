@@ -16,6 +16,8 @@ import javax.net.ssl.SSLEngine
 private fun pin(cert: X509Certificate): String = MessageDigest.getInstance("SHA-256")
     .digest(cert.encoded).joinToString("") { "%02x".format(it) }
 
+class PairingHttpException(val status: Int) : Exception("Source returned $status")
+
 class PairingTransport(private val state: PairingState) {
     fun connect(source: SourceRef, address: String, port: Int): String {
         val urlHost = if (address.contains(':')) "[$address]" else address
@@ -41,9 +43,12 @@ class PairingTransport(private val state: PairingState) {
         val certificate = store.getCertificate(alias) as X509Certificate
         val privateKey = store.getKey(alias, null) as PrivateKey
         val keyManager = object : X509ExtendedKeyManager() {
-            override fun getClientAliases(keyType: String?, issuers: Array<java.security.Principal>?): Array<String> = arrayOf(alias)
-            override fun chooseClientAlias(keyTypes: Array<String>?, issuers: Array<java.security.Principal>?, socket: Socket?): String = alias
-            override fun chooseEngineClientAlias(keyTypes: Array<String>?, issuers: Array<java.security.Principal>?, engine: SSLEngine?): String = alias
+            override fun getClientAliases(keyType: String?, issuers: Array<java.security.Principal>?): Array<String>? =
+                if (keyType == "EC") arrayOf(alias) else null
+            override fun chooseClientAlias(keyTypes: Array<String>?, issuers: Array<java.security.Principal>?, socket: Socket?): String? =
+                if (keyTypes?.contains("EC") == true) alias else null
+            override fun chooseEngineClientAlias(keyTypes: Array<String>?, issuers: Array<java.security.Principal>?, engine: SSLEngine?): String? =
+                if (keyTypes?.contains("EC") == true) alias else null
             override fun getServerAliases(keyType: String?, issuers: Array<java.security.Principal>?): Array<String>? = null
             override fun chooseServerAlias(keyType: String?, issuers: Array<java.security.Principal>?, socket: Socket?): String? = null
             override fun getCertificateChain(alias: String?): Array<X509Certificate> = arrayOf(certificate)
@@ -73,7 +78,7 @@ class PairingTransport(private val state: PairingState) {
             connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
         }
         try {
-            if (connection.responseCode != 200) throw IllegalStateException("Source returned ${connection.responseCode}")
+            if (connection.responseCode != 200) throw PairingHttpException(connection.responseCode)
             return JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
         } finally { connection.disconnect() }
     }

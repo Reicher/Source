@@ -3,14 +3,21 @@ package com.source.self
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.Gravity
-import android.widget.Button
+import android.view.View
+import android.view.WindowInsets
+import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.TextView
 import com.google.zxing.integration.android.IntentIntegrator
 import org.json.JSONObject
@@ -32,6 +39,7 @@ class MainActivity : Activity() {
     private var port: Int = 0
     private var connected = false
     private var error: String? = null
+    private var needsRescan = false
     private var scanning = false
     private var identityReady = true
 
@@ -43,7 +51,7 @@ class MainActivity : Activity() {
             state.ensureSelfIdentity()
         } catch (e: Exception) {
             identityReady = false
-            error = "Self identity is unavailable: ${e.message}"
+            error = "Self kunde inte skapa sin identitet."
         }
         render()
         if (identityReady) {
@@ -54,7 +62,7 @@ class MainActivity : Activity() {
 
     private val tick = object : Runnable {
         override fun run() {
-            if (state.source() != null) {
+            if (state.source() != null && !needsRescan) {
                 if (address != null) connect() else if (discovery == null) startDiscovery()
             }
             handler.postDelayed(this, 10_000)
@@ -65,8 +73,8 @@ class MainActivity : Activity() {
         if (scanning) return
         scanning = true
         IntentIntegrator(this)
+            .setCaptureActivity(SelfCaptureActivity::class.java)
             .setDesiredBarcodeFormats(IntentIntegrator.QR_CODE)
-            .setPrompt("Scan the QR code on Source")
             .setBeepEnabled(false)
             .initiateScan()
     }
@@ -86,6 +94,7 @@ class MainActivity : Activity() {
                 if (state.isPaired()) throw IllegalArgumentException("Self already belongs to a Source")
                 state.savePending(source)
                 error = null
+                needsRescan = false
                 address = null
                 resolvedName = null
                 connected = false
@@ -93,8 +102,13 @@ class MainActivity : Activity() {
                 discovery = null
                 startDiscovery()
             } catch (e: Exception) {
-                error = "Invalid Source QR code: ${e.message}"
+                render()
+                startScan()
+                return
             }
+        } else {
+            finish()
+            return
         }
         render()
     }
@@ -146,6 +160,7 @@ class MainActivity : Activity() {
     }
 
     private fun connect() {
+        if (needsRescan) return
         val source = state.source() ?: return
         val host = address ?: return
         if (!connecting.compareAndSet(false, true)) return
@@ -160,33 +175,76 @@ class MainActivity : Activity() {
                     render()
                 }
             } catch (e: Exception) {
+                Log.w("SelfPairing", "Connection failed: ${e.javaClass.simpleName}: ${e.message}")
                 runOnUiThread {
                     if (state.source()?.id != source.id || state.source()?.pin != source.pin) return@runOnUiThread
                     connected = false
-                    error = e.message ?: "Connection failed"
+                    needsRescan = !state.isPaired() && e is PairingHttpException && (e.status == 403 || e.status == 409)
+                    error = when {
+                        needsRescan -> null
+                        e is PairingHttpException -> "Source avvisade anslutningen."
+                        else -> "Kunde inte ansluta till Source."
+                    }
                     render()
+                    if (needsRescan) startScan()
                 }
             } finally { connecting.set(false) }
         }
     }
 
     private fun render() {
-        val layout = LinearLayout(this).apply {
+        val backgroundColor = Color.rgb(14, 20, 21)
+        val accent = Color.rgb(116, 220, 167)
+        window.statusBarColor = backgroundColor
+        window.navigationBarColor = backgroundColor
+        window.decorView.systemUiVisibility = 0
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(backgroundColor)
+            setPadding(dp(28), dp(28), dp(28), dp(28))
+            setOnApplyWindowInsetsListener { view, insets ->
+                val bars = insets.getInsets(WindowInsets.Type.systemBars())
+                view.setPadding(dp(28) + bars.left, dp(28) + bars.top, dp(28) + bars.right, dp(28) + bars.bottom)
+                insets
+            }
+        }
+        val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setPadding(32, 32, 32, 32)
         }
         val status = when {
-            connected -> "Connected"
-            state.source() == null -> "Scan Source QR code"
-            state.isPaired() -> "Looking for paired Source…"
-            else -> "Pairing with Source…"
+            connected -> "Ansluten"
+            state.source() == null -> "Skanna Source-koden"
+            state.isPaired() -> "Söker efter Source…"
+            else -> "Kopplar ihop…"
         }
-        layout.addView(TextView(this).apply { text = status; textSize = 26f; gravity = Gravity.CENTER })
-        error?.let { layout.addView(TextView(this).apply { text = it; textSize = 16f; gravity = Gravity.CENTER }) }
-        if (identityReady && !state.isPaired()) layout.addView(Button(this).apply { text = if (state.source() == null) "Scan QR" else "Rescan QR"; setOnClickListener { startScan() } })
-        setContentView(layout)
+        if (connected) {
+            content.addView(View(this).apply {
+                background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(accent) }
+            }, LinearLayout.LayoutParams(dp(24), dp(24)).apply { bottomMargin = dp(20) })
+        } else if (error == null && state.source() != null) {
+            content.addView(ProgressBar(this).apply { indeterminateTintList = android.content.res.ColorStateList.valueOf(accent) },
+                LinearLayout.LayoutParams(dp(32), dp(32)).apply { bottomMargin = dp(20) })
+        }
+        content.addView(TextView(this).apply {
+            text = status
+            textSize = 25f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        })
+        error?.let {
+            content.addView(TextView(this).apply {
+                text = it
+                textSize = 15f
+                setTextColor(Color.rgb(189, 201, 195))
+                gravity = Gravity.CENTER
+            }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+        }
+        root.addView(content, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER))
+        setContentView(root)
     }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
 
     override fun onDestroy() {
         handler.removeCallbacks(tick)
