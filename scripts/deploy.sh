@@ -42,7 +42,7 @@ while :; do
         curl --fail --silent --insecure --output /dev/null --noproxy '*' \
             --cert "$SOURCE_DATA_ROOT/pairing/source.crt" \
             --key "$SOURCE_DATA_ROOT/pairing/source.key" \
-            https://127.0.0.1:8080/healthz; then
+            https://127.0.0.1:8443/healthz; then
         docker compose ps
         printf 'Source revision %s is healthy.\n' "$SOURCE_REVISION"
         exit 0

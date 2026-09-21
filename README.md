@@ -25,7 +25,7 @@ Every push to `main` starts the [Deploy workflow](.github/workflows/deploy.yml) 
 
 The deployment keeps Source's identity and pairing record in `$HOME/.local/share/source-v1/pairing` on the runner host. Set `SOURCE_DATA_ROOT` to another **absolute** directory before running `./scripts/deploy.sh` if needed. Keep that directory across deployments and backups. The container runs as the runner account, and the script can also be run manually from a checkout on the server. It needs no model download because V1 does not run inference yet.
 
-On the server, port 8080 serves the LAN TLS pairing API. Port 8081 is bound only to host loopback. To open setup from another computer, use an SSH tunnel, then visit `http://127.0.0.1:8081` locally:
+On the server, port 8443 serves the LAN TLS pairing API. Port 8081 is bound only to host loopback. To open setup from another computer, use an SSH tunnel, then visit `http://127.0.0.1:8081` locally:
 
 ```sh
 ssh -L 8081:127.0.0.1:8081 <server-ssh-user>@<server-LAN-IP>
