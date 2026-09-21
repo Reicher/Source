@@ -48,7 +48,7 @@ const statusTimer = setInterval(async () => {
       clearTimeout(qrTimer);
       clearInterval(statusTimer);
       clearQr();
-      document.body.innerHTML = '<h1>connected</h1>';
+      document.body.innerHTML = '<div class="paired"></div>';
     }
   } catch (_) {}
 }, 1000);

@@ -15,7 +15,7 @@ go build ./...
 go run .
 ```
 
-On a clean installation, open `http://127.0.0.1:8081` in a browser **on the Source machine**. It shows a temporary QR code until pairing, then only `connected`. The setup page is bound to loopback; the TLS pairing endpoint listens on port 8080 and is advertised as `_sourceself._tcp` via mDNS/DNS-SD. Both devices must be on a LAN that permits multicast DNS and direct connections to Source's port 8080. A local firewall may need to allow that port.
+On a clean installation, open `http://127.0.0.1:8081` in a browser **on the Source machine**. It shows a temporary QR code without text until pairing, then a simple status indicator. The setup page is bound to loopback; the TLS pairing endpoint listens on port 8080 and is advertised as `_sourceself._tcp` via mDNS/DNS-SD. Both devices must be on a LAN that permits multicast DNS and direct connections to Source's port 8080. A local firewall may need to allow that port.
 
 Source keeps its private key, certificate and the one-person/one-Self pairing record in `source/data/pairing/` when started from `source/`. Keep this directory across restarts. `-data`, `-listen`, and `-setup` can override the defaults. Losing only part of that directory is treated as an error, not as permission to create a new identity. The QR token is valid for two minutes and is never persisted. LAN discovery alone does not authenticate a peer: Self pins the certificate fingerprint from the QR code and Source pins Self's certificate at pairing.
 
@@ -45,6 +45,14 @@ adb shell am start -n com.source.self/.MainActivity
 ```
 
 On a clean installation, Self opens its QR scanner. After scanning Source's code, it finds Source using mDNS/DNS-SD, pairs over pinned TLS, and stores its own identity in Android Keystore. On later launches it automatically rediscovers and authenticates the same Source, showing `Connected` when reachable. The app currently shows only pairing/connection status, not the rest of the V1 experience. The debug APK builds without model files so CI and initial development stay fast.
+
+To fetch the latest `main`, build its debug APK, and install it on one connected Android phone while preserving the app's pairing data, run:
+
+```sh
+./scripts/install_self_latest.sh
+```
+
+Set `ANDROID_SERIAL` when more than one authorized phone is connected. This quick install does not include model packs; use `scripts/install_self.sh` for a model-pack bundle.
 
 ## Provision the initial models
 
