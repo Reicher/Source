@@ -28,4 +28,7 @@ android {
 
 dependencies {
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    // The published ZXing POM omits these runtime dependencies used by its scanner.
+    implementation("androidx.core:core:1.6.0")
+    implementation("androidx.fragment:fragment:1.3.6")
 }
