@@ -2,10 +2,12 @@ package com.source.self
 
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
 import org.json.JSONObject
 import java.math.BigInteger
 import java.security.KeyPairGenerator
+import java.security.KeyFactory
 import java.security.KeyStore
 import java.security.spec.ECGenParameterSpec
 import java.util.Date
@@ -32,13 +34,20 @@ class PairingState(context: Context) {
 
     fun ensureSelfIdentity() {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        if (store.containsAlias(alias)) return
-        if (source() != null) throw IllegalStateException("paired Self key missing")
+        if (store.containsAlias(alias)) {
+            val privateKey = store.getKey(alias, null) as java.security.PrivateKey
+            val keyInfo = KeyFactory.getInstance(privateKey.algorithm, "AndroidKeyStore")
+                .getKeySpec(privateKey, KeyInfo::class.java)
+            if (KeyProperties.DIGEST_NONE in keyInfo.digests) return
+            if (isPaired()) throw IllegalStateException("paired Self identity needs repair")
+            store.deleteEntry(alias)
+        }
+        if (isPaired()) throw IllegalStateException("paired Self key missing")
         val generator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore")
         val now = System.currentTimeMillis()
         val spec = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY)
             .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
-            .setDigests(KeyProperties.DIGEST_SHA256)
+            .setDigests(KeyProperties.DIGEST_NONE, KeyProperties.DIGEST_SHA256)
             .setCertificateSubject(X500Principal("CN=Self"))
             .setCertificateSerialNumber(BigInteger.valueOf(now))
             .setCertificateNotBefore(Date(now - 60_000))
