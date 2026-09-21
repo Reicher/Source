@@ -72,5 +72,6 @@ java -jar "$bundletool" build-apks \
 java -jar "$bundletool" install-apks \
     --apks="$apks" \
     --adb="$adb" \
-    --device-id="$serial"
+    --device-id="$serial" \
+    --timeout-millis=1800000
 "$adb" -s "$serial" shell am start -W -n com.source.self/.MainActivity
