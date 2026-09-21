@@ -87,8 +87,8 @@ func TestPairRestartAndTrustedReconnect(t *testing.T) {
 	setupRequest.RemoteAddr = "127.0.0.1:12345"
 	setupResponse := httptest.NewRecorder()
 	i.setupHandler("127.0.0.1:8081").ServeHTTP(setupResponse, setupRequest)
-	if !strings.Contains(setupResponse.Body.String(), "connected") {
-		t.Fatal("paired Source did not show connected")
+	if !strings.Contains(setupResponse.Body.String(), "id='paired'") || strings.Contains(setupResponse.Body.String(), "connected") {
+		t.Fatal("paired Source did not show its text-free status")
 	}
 	if got := postPair(t, other, s.URL, i.id, token).StatusCode; got != http.StatusConflict {
 		t.Fatalf("second Self: %d", got)

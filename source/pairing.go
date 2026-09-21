@@ -264,10 +264,10 @@ func (i *identity) setupHandler(host string) http.Handler {
 		i.mu.Unlock()
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if paired {
-			_, _ = w.Write([]byte("<!doctype html><title>Source</title><h1>connected</h1>"))
+			_, _ = w.Write([]byte("<!doctype html><style>html,body{height:100%;margin:0}body{display:grid;place-items:center}.paired{width:64px;height:64px;border-radius:50%;background:#2ba66a}</style><div id='paired' class='paired'></div>"))
 			return
 		}
-		_, _ = w.Write([]byte("<!doctype html><title>Source setup</title><meta http-equiv=refresh content=30><style>body{text-align:center;font:24px system-ui;margin:5vh auto}img{width:min(80vw,520px)}</style><h1>Pair Self with Source</h1><p>Scan this QR code in Self. It changes every two minutes.</p><img id='pairing-qr' alt='Pairing QR code' src='/qr.png'><script src='/setup.js'></script>"))
+		_, _ = w.Write([]byte("<!doctype html><meta http-equiv=refresh content=30><style>html,body{height:100%;margin:0}body{display:grid;place-items:center}img{width:min(80vw,520px)}.paired{width:64px;height:64px;border-radius:50%;background:#2ba66a}</style><img id='pairing-qr' alt='' src='/qr.png'><script src='/setup.js'></script>"))
 	})
 	mux.HandleFunc("GET /paired", func(w http.ResponseWriter, _ *http.Request) {
 		i.mu.Lock()
