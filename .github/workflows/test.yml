@@ -50,3 +50,22 @@ jobs:
         run: |
           python3 scripts/provision_models.py --check
           python3 -m unittest discover -s scripts
+
+  # Keep the required check name used by main's branch protection.
+  test:
+    needs: [source, self, models]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every foundation job to pass
+        env:
+          SOURCE_RESULT: ${{ needs.source.result }}
+          SELF_RESULT: ${{ needs.self.result }}
+          MODELS_RESULT: ${{ needs.models.result }}
+        run: |
+          for result in "$SOURCE_RESULT" "$SELF_RESULT" "$MODELS_RESULT"; do
+            if [ "$result" != success ]; then
+              printf 'A foundation job ended with status: %s\n' "$result" >&2
+              exit 1
+            fi
+          done
