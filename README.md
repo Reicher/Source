@@ -1,96 +1,50 @@
-# Source
+# Source / Self
 
-Source is a private, local-first system for personal data, storage, and AI.
-It consists of an Android Client, a local Source Node, and a versioned Source API.
-The long-term direction is described in [`VISION.md`](VISION.md).
+Source / Self is being rebuilt as V1. [SOURCE_SELF_V1_UPDATED.md](SOURCE_SELF_V1_UPDATED.md) is the product specification and source of truth. The previous prototype is preserved in Git history at the `prototype-final-2026-09-21` tag.
 
-Source is designed to run on hardware you control and keep normal operation
-inside your local network. The Client works independently; a paired Node adds
-storage, synchronization, processing, and more capable local AI.
+Issue #69 establishes empty application shells. Source is a local Go server; Self is a native Android app in Kotlin. Pairing, UI, storage, and AI inference come later.
 
-## Current status
+## Build and start Source
 
-Source is a working prototype. It currently includes:
-
-* an Android Client with local identity, encrypted storage, chat, Library,
-  LAN discovery, QR pairing, and automatic reconnect;
-* a LAN-only Source Node with localhost-only administration;
-* authenticated local AI through llama.cpp;
-* Client-to-Node Bronze storage and synchronization;
-* Node-authoritative Silver refinement with synchronized Client caching;
-* user isolation, quotas, recovery, backup, and restore;
-* a versioned OpenAPI contract.
-
-The Android Client lives in [`clients/android`](clients/android/README.md).
-
-## Install Source Node
-
-Requirements: Linux with Docker and Docker Compose, a stable LAN address, and
-enough memory and disk space for the selected local model.
+Go 1.25 or newer is required.
 
 ```sh
-cp .env.example .env
-./scripts/setup.sh
-./scripts/preflight.sh
-./scripts/provision-model.sh
-./scripts/deploy.sh
-./scripts/export-ca.sh
-```
-
-By default Source binds only to loopback. To use it from a phone on your LAN,
-set `SOURCE_BIND_IP` and `SOURCE_GATEWAY_HOST` in `.env` to the same LAN address.
-
-Open `http://127.0.0.1:9090` on the Node machine to complete setup, administer
-users, and create a temporary QR pairing invitation.
-
-Do not expose Source through router port forwarding or a public reverse proxy.
-See [`docs/operations.md`](docs/operations.md) for setup, security, backup,
-restore, and deployment details.
-
-## Install the Android Client
-
-Build and deploy Source Client to one authorized USB-connected Android device:
-
-```sh
-./scripts/deploy-android.sh
-```
-
-Pair the Client by scanning a QR invitation created from the Node's local
-administration interface. After pairing, the Client reconnects automatically
-to that specific Node on the local network.
-
-See [`clients/android/README.md`](clients/android/README.md) for Android build,
-model installation, and device-test details.
-
-## Data model
-
-Source separates personal data into three conceptual layers:
-
-* **Bronze** — original or imported source material;
-* **Silver** — Source's derived, revisable knowledge;
-* **Gold** — rebuildable projections for search, AI, timelines, and other views.
-
-The Node is authoritative for persistent Silver. Clients keep local Bronze and
-cache relevant Silver for responsive and offline use.
-
-See [`docs/SILVER.md`](docs/SILVER.md) and
-[`docs/STORAGE_AND_SYNC.md`](docs/STORAGE_AND_SYNC.md) for the canonical rules.
-
-## Development
-
-Source Node requires Go 1.25 or newer:
-
-```sh
-cd node
+cd source
 go test ./...
-go run ./cmd/source-node
+go build ./...
+go run .
 ```
 
-Repository content uses English. Android user-facing strings belong in
-`res/values/strings.xml`. The versioned API contract lives in
-[`contracts/`](contracts/README.md).
+Source listens on `127.0.0.1:8080` by default. `GET /healthz` returns HTTP 204. Pass `-listen 127.0.0.1:PORT` to use another local port.
 
-## License
+## Build and start Self
 
-No open-source license has been selected yet. The repository may be viewed and
-evaluated, but reuse rights are not granted until a license is added.
+Install Java 17 and Android SDK 36. The Gradle wrapper installs the required Gradle version.
+
+```sh
+cd self/android
+./gradlew :app:testDebugUnitTest :app:assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb shell am start -n com.source.self/.MainActivity
+```
+
+The app opens as a blank Android activity. The debug APK builds without model files so that CI and initial development stay fast.
+
+## Provision the initial models
+
+The initial models are Qwen 3.5 4B Q4_K_M for Self and Qwen 3.5 9B Q5_K_M for Source. Exact revisions, sizes, and SHA-256 checksums are pinned in [models/models.json](models/models.json). They are starting choices, not permanent architecture.
+
+From the repository root, run:
+
+```sh
+python3 scripts/provision_models.py --check
+python3 scripts/provision_models.py self
+python3 scripts/provision_models.py source
+python3 scripts/provision_models.py --verify
+```
+
+Downloads resume from `.download` files after interruption and are verified before use. Source's model is placed in `data/models/`. Self's verified model is split into three install-time Android asset packs under `self/android/model_pack_*/src/main/assets/`. These large files are ignored by Git. Once Self's model is provisioned, `cd self/android && ./gradlew :app:bundleDebug` builds an Android App Bundle containing the packs. Installing that bundle and its packs on a device requires an APK set generated with bundletool; a plain debug APK does not include the model packs.
+
+To install the bundle and its model packs on one connected Android device, run `./scripts/install_self.sh` from the repository root. Set `ANDROID_SERIAL` if multiple devices are connected. The script verifies the Self model, builds the bundle, downloads a pinned bundletool, installs the generated APK set, and starts Self.
+
+CI validates the empty projects and the pinned manifest without downloading either multi-gigabyte model. No model is loaded or used for inference in issue #69.
