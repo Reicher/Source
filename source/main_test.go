@@ -7,8 +7,12 @@ import (
 )
 
 func TestHealthz(t *testing.T) {
+	i, err := loadIdentity(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	response := httptest.NewRecorder()
-	handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	i.lanHandler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("GET /healthz: got %d, want %d", response.Code, http.StatusNoContent)
 	}

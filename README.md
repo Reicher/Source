@@ -2,7 +2,7 @@
 
 Source / Self is being rebuilt as V1. [SOURCE_SELF_V1_UPDATED.md](SOURCE_SELF_V1_UPDATED.md) is the product specification and source of truth. The previous prototype is preserved in Git history at the `prototype-final-2026-09-21` tag.
 
-Issue #69 establishes empty application shells. Source is a local Go server; Self is a native Android app in Kotlin. Pairing, UI, storage, and AI inference come later.
+Source is a local Go server; Self is a native Android app in Kotlin. The first-start pairing flow creates exactly one Source/Self relationship. Data synchronization and AI inference are separate work.
 
 ## Build and start Source
 
@@ -15,7 +15,9 @@ go build ./...
 go run .
 ```
 
-Source listens on `127.0.0.1:8080` by default. `GET /healthz` returns HTTP 204. Pass `-listen 127.0.0.1:PORT` to use another local port.
+On a clean installation, open `http://127.0.0.1:8081` in a browser **on the Source machine**. It shows a temporary QR code until pairing, then only `connected`. The setup page is bound to loopback; the TLS pairing endpoint listens on port 8080 and is advertised as `_sourceself._tcp` via mDNS/DNS-SD. Both devices must be on a LAN that permits multicast DNS and direct connections to Source's port 8080. A local firewall may need to allow that port.
+
+Source keeps its private key, certificate and the one-person/one-Self pairing record in `source/data/pairing/` when started from `source/`. Keep this directory across restarts. `-data`, `-listen`, and `-setup` can override the defaults. Losing only part of that directory is treated as an error, not as permission to create a new identity. The QR token is valid for two minutes and is never persisted. LAN discovery alone does not authenticate a peer: Self pins the certificate fingerprint from the QR code and Source pins Self's certificate at pairing.
 
 ## Build and start Self
 
@@ -28,7 +30,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb shell am start -n com.source.self/.MainActivity
 ```
 
-The app opens as a blank Android activity. The debug APK builds without model files so that CI and initial development stay fast.
+On a clean installation, Self opens its QR scanner. After scanning Source's code, it finds Source using mDNS/DNS-SD, pairs over pinned TLS, and stores its own identity in Android Keystore. On later launches it automatically rediscovers and authenticates the same Source, showing `Connected` when reachable. The app currently shows only pairing/connection status, not the rest of the V1 experience. The debug APK builds without model files so CI and initial development stay fast.
 
 ## Provision the initial models
 
@@ -47,4 +49,4 @@ Downloads resume from `.download` files after interruption and are verified befo
 
 To install the bundle and its model packs on one connected Android device, run `./scripts/install_self.sh` from the repository root. Set `ANDROID_SERIAL` if multiple devices are connected. The script verifies the Self model, builds the bundle, downloads a pinned bundletool, installs the generated APK set, and starts Self.
 
-CI validates the empty projects and the pinned manifest without downloading either multi-gigabyte model. No model is loaded or used for inference in issue #69.
+CI validates the applications and pinned manifest without downloading either multi-gigabyte model. No model is loaded or used for inference in this pairing work.
