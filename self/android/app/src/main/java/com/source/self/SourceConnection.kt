@@ -148,13 +148,13 @@ class SourceConnection(
                 val personId = transport.connect(source, host, targetPort)
                 if (!isCurrent(current, source) || session != syncVersion.get()) return@execute
                 if (!state.isPaired()) state.savePaired(source, personId)
+                BronzeSync(bronze, transport).run(source, host, targetPort,
+                    { isCurrent(current, source) && session == syncVersion.get() },
+                    { handler.post { if (isCurrent(current, source)) onBronzeChanged() } })
                 handler.post {
                     if (!isCurrent(current, source) || session != syncVersion.get()) return@post
                     onStatus(true, null, false)
                 }
-                BronzeSync(bronze, transport).run(source, host, targetPort,
-                    { isCurrent(current, source) && session == syncVersion.get() },
-                    { handler.post { if (isCurrent(current, source)) onBronzeChanged() } })
             } catch (e: Exception) {
                 Log.w("SelfPairing", "Connection failed: ${e.javaClass.simpleName}: ${e.message}")
                 handler.post {
@@ -162,6 +162,8 @@ class SourceConnection(
                     needsRescan = !state.isPaired() && e is PairingHttpException && (e.status == 403 || e.status == 409)
                     val message = when {
                         needsRescan -> null
+                        e is PairingHttpException && e.status == 404 && e.path == "/v1/bronze" ->
+                            "Source needs the Bronze sync update."
                         e is PairingHttpException -> "Source rejected the connection."
                         else -> "Could not connect or sync with Source."
                     }

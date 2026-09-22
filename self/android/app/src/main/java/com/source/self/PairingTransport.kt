@@ -19,7 +19,7 @@ import javax.net.ssl.SSLEngine
 private fun pin(cert: X509Certificate): String = MessageDigest.getInstance("SHA-256")
     .digest(cert.encoded).joinToString("") { "%02x".format(it) }
 
-class PairingHttpException(val status: Int) : Exception("Source returned $status")
+class PairingHttpException(val status: Int, val path: String) : Exception("Source returned $status for $path")
 
 class PairingTransport(private val state: PairingState) {
     @Volatile private var current: HttpsURLConnection? = null
@@ -54,7 +54,7 @@ class PairingTransport(private val state: PairingState) {
                 connection.setRequestProperty("Content-Type", "application/json")
                 connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
             }
-            if (connection.responseCode != 200) throw PairingHttpException(connection.responseCode)
+            if (connection.responseCode != 200) throw PairingHttpException(connection.responseCode, path)
             return JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
         } finally { close(connection) }
     }
@@ -62,7 +62,7 @@ class PairingTransport(private val state: PairingState) {
     fun manifest(source: SourceRef, address: String, port: Int): List<BronzeItem> {
         val connection = open(base(address, port), "/v1/bronze", source.pin, "GET")
         try {
-            if (connection.responseCode != 200) throw PairingHttpException(connection.responseCode)
+            if (connection.responseCode != 200) throw PairingHttpException(connection.responseCode, "/v1/bronze")
             return BronzeItem.list(JSONArray(connection.inputStream.bufferedReader().use { it.readText() }))
         } finally { close(connection) }
     }
@@ -80,7 +80,7 @@ class PairingTransport(private val state: PairingState) {
                 file?.inputStream()?.use { input -> connection.outputStream.use { output -> input.copyTo(output) } }
                     ?: error("Bronze content missing")
             }
-            if (connection.responseCode != 200) throw PairingHttpException(connection.responseCode)
+            if (connection.responseCode != 200) throw PairingHttpException(connection.responseCode, "/v1/bronze/${item.id}")
         } finally { close(connection) }
     }
 
@@ -88,7 +88,7 @@ class PairingTransport(private val state: PairingState) {
         if (item.deleted) { store.install(item, null); return }
         val connection = open(base(address, port), "/v1/bronze/${item.id}", source.pin, "GET")
         try {
-            if (connection.responseCode != 200) throw PairingHttpException(connection.responseCode)
+            if (connection.responseCode != 200) throw PairingHttpException(connection.responseCode, "/v1/bronze/${item.id}")
             connection.inputStream.use { store.install(item, it) }
         } finally { close(connection) }
     }
