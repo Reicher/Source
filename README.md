@@ -17,7 +17,7 @@ go run .
 
 On a clean installation, open `http://127.0.0.1:8081` in a browser **on the Source machine**. It shows a temporary QR code without text until pairing, then a simple status indicator. The setup page is bound to loopback; the TLS pairing endpoint listens on port 8080 and is advertised as `_sourceself._tcp` via mDNS/DNS-SD. Both devices must be on a LAN that permits multicast DNS and direct connections to Source's port 8080. A local firewall may need to allow that port.
 
-Source keeps its private key, certificate and the one-person/one-Self pairing record in `source/data/pairing/` when started from `source/`. Keep this directory across restarts. `-data`, `-listen`, and `-setup` can override the defaults. Losing only part of that directory is treated as an error, not as permission to create a new identity. The QR token is valid for two minutes and is never persisted. LAN discovery alone does not authenticate a peer: Self pins the certificate fingerprint from the QR code and Source pins Self's certificate at pairing.
+Source keeps its private key, certificate and the one-person/one-Self pairing record in `source/data/pairing/` when started from `source/`. Keep this directory across restarts. `-data`, `-listen`, and `-setup` can override the defaults. First-time identity creation stages all three files and activates them together; losing only part of an active identity is treated as an error. The QR token is valid for two minutes and is never persisted. LAN discovery alone does not authenticate a peer: Self pins the certificate fingerprint from the QR code and Source pins Self's certificate at pairing.
 
 ## Deploy Source on the home server
 
@@ -31,7 +31,7 @@ On the server, port 8443 serves the LAN TLS pairing API. Port 8081 is bound only
 ssh -L 8081:127.0.0.1:8081 <server-ssh-user>@<server-LAN-IP>
 ```
 
-The previous prototype's Compose stack can be stopped after the V1 health checks pass. Its data is not reused by V1; keep a backup until the migration is complete. Do not expose port 8081 through a router or public proxy.
+Do not expose port 8081 through a router or public proxy.
 
 ## Build and start Self
 

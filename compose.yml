@@ -13,7 +13,7 @@ services:
     network_mode: host
     command: ["-listen", ":8443", "-setup", "127.0.0.1:8081", "-data", "/data/pairing"]
     volumes:
-      - "${SOURCE_DATA_ROOT:?}/pairing:/data/pairing"
+      - "${SOURCE_DATA_ROOT:?}:/data"
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777

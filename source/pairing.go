@@ -85,24 +85,39 @@ func savePrivate(path string, value []byte) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(f.Name(), path)
+	if err := os.Rename(f.Name(), path); err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(path))
+}
+
+func syncDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func loadIdentity(dir string) (*identity, error) {
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dir), 0700); err != nil {
 		return nil, err
 	}
 	i := &identity{certPath: filepath.Join(dir, "source.crt"), keyPath: filepath.Join(dir, "source.key"), statePath: filepath.Join(dir, "state.json")}
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) || (err == nil && len(entries) == 0) {
+		if err := i.create(dir); err != nil {
+			return nil, err
+		}
+	} else if err != nil {
+		return nil, err
+	}
 	_, certErr := os.Stat(i.certPath)
 	_, keyErr := os.Stat(i.keyPath)
 	_, stateErr := os.Stat(i.statePath)
 	if certErr != nil || keyErr != nil || stateErr != nil {
-		if !errors.Is(certErr, os.ErrNotExist) || !errors.Is(keyErr, os.ErrNotExist) || !errors.Is(stateErr, os.ErrNotExist) {
-			return nil, fmt.Errorf("incomplete Source identity in %s; refusing to regenerate it", dir)
-		}
-		if err := i.create(); err != nil {
-			return nil, err
-		}
+		return nil, fmt.Errorf("incomplete Source identity in %s; refusing to regenerate it", dir)
 	}
 	state, err := os.ReadFile(i.statePath)
 	if err != nil {
@@ -126,7 +141,12 @@ func loadIdentity(dir string) (*identity, error) {
 	return i, nil
 }
 
-func (i *identity) create() error {
+func (i *identity) create(dir string) error {
+	stage, err := os.MkdirTemp(filepath.Dir(dir), ".source-identity-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(stage)
 	id, err := randomString(16)
 	if err != nil {
 		return err
@@ -149,14 +169,24 @@ func (i *identity) create() error {
 	if err != nil {
 		return err
 	}
-	if err := savePrivate(i.keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})); err != nil {
+	if err := savePrivate(filepath.Join(stage, "source.key"), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})); err != nil {
 		return err
 	}
-	if err := savePrivate(i.certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})); err != nil {
+	if err := savePrivate(filepath.Join(stage, "source.crt"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})); err != nil {
 		return err
 	}
 	state, _ := json.Marshal(diskState{ID: id})
-	return savePrivate(i.statePath, state)
+	if err := savePrivate(filepath.Join(stage, "state.json"), state); err != nil {
+		return err
+	}
+	// Deployment may have created an empty bind-mount directory already.
+	if err := os.Remove(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Rename(stage, dir); err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(dir))
 }
 
 func (i *identity) tlsConfig() *tls.Config {
