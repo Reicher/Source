@@ -3,59 +3,63 @@ package com.source.self
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
-import android.graphics.BitmapFactory
-import android.graphics.Color
-import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
-import android.view.View
-import android.view.WindowInsets
-import android.widget.Button
 import android.widget.EditText
-import android.widget.FrameLayout
-import android.widget.ImageView
-import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.TextView
+import android.window.OnBackInvokedCallback
+import android.window.OnBackInvokedDispatcher
 import com.google.zxing.integration.android.IntentIntegrator
 import org.json.JSONObject
-import java.text.DateFormat
-import java.util.Date
 import java.util.concurrent.Executors
 
 private const val PICK_FILE = 1001
-private const val MAX_TEXT_PREVIEW_CHARS = 64 * 1024
-private const val MAX_EDITABLE_TEXT_BYTES = 1024 * 1024L
-private val backgroundColor = Color.rgb(14, 20, 21)
-private val accent = Color.rgb(116, 220, 167)
-private val secondary = Color.rgb(189, 201, 195)
 
 class MainActivity : Activity() {
     private lateinit var state: PairingState
     private lateinit var bronze: BronzeStore
+    private lateinit var desktop: DesktopStore
     private lateinit var connection: SourceConnection
+    private lateinit var views: SelfViews
     private val io = Executors.newSingleThreadExecutor()
     private var connected = false
+    private var disconnectedAt: Long? = null
     private var error: String? = null
     private var scanning = false
     private var identityReady = true
     private var detailId: String? = null
+    private var section = AppSection.DESKTOP
+    private val systemBack = OnBackInvokedCallback { handleBack() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, systemBack)
         state = PairingState(this)
         bronze = BronzeStore(this)
+        desktop = DesktopStore(this)
+        desktop.reconcileBronze(bronze.all())
+        views = SelfViews(this, bronze)
         detailId = savedInstanceState?.getString("detail")
+        section = savedInstanceState?.getString("section")?.let {
+            runCatching { AppSection.valueOf(it) }.getOrNull()
+        } ?: AppSection.DESKTOP
+        disconnectedAt = savedInstanceState?.getLong("disconnected_at")?.takeIf { it > 0 }
         connection = SourceConnection(this, state, bronze, { isConnected, message, rescan ->
+            if (connected && !isConnected && disconnectedAt == null) disconnectedAt = System.currentTimeMillis()
+            if (isConnected) disconnectedAt = null
             connected = isConnected
             error = message
             render()
             if (rescan) startScan()
-        }, { render() })
-        try { state.ensureSelfIdentity() }
-        catch (_: Exception) { identityReady = false; error = "Could not create Self identity." }
+        }, {
+            desktop.reconcileBronze(bronze.all())
+        })
+        try {
+            state.ensureSelfIdentity()
+        } catch (_: Exception) {
+            identityReady = false
+            error = "Could not create Self identity."
+        }
         render()
         if (identityReady) {
             if (state.source() == null) startScan() else connection.start()
@@ -64,6 +68,8 @@ class MainActivity : Activity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString("detail", detailId)
+        outState.putString("section", section.name)
+        disconnectedAt?.let { outState.putLong("disconnected_at", it) }
         super.onSaveInstanceState(outState)
     }
 
@@ -86,12 +92,18 @@ class MainActivity : Activity() {
         if (requestCode == PICK_FILE) {
             if (resultCode == RESULT_OK && data?.data != null) {
                 val uri = data.data!!
-                write { bronze.import(uri) }
+                write {
+                    val item = bronze.import(uri)
+                    desktop.place(DESKTOP_OBJECT_BRONZE, item.id)
+                }
             }
             return
         }
         val result = IntentIntegrator.parseActivityResult(requestCode, resultCode, data)
-        if (result == null) { super.onActivityResult(requestCode, resultCode, data); return }
+        if (result == null) {
+            super.onActivityResult(requestCode, resultCode, data)
+            return
+        }
         scanning = false
         if (result.contents != null) {
             try {
@@ -101,8 +113,15 @@ class MainActivity : Activity() {
                 error = null
                 connected = false
                 connection.start()
-            } catch (_: Exception) { render(); startScan(); return }
-        } else { finish(); return }
+            } catch (_: Exception) {
+                render()
+                startScan()
+                return
+            }
+        } else {
+            finish()
+            return
+        }
         render()
     }
 
@@ -110,7 +129,11 @@ class MainActivity : Activity() {
         io.execute {
             try {
                 action()
-                runOnUiThread { render(); connection.syncSoon() }
+                desktop.reconcileBronze(bronze.all())
+                runOnUiThread {
+                    render()
+                    connection.syncSoon()
+                }
             } catch (e: Exception) {
                 runOnUiThread {
                     AlertDialog.Builder(this).setMessage("Could not save: ${e.message}")
@@ -120,148 +143,119 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun noteDialog(item: BronzeItem? = null) {
+    private fun noteDialog() {
         val body = EditText(this).apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-            minLines = 6; gravity = Gravity.TOP
-            setPadding(dp(20), dp(16), dp(20), dp(16))
-            setText(item?.let {
-                check(it.size <= MAX_EDITABLE_TEXT_BYTES) { "Text file is too large to edit" }
-                bronze.content(it).readText(Charsets.UTF_8)
-            } ?: "")
+            minLines = 6
+            gravity = Gravity.TOP
+            setPadding(views.dp(20), views.dp(16), views.dp(20), views.dp(16))
         }
         AlertDialog.Builder(this).setView(body).setNegativeButton("Cancel", null)
             .setPositiveButton("Save") { _, _ ->
-                val text = body.text.toString()
-                write { if (item == null) bronze.createNote(text) else bronze.editText(item.id, text) }
+                val value = body.text.toString()
+                write {
+                    val saved = bronze.createNote(value)
+                    desktop.place(DESKTOP_OBJECT_BRONZE, saved.id)
+                }
             }.show()
     }
 
-    private fun root(): LinearLayout {
-        window.statusBarColor = backgroundColor
-        window.navigationBarColor = backgroundColor
-        window.decorView.systemUiVisibility = 0
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(backgroundColor)
-            setPadding(dp(20), dp(20), dp(20), dp(20))
-            setOnApplyWindowInsetsListener { view, insets ->
-                val bars = insets.getInsets(WindowInsets.Type.systemBars())
-                view.setPadding(dp(20) + bars.left, dp(20) + bars.top, dp(20) + bars.right, dp(20) + bars.bottom)
-                insets
-            }
-        }
-    }
-
-    private fun text(value: String, size: Float = 16f, bold: Boolean = false): TextView = TextView(this).apply {
-        text = value; textSize = size; setTextColor(Color.WHITE)
-        if (bold) typeface = Typeface.DEFAULT_BOLD
-    }
-
-    private fun button(label: String, action: () -> Unit): Button = Button(this).apply {
-        text = label; isAllCaps = false; setOnClickListener { action() }
-    }
-
     private fun render() {
-        if (!identityReady || !state.isPaired()) { renderPairing(); return }
-        val selected = detailId?.let { bronze.get(it) }
-        if (selected == null || selected.deleted) { detailId = null; renderList() }
-        else renderDetail(selected)
+        if (!identityReady || !state.isPaired()) {
+            renderPairing()
+            return
+        }
+        val selected = detailId?.let(bronze::get)?.takeUnless { it.deleted }
+        if (detailId != null && selected == null) detailId = null
+        val content = if (selected != null) {
+            views.bronzeDetail(
+                selected,
+                onArchive = {
+                    desktop.remove(DESKTOP_OBJECT_BRONZE, selected.id)
+                    detailId = null
+                    render()
+                },
+                onDelete = { confirmDelete(selected) },
+            )
+        } else when (section) {
+            AppSection.DESKTOP -> views.desktop(
+                desktop.items(),
+                onAdd = ::addMenu,
+                onOpen = ::openDesktopItem,
+                onItemMenu = ::desktopItemMenu,
+            )
+            AppSection.SELF -> views.self(bronze.all().count { !it.deleted })
+            AppSection.SOURCE -> views.source(connected, disconnectedAt, error)
+        }
+        setContentView(views.app(content, section, connected) { destination ->
+            section = destination
+            detailId = null
+            render()
+        })
     }
 
     private fun renderPairing() {
-        val root = FrameLayout(this).apply { setBackgroundColor(backgroundColor) }
-        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER }
         val status = when {
             connected -> "Connected"
             state.source() == null -> "Scan Source code"
             else -> "Connecting…"
         }
-        content.addView(text(status, 25f, true).apply { gravity = Gravity.CENTER })
-        error?.let { content.addView(text(it, 15f).apply { setTextColor(secondary); gravity = Gravity.CENTER }) }
-        root.addView(content, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER))
-        setContentView(root)
+        setContentView(views.pairing(status, error))
     }
 
-    private fun renderList() {
-        val root = root()
-        error?.let { root.addView(text(it, 13f).apply { setTextColor(secondary) }) }
-        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        actions.addView(button("+ Note") { noteDialog() }, LinearLayout.LayoutParams(0, -2, 1f))
-        actions.addView(button("+ File") { pick() }, LinearLayout.LayoutParams(0, -2, 1f))
-        root.addView(actions)
-        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val visible = bronze.all().filterNot { it.deleted }
-        visible.forEach { list.addView(bronzeCard(it)) }
-        root.addView(ScrollView(this).apply { addView(list) }, LinearLayout.LayoutParams(-1, 0, 1f))
-        setContentView(root)
+    private fun openDesktopItem(ref: DesktopObjectRef) {
+        if (ref.objectType != DESKTOP_OBJECT_BRONZE) return
+        detailId = ref.objectId
+        render()
     }
 
-    private fun bronzeCard(item: BronzeItem): View = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(dp(16), dp(13), dp(16), dp(13))
-        background = GradientDrawable().apply { setColor(Color.rgb(29, 39, 39)); cornerRadius = dp(8).toFloat() }
-        addView(text(item.title, 17f, true))
-        addView(text(if (item.ackedRevision == item.revision) "Synced" else "Pending", 12f).apply {
-            setTextColor(if (item.ackedRevision == item.revision) accent else secondary)
-        })
-        setOnClickListener { detailId = item.id; render() }
-        layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) }
+    private fun addMenu() {
+        val actions = arrayOf("Note", "File")
+        AlertDialog.Builder(this).setTitle("Add").setItems(actions) { _, which ->
+            when (which) {
+                0 -> noteDialog()
+                1 -> pick()
+            }
+        }.show()
     }
 
-    private fun renderDetail(item: BronzeItem) {
-        val root = root()
-        root.addView(button("← Back") { detailId = null; render() })
-        root.addView(text(item.title, 25f, true), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(16) })
-        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+    private fun desktopItemMenu(ref: DesktopObjectRef) {
+        val actions = arrayOf("Move earlier", "Move later", "Archive")
+        AlertDialog.Builder(this).setItems(actions) { _, which ->
+            when (which) {
+                0 -> desktop.move(ref.objectType, ref.objectId, -1)
+                1 -> desktop.move(ref.objectType, ref.objectId, 1)
+                2 -> desktop.remove(ref.objectType, ref.objectId)
+            }
+            render()
+        }.show()
+    }
+
+    private fun confirmDelete(item: BronzeItem) {
+        AlertDialog.Builder(this).setMessage("Delete ${item.title}?")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Delete") { _, _ ->
+                detailId = null
+                write { bronze.delete(item.id) }
+            }.show()
+    }
+
+    private fun handleBack() {
         when {
-            item.mime == "text/plain" -> body.addView(text(textPreview(item)))
-            item.mime.startsWith("image/") -> {
-                val file = bronze.content(item)
-                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                BitmapFactory.decodeFile(file.path, bounds)
-                val sample = maxOf(1, maxOf(bounds.outWidth, bounds.outHeight) / 1200)
-                val bitmap = BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply { inSampleSize = sample })
-                if (bitmap != null) body.addView(ImageView(this).apply { setImageBitmap(bitmap); adjustViewBounds = true })
-            }
-        }
-        val date = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
-        body.addView(text("Size: ${item.size} bytes\nAdded: ${date.format(Date(item.created))}\nModified: ${date.format(Date(item.modified))}\nType: ${item.mime}", 14f).apply {
-            setTextColor(secondary)
-        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(20) })
-        root.addView(ScrollView(this).apply { addView(body) }, LinearLayout.LayoutParams(-1, 0, 1f))
-        if (item.mime == "text/plain" && item.size <= MAX_EDITABLE_TEXT_BYTES)
-            root.addView(button("Edit") { noteDialog(item) })
-        root.addView(button("Delete") {
-            AlertDialog.Builder(this).setMessage("Delete ${item.title}?")
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Delete") { _, _ -> detailId = null; write { bronze.delete(item.id) } }.show()
-        })
-        setContentView(root)
-    }
-
-    private fun textPreview(item: BronzeItem): String {
-        bronze.content(item).bufferedReader(Charsets.UTF_8).use { reader ->
-            val value = CharArray(MAX_TEXT_PREVIEW_CHARS + 1)
-            var count = 0
-            while (count < value.size) {
-                val read = reader.read(value, count, value.size - count)
-                if (read < 0) break
-                count += read
-            }
-            val shown = String(value, 0, minOf(count, MAX_TEXT_PREVIEW_CHARS))
-            return if (count > MAX_TEXT_PREVIEW_CHARS) "$shown\n…" else shown
+            detailId != null -> { detailId = null; render() }
+            section != AppSection.DESKTOP -> { section = AppSection.DESKTOP; render() }
+            else -> finish()
         }
     }
 
-    private fun dp(value: Int) = (value * resources.displayMetrics.density + 0.5f).toInt()
-
-    @Deprecated("Use the visible back button")
-    override fun onBackPressed() {
-        if (detailId != null) { detailId = null; render() } else super.onBackPressed()
-    }
+    @Deprecated("Handled by Android's system Back control")
+    override fun onBackPressed() = handleBack()
 
     override fun onDestroy() {
-        connection.stop(); io.shutdownNow(); super.onDestroy()
+        onBackInvokedDispatcher.unregisterOnBackInvokedCallback(systemBack)
+        connection.stop()
+        views.close()
+        io.shutdownNow()
+        super.onDestroy()
     }
 }
