@@ -53,7 +53,6 @@ class MainActivity : Activity() {
             if (rescan) startScan()
         }, {
             desktop.reconcileBronze(bronze.all())
-            render()
         })
         try {
             state.ensureSelfIdentity()
@@ -255,6 +254,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         onBackInvokedDispatcher.unregisterOnBackInvokedCallback(systemBack)
         connection.stop()
+        views.close()
         io.shutdownNow()
         super.onDestroy()
     }

@@ -7,11 +7,14 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowInsets
+import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ListView
 import android.widget.ScrollView
 import android.widget.TextView
 import java.text.DateFormat
@@ -32,6 +35,11 @@ enum class AppSection(val label: String) {
 }
 
 class SelfViews(private val activity: Activity, private val bronze: BronzeStore) {
+    private val thumbnails = ThumbnailLoader(bronze, dp(220), dp(300))
+    private var desktopList: ListView? = null
+
+    fun close() = thumbnails.close()
+
     fun app(
         content: View,
         selected: AppSection,
@@ -72,18 +80,25 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         onOpen: (DesktopObjectRef) -> Unit,
         onItemMenu: (DesktopObjectRef) -> Unit,
     ): View = FrameLayout(activity).apply {
-        val scrollBody = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
-        if (refs.isNotEmpty()) addGrid(scrollBody, refs, onOpen, onItemMenu)
-        else {
-            scrollBody.addView(label("Desktop is empty", 17f).apply {
+        if (refs.isNotEmpty()) {
+            val previousPosition = desktopList?.firstVisiblePosition ?: 0
+            val previousTop = desktopList?.getChildAt(0)?.top ?: 0
+            val list = ListView(activity).apply {
+                divider = null
+                isVerticalScrollBarEnabled = false
+                clipToPadding = false
+                setPadding(0, dp(4), 0, dp(88))
+                adapter = DesktopAdapter(refs, onOpen, onItemMenu)
+                setSelectionFromTop(previousPosition, previousTop)
+            }
+            desktopList = list
+            addView(list, FrameLayout.LayoutParams(-1, -1))
+        } else {
+            desktopList = null
+            addView(label("Desktop is empty", 17f).apply {
                 setTextColor(secondaryColor); gravity = Gravity.CENTER; setPadding(0, dp(64), 0, 0)
-            })
+            }, FrameLayout.LayoutParams(-1, -2))
         }
-        addView(ScrollView(activity).apply {
-            addView(scrollBody)
-            clipToPadding = false
-            setPadding(0, 0, 0, dp(88))
-        }, FrameLayout.LayoutParams(-1, -1))
         addView(label("+", 36f).apply {
             gravity = Gravity.CENTER
             setTextColor(backgroundColor)
@@ -209,15 +224,28 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             }
         }
 
-    private fun addGrid(
-        parent: LinearLayout,
-        refs: List<DesktopObjectRef>,
-        onOpen: (DesktopObjectRef) -> Unit,
-        onMenu: (DesktopObjectRef) -> Unit,
-    ) {
-        parent.addView(DesktopFlowLayout(activity).apply {
-            refs.forEach { ref -> addView(desktopTile(ref, onOpen, onMenu)) }
-        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+    private inner class DesktopAdapter(
+        private val refs: List<DesktopObjectRef>,
+        private val onOpen: (DesktopObjectRef) -> Unit,
+        private val onMenu: (DesktopObjectRef) -> Unit,
+    ) : BaseAdapter() {
+        private val columns = maxOf(2, activity.resources.configuration.smallestScreenWidthDp / 220)
+
+        override fun getCount(): Int = (refs.size + columns - 1) / columns
+
+        override fun getItem(position: Int): Any = refs[position * columns]
+
+        override fun getItemId(position: Int): Long = position.toLong()
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+            val row = (convertView as? DesktopFlowLayout) ?: DesktopFlowLayout(activity)
+            row.removeAllViews()
+            val first = position * columns
+            refs.subList(first, minOf(first + columns, refs.size)).forEach { ref ->
+                row.addView(desktopTile(ref, onOpen, onMenu))
+            }
+            return row
+        }
     }
 
     private fun desktopTile(
@@ -234,16 +262,9 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             when {
                 item == null -> addView(label("Item", 16f, true))
                 item.mime.startsWith("image/") -> {
-                    imageView(item, 360)?.let { image ->
-                        val imageWidth = image.drawable.intrinsicWidth
-                        val imageHeight = image.drawable.intrinsicHeight
-                        val scale = minOf(1f, dp(220).toFloat() / imageWidth, dp(300).toFloat() / imageHeight)
-                        image.scaleType = ImageView.ScaleType.FIT_CENTER
-                        addView(image, LinearLayout.LayoutParams(
-                            maxOf(1, (imageWidth * scale).toInt()),
-                            maxOf(1, (imageHeight * scale).toInt()),
-                        ))
-                    }
+                    val image = ImageView(activity).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
+                    addView(image)
+                    thumbnails.bind(item, image)
                 }
                 item.mime == "text/plain" -> {
                     val preview = runCatching { excerptWords(textPreview(item)) }.getOrDefault("")
