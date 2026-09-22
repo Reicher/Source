@@ -8,11 +8,29 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
+	"time"
 )
+
+type blockingResponseWriter struct {
+	header  http.Header
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *blockingResponseWriter) Header() http.Header { return w.header }
+func (w *blockingResponseWriter) WriteHeader(int)     {}
+func (w *blockingResponseWriter) Write(value []byte) (int, error) {
+	w.once.Do(func() { close(w.started) })
+	<-w.release
+	return len(value), nil
+}
 
 func bronzeRequest(t *testing.T, store *bronzeStore, method string, item bronzeItem, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
@@ -114,6 +132,84 @@ func TestBronzeSharedContentSurvivesOneDeletion(t *testing.T) {
 	}
 	if _, err := os.Stat(store.blobPath(second.Hash)); err != nil {
 		t.Fatalf("shared content was removed: %v", err)
+	}
+}
+
+func TestBronzeStalledUploadDoesNotBlockManifest(t *testing.T) {
+	store := newBronzeStore(t.TempDir())
+	content := []byte("slow upload")
+	sum := sha256.Sum256(content)
+	item := bronzeItem{ID: "66666666-6666-4666-8666-666666666666", Revision: 1,
+		Hash: hex.EncodeToString(sum[:]), Title: "Slow", Mime: "text/plain", Size: int64(len(content)), Created: 1, Modified: 1}
+
+	reader, writer := io.Pipe()
+	request := httptest.NewRequest(http.MethodPut, "/v1/bronze/"+item.ID, reader)
+	value, _ := json.Marshal(item)
+	request.Header.Set(bronzeMetaHeader, base64.RawURLEncoding.EncodeToString(value))
+	uploadDone := make(chan struct{})
+	go func() {
+		store.ServeHTTP(httptest.NewRecorder(), request)
+		close(uploadDone)
+	}()
+	if _, err := writer.Write(content[:1]); err != nil {
+		t.Fatal(err)
+	}
+
+	assertManifestResponds(t, store)
+	_ = writer.Close()
+	select {
+	case <-uploadDone:
+	case <-time.After(time.Second):
+		t.Fatal("upload did not stop after its request body closed")
+	}
+}
+
+func TestBronzeStalledDownloadDoesNotBlockManifest(t *testing.T) {
+	store := newBronzeStore(t.TempDir())
+	content := []byte("slow download")
+	sum := sha256.Sum256(content)
+	item := bronzeItem{ID: "77777777-7777-4777-8777-777777777777", Revision: 1,
+		Hash: hex.EncodeToString(sum[:]), Title: "Slow", Mime: "text/plain", Size: int64(len(content)), Created: 1, Modified: 1}
+	if got := bronzeRequest(t, store, http.MethodPut, item, content).Code; got != http.StatusOK {
+		t.Fatalf("store content: %d", got)
+	}
+
+	w := &blockingResponseWriter{header: make(http.Header), started: make(chan struct{}), release: make(chan struct{})}
+	downloadDone := make(chan struct{})
+	go func() {
+		store.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/bronze/"+item.ID, nil))
+		close(downloadDone)
+	}()
+	select {
+	case <-w.started:
+	case <-time.After(time.Second):
+		t.Fatal("download did not start")
+	}
+
+	assertManifestResponds(t, store)
+	close(w.release)
+	select {
+	case <-downloadDone:
+	case <-time.After(time.Second):
+		t.Fatal("download did not finish after the response resumed")
+	}
+}
+
+func assertManifestResponds(t *testing.T, store *bronzeStore) {
+	t.Helper()
+	response := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		store.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/bronze", nil))
+		response <- recorder
+	}()
+	select {
+	case recorder := <-response:
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("manifest status: %d", recorder.Code)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("manifest was blocked by a network transfer")
 	}
 }
 

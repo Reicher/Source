@@ -26,6 +26,8 @@ import java.util.Date
 import java.util.concurrent.Executors
 
 private const val PICK_FILE = 1001
+private const val MAX_TEXT_PREVIEW_CHARS = 64 * 1024
+private const val MAX_EDITABLE_TEXT_BYTES = 1024 * 1024L
 private val backgroundColor = Color.rgb(14, 20, 21)
 private val accent = Color.rgb(116, 220, 167)
 private val secondary = Color.rgb(189, 201, 195)
@@ -123,7 +125,10 @@ class MainActivity : Activity() {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
             minLines = 6; gravity = Gravity.TOP
             setPadding(dp(20), dp(16), dp(20), dp(16))
-            setText(item?.let { bronze.content(it).readText(Charsets.UTF_8) } ?: "")
+            setText(item?.let {
+                check(it.size <= MAX_EDITABLE_TEXT_BYTES) { "Text file is too large to edit" }
+                bronze.content(it).readText(Charsets.UTF_8)
+            } ?: "")
         }
         AlertDialog.Builder(this).setView(body).setNegativeButton("Cancel", null)
             .setPositiveButton("Save") { _, _ ->
@@ -210,7 +215,7 @@ class MainActivity : Activity() {
         root.addView(text(item.title, 25f, true), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(16) })
         val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         when {
-            item.mime == "text/plain" -> body.addView(text(bronze.content(item).readText(Charsets.UTF_8)))
+            item.mime == "text/plain" -> body.addView(text(textPreview(item)))
             item.mime.startsWith("image/") -> {
                 val file = bronze.content(item)
                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -225,13 +230,28 @@ class MainActivity : Activity() {
             setTextColor(secondary)
         }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(20) })
         root.addView(ScrollView(this).apply { addView(body) }, LinearLayout.LayoutParams(-1, 0, 1f))
-        if (item.mime == "text/plain") root.addView(button("Edit") { noteDialog(item) })
+        if (item.mime == "text/plain" && item.size <= MAX_EDITABLE_TEXT_BYTES)
+            root.addView(button("Edit") { noteDialog(item) })
         root.addView(button("Delete") {
             AlertDialog.Builder(this).setMessage("Delete ${item.title}?")
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Delete") { _, _ -> detailId = null; write { bronze.delete(item.id) } }.show()
         })
         setContentView(root)
+    }
+
+    private fun textPreview(item: BronzeItem): String {
+        bronze.content(item).bufferedReader(Charsets.UTF_8).use { reader ->
+            val value = CharArray(MAX_TEXT_PREVIEW_CHARS + 1)
+            var count = 0
+            while (count < value.size) {
+                val read = reader.read(value, count, value.size - count)
+                if (read < 0) break
+                count += read
+            }
+            val shown = String(value, 0, minOf(count, MAX_TEXT_PREVIEW_CHARS))
+            return if (count > MAX_TEXT_PREVIEW_CHARS) "$shown\n…" else shown
+        }
     }
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density + 0.5f).toInt()
