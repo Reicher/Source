@@ -9,6 +9,7 @@ import android.util.Log
 import java.net.Inet4Address
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 private const val SERVICE_TYPE = "_sourceself._tcp."
 
@@ -16,18 +17,22 @@ private const val SERVICE_TYPE = "_sourceself._tcp."
 class SourceConnection(
     context: Context,
     private val state: PairingState,
+    private val bronze: BronzeStore,
     private val onStatus: (connected: Boolean, error: String?, rescan: Boolean) -> Unit,
+    private val onBronzeChanged: () -> Unit,
 ) {
     private val nsd = context.getSystemService(Context.NSD_SERVICE) as NsdManager
     private val handler = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
     private val connecting = AtomicBoolean(false)
+    private val syncVersion = AtomicInteger(0)
+    private val transport = PairingTransport(state)
     private var discovery: NsdManager.DiscoveryListener? = null
     private var address: String? = null
     private var resolvedName: String? = null
     private var port = 0
-    private var generation = 0
-    private var active = false
+    @Volatile private var generation = 0
+    @Volatile private var active = false
     private var needsRescan = false
 
     private val tick = object : Runnable {
@@ -42,6 +47,8 @@ class SourceConnection(
 
     fun start() {
         generation++
+        syncVersion.incrementAndGet()
+        transport.cancel()
         active = true
         needsRescan = false
         address = null
@@ -54,11 +61,15 @@ class SourceConnection(
 
     fun stop() {
         generation++
+        syncVersion.incrementAndGet()
+        transport.cancel()
         active = false
         handler.removeCallbacks(tick)
         stopDiscovery()
         io.shutdownNow()
     }
+
+    fun syncSoon() { if (active && address != null) connect() }
 
     private fun stopDiscovery() {
         discovery?.let { try { nsd.stopServiceDiscovery(it) } catch (_: Exception) {} }
@@ -86,6 +97,8 @@ class SourceConnection(
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {
                 handler.post {
                     if (!active || generation != current || serviceInfo.serviceName != resolvedName) return@post
+                    syncVersion.incrementAndGet()
+                    transport.cancel()
                     address = null
                     resolvedName = null
                     onStatus(false, null, false)
@@ -128,29 +141,31 @@ class SourceConnection(
         val host = address ?: return
         val targetPort = port
         val current = generation
+        val session = syncVersion.get()
         if (!connecting.compareAndSet(false, true)) return
         io.execute {
             try {
-                val personId = PairingTransport(state).connect(source, host, targetPort)
+                val personId = transport.connect(source, host, targetPort)
+                if (!isCurrent(current, source) || session != syncVersion.get()) return@execute
+                if (!state.isPaired()) state.savePaired(source, personId)
+                BronzeSync(bronze, transport).run(source, host, targetPort,
+                    { isCurrent(current, source) && session == syncVersion.get() },
+                    { handler.post { if (isCurrent(current, source)) onBronzeChanged() } })
                 handler.post {
-                    if (!isCurrent(current, source)) return@post
-                    try {
-                        if (!state.isPaired()) state.savePaired(source, personId)
-                        onStatus(true, null, false)
-                    } catch (e: Exception) {
-                        Log.w("SelfPairing", "Could not save pairing", e)
-                        onStatus(false, "Kunde inte spara kopplingen till Source.", false)
-                    }
+                    if (!isCurrent(current, source) || session != syncVersion.get()) return@post
+                    onStatus(true, null, false)
                 }
             } catch (e: Exception) {
                 Log.w("SelfPairing", "Connection failed: ${e.javaClass.simpleName}: ${e.message}")
                 handler.post {
-                    if (!isCurrent(current, source)) return@post
+                    if (!isCurrent(current, source) || session != syncVersion.get()) return@post
                     needsRescan = !state.isPaired() && e is PairingHttpException && (e.status == 403 || e.status == 409)
                     val message = when {
                         needsRescan -> null
-                        e is PairingHttpException -> "Source avvisade anslutningen."
-                        else -> "Kunde inte ansluta till Source."
+                        e is PairingHttpException && e.status == 404 && e.path == "/v1/bronze" ->
+                            "Source needs the Bronze sync update."
+                        e is PairingHttpException -> "Source rejected the connection."
+                        else -> "Could not connect or sync with Source."
                     }
                     onStatus(false, message, needsRescan)
                 }

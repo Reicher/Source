@@ -223,6 +223,7 @@ func (i *identity) token() (string, time.Time, error) {
 
 func (i *identity) lanHandler() http.Handler {
 	mux := http.NewServeMux()
+	bronze := newBronzeStore(filepath.Join(filepath.Dir(i.statePath), "bronze"))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.HandleFunc("POST /v1/pair", func(w http.ResponseWriter, r *http.Request) {
 		if r.TLS == nil || len(r.TLS.PeerCertificates) != 1 {
@@ -284,7 +285,26 @@ func (i *identity) lanHandler() http.Handler {
 		}
 		writeJSON(w, map[string]string{"id": i.id, "person_id": i.state.PersonID, "status": "connected"})
 	})
+	mux.Handle("/v1/bronze", i.trusted(bronze))
+	mux.Handle("/v1/bronze/", i.trusted(bronze))
 	return mux
+}
+
+func (i *identity) trusted(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS == nil || len(r.TLS.PeerCertificates) != 1 {
+			http.Error(w, "client certificate required", http.StatusUnauthorized)
+			return
+		}
+		i.mu.Lock()
+		allowed := i.state.SelfPin != "" && i.state.SelfPin == fingerprint(r.TLS.PeerCertificates[0])
+		i.mu.Unlock()
+		if !allowed {
+			http.Error(w, "not paired", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func writeJSON(w http.ResponseWriter, value any) {

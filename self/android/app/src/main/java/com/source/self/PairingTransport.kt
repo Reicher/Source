@@ -1,6 +1,9 @@
 package com.source.self
 
 import org.json.JSONObject
+import org.json.JSONArray
+import android.util.Base64
+import java.io.File
 import java.net.URL
 import java.security.MessageDigest
 import java.security.PrivateKey
@@ -16,9 +19,15 @@ import javax.net.ssl.SSLEngine
 private fun pin(cert: X509Certificate): String = MessageDigest.getInstance("SHA-256")
     .digest(cert.encoded).joinToString("") { "%02x".format(it) }
 
-class PairingHttpException(val status: Int) : Exception("Source returned $status")
+class PairingHttpException(val status: Int, val path: String) : Exception("Source returned $status for $path")
 
 class PairingTransport(private val state: PairingState) {
+    @Volatile private var current: HttpsURLConnection? = null
+    fun cancel() { current?.disconnect() }
+    private fun close(connection: HttpsURLConnection) {
+        connection.disconnect()
+        if (current === connection) current = null
+    }
     fun connect(source: SourceRef, address: String, port: Int): String {
         val urlHost = if (address.contains(':')) "[$address]" else address
         val base = "https://$urlHost:$port"
@@ -38,6 +47,56 @@ class PairingTransport(private val state: PairingState) {
     }
 
     private fun call(base: String, path: String, pinnedSource: String, method: String, body: String?): JSONObject {
+        val connection = open(base, path, pinnedSource, method)
+        try {
+            if (body != null) {
+                connection.doOutput = true
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            }
+            if (connection.responseCode != 200) throw PairingHttpException(connection.responseCode, path)
+            return JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
+        } finally { close(connection) }
+    }
+
+    fun manifest(source: SourceRef, address: String, port: Int): List<BronzeItem> {
+        val connection = open(base(address, port), "/v1/bronze", source.pin, "GET")
+        try {
+            if (connection.responseCode != 200) throw PairingHttpException(connection.responseCode, "/v1/bronze")
+            return BronzeItem.list(JSONArray(connection.inputStream.bufferedReader().use { it.readText() }))
+        } finally { close(connection) }
+    }
+
+    fun upload(source: SourceRef, address: String, port: Int, item: BronzeItem, file: File?) {
+        val connection = open(base(address, port), "/v1/bronze/${item.id}", source.pin,
+            if (item.deleted) "DELETE" else "PUT")
+        try {
+            val header = Base64.encodeToString(item.json().toString().toByteArray(Charsets.UTF_8),
+                Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+            connection.setRequestProperty("X-Bronze-Metadata", header)
+            if (!item.deleted) {
+                connection.doOutput = true
+                connection.setFixedLengthStreamingMode(item.size)
+                file?.inputStream()?.use { input -> connection.outputStream.use { output -> input.copyTo(output) } }
+                    ?: error("Bronze content missing")
+            }
+            if (connection.responseCode != 200) throw PairingHttpException(connection.responseCode, "/v1/bronze/${item.id}")
+        } finally { close(connection) }
+    }
+
+    fun download(source: SourceRef, address: String, port: Int, item: BronzeItem, store: BronzeStore) {
+        if (item.deleted) { store.install(item, null); return }
+        val connection = open(base(address, port), "/v1/bronze/${item.id}", source.pin, "GET")
+        try {
+            if (connection.responseCode != 200) throw PairingHttpException(connection.responseCode, "/v1/bronze/${item.id}")
+            connection.inputStream.use { store.install(item, it) }
+        } finally { close(connection) }
+    }
+
+    private fun base(address: String, port: Int): String =
+        "https://${if (address.contains(':')) "[$address]" else address}:$port"
+
+    private fun open(base: String, path: String, pinnedSource: String, method: String): HttpsURLConnection {
         val store = state.keyStore()
         val alias = state.keyAlias()
         val certificate = store.getCertificate(alias) as X509Certificate
@@ -69,17 +128,10 @@ class PairingTransport(private val state: PairingState) {
             try { pin(session.peerCertificates[0] as X509Certificate) == pinnedSource } catch (_: Exception) { false }
         }
         connection.connectTimeout = 5000
-        connection.readTimeout = 5000
+        connection.readTimeout = 15000
         connection.requestMethod = method
         connection.setRequestProperty("Accept", "application/json")
-        if (body != null) {
-            connection.doOutput = true
-            connection.setRequestProperty("Content-Type", "application/json")
-            connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-        }
-        try {
-            if (connection.responseCode != 200) throw PairingHttpException(connection.responseCode)
-            return JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
-        } finally { connection.disconnect() }
+        current = connection
+        return connection
     }
 }

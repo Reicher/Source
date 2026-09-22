@@ -44,7 +44,11 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb shell am start -n com.source.self/.MainActivity
 ```
 
-On a clean installation, Self opens its QR scanner. After scanning Source's code, it finds Source using mDNS/DNS-SD, pairs over pinned TLS, and stores its own identity in Android Keystore. On later launches it automatically rediscovers and authenticates the same Source, showing `Connected` when reachable. The app currently shows only pairing/connection status, not the rest of the V1 experience. The debug APK builds without model files so CI and initial development stay fast.
+On a clean installation, Self opens its QR scanner. After scanning Source's code, it finds Source using mDNS/DNS-SD, pairs over pinned TLS, and stores its own identity in Android Keystore. On later launches it automatically rediscovers and authenticates the same Source. The debug APK builds without model files so CI and initial development stay fast.
+
+## Bronze data
+
+After pairing, Self shows the complete local Bronze mirror. It can create and edit text notes, import files and images, preview supported content, and delete items while offline. Cards show whether each item is synchronized or has a local change pending. Reconnection automatically compares durable item revisions, content hashes, and deletion tombstones with Source. Transfers are retried from that state rather than from a saved work queue. Source stores Bronze under the same persistent `-data` directory as its pairing identity, in `bronze/items` and `bronze/blobs`; include this directory in backups. Self keeps its mirror in private app storage, which is removed if Android app data is cleared.
 
 To fetch the latest `main`, build its debug APK, and install it on one connected Android phone while preserving the app's pairing data, run:
 
