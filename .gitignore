@@ -9,6 +9,7 @@ data/
 *.gguf.part.download
 *.gguf.download
 self/android/.gradle/
+self/android/.kotlin/
 self/android/local.properties
 self/android/build/
 self/android/app/build/

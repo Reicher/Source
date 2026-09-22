@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -191,5 +193,45 @@ func TestPartialIdentityFailsClosed(t *testing.T) {
 	_, err := loadIdentity(dir)
 	if err == nil || !strings.Contains(err.Error(), "incomplete") {
 		t.Fatalf("partial identity: %v", err)
+	}
+}
+
+func TestFreshIdentityActivatesTogether(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "pairing")
+	// An interrupted staging attempt must not block the next first start.
+	if err := os.Mkdir(filepath.Join(parent, ".source-identity-abandoned"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(parent, ".source-identity-abandoned", "source.key"), []byte("partial"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	i, err := loadIdentity(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"source.key", "source.crt", "state.json"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("activated identity missing %s: %v", name, err)
+		}
+	}
+	reloaded, err := loadIdentity(dir)
+	if err != nil || reloaded.id != i.id || reloaded.certPin != i.certPin {
+		t.Fatalf("identity changed after restart: %v", err)
+	}
+	// A previously created empty identity directory is also safe to replace.
+	empty := filepath.Join(parent, "empty")
+	if err := os.Mkdir(empty, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadIdentity(empty); err != nil {
+		t.Fatalf("empty identity directory: %v", err)
+	}
+}
+
+func TestMountedIdentityDirectoryNeedsParentMount(t *testing.T) {
+	err := identityDirRemovalError("/data/pairing", &os.PathError{Op: "remove", Path: "/data/pairing", Err: syscall.EBUSY})
+	if !errors.Is(err, syscall.EBUSY) || !strings.Contains(err.Error(), "mount its parent directory") {
+		t.Fatalf("mount-point error: %v", err)
 	}
 }

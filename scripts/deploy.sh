@@ -28,8 +28,8 @@ SOURCE_GID=$(id -g)
 SOURCE_REVISION=${SOURCE_REVISION:-$(git rev-parse HEAD)}
 export SOURCE_UID SOURCE_GID SOURCE_REVISION
 
-mkdir -p "$SOURCE_DATA_ROOT/pairing"
-chmod 700 "$SOURCE_DATA_ROOT/pairing"
+mkdir -p "$SOURCE_DATA_ROOT"
+chmod 700 "$SOURCE_DATA_ROOT"
 docker compose config --quiet
 docker compose up -d --build
 
