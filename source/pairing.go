@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	qrcode "github.com/skip2/go-qrcode"
@@ -142,6 +143,10 @@ func loadIdentity(dir string) (*identity, error) {
 }
 
 func (i *identity) create(dir string) error {
+	// The directory itself cannot be a mount point: activation renames its sibling.
+	if err := identityDirRemovalError(dir, os.Remove(dir)); err != nil {
+		return err
+	}
 	stage, err := os.MkdirTemp(filepath.Dir(dir), ".source-identity-*")
 	if err != nil {
 		return err
@@ -179,14 +184,20 @@ func (i *identity) create(dir string) error {
 	if err := savePrivate(filepath.Join(stage, "state.json"), state); err != nil {
 		return err
 	}
-	// Deployment may have created an empty bind-mount directory already.
-	if err := os.Remove(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
 	if err := os.Rename(stage, dir); err != nil {
 		return err
 	}
 	return syncDirectory(filepath.Dir(dir))
+}
+
+func identityDirRemovalError(dir string, err error) error {
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if errors.Is(err, syscall.EBUSY) {
+		return fmt.Errorf("Source identity directory %s is a mount point; mount its parent directory instead: %w", dir, err)
+	}
+	return err
 }
 
 func (i *identity) tlsConfig() *tls.Config {

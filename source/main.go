@@ -20,7 +20,7 @@ const serviceType = "_sourceself._tcp"
 func main() {
 	listen := flag.String("listen", ":8080", "LAN HTTPS address for Self")
 	setup := flag.String("setup", "127.0.0.1:8081", "loopback HTTP address for setup")
-	data := flag.String("data", "data/pairing", "directory for the persistent Source identity")
+	data := flag.String("data", "data/pairing", "directory for the persistent Source identity (mount its parent on first start)")
 	flag.Parse()
 
 	setupHost, _, err := net.SplitHostPort(*setup)

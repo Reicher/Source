@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -224,5 +226,12 @@ func TestFreshIdentityActivatesTogether(t *testing.T) {
 	}
 	if _, err := loadIdentity(empty); err != nil {
 		t.Fatalf("empty identity directory: %v", err)
+	}
+}
+
+func TestMountedIdentityDirectoryNeedsParentMount(t *testing.T) {
+	err := identityDirRemovalError("/data/pairing", &os.PathError{Op: "remove", Path: "/data/pairing", Err: syscall.EBUSY})
+	if !errors.Is(err, syscall.EBUSY) || !strings.Contains(err.Error(), "mount its parent directory") {
+		t.Fatalf("mount-point error: %v", err)
 	}
 }
