@@ -1,16 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -124,48 +127,94 @@ func TestSilverFailedSaveDoesNotExposeUnpublishedGeneration(t *testing.T) {
 	}
 }
 
-func TestSilverChangedBronzeHidesOldGenerationUntilAtomicPublish(t *testing.T) {
+func TestSilverKeepsPreviousProcessorGenerationVisibleAsStale(t *testing.T) {
 	root := t.TempDir()
-	bronze := newBronzeStore(root + "/bronze")
-	putSilverBronze(t, bronze, "22222222-2222-4222-8222-222222222222", "note.txt", "text/plain", 1, "Ada Lovelace wrote notes.")
-	service, err := newSilverService(root+"/silver", bronze)
+	bronze := newBronzeStore(filepath.Join(root, "bronze"))
+	item := putSilverBronze(t, bronze, "12121212-1212-4121-8121-121212121212", "note.txt", "text/plain", 1, "Ada Lovelace wrote notes.")
+	service, err := newSilverService(filepath.Join(root, "silver"), bronze)
 	if err != nil {
 		t.Fatal(err)
 	}
-	attachSilverQueue(service, bronze)
 	service.processNext(context.Background())
-	if len(service.snapshot().Sources) != 1 {
-		t.Fatal("first generation not published")
-	}
 
-	second := putSilverBronze(t, bronze, "22222222-2222-4222-8222-222222222222", "note.txt", "text/plain", 2, "Grace Hopper wrote notes.")
-	if snapshot := service.snapshot(); len(snapshot.Sources) != 0 || len(snapshot.Observations) != 0 {
-		t.Fatalf("old Silver remained current for changed Bronze: %+v", snapshot)
+	prior := service.state.Published[item.ID]
+	prior.Source.ProcessorVersion = "1"
+	service.state.Published[item.ID] = prior
+	service.state.Jobs[0].ProcessorVersion = "1"
+	if _, err := service.enqueue(item); err != nil {
+		t.Fatal(err)
 	}
-	service.processNext(context.Background())
 	snapshot := service.snapshot()
-	if len(snapshot.Sources) != 1 || snapshot.Sources[0].BronzeContentSHA256 != second.Hash {
-		t.Fatalf("new generation was not published: %+v", snapshot.Sources)
+	if len(snapshot.Sources) != 1 || !snapshot.Sources[0].Stale || len(snapshot.Processing) != 1 {
+		t.Fatalf("previous generation was not exposed as stale during replacement: %+v", snapshot)
 	}
-	if len(service.state.History[second.ID]) != 1 {
-		t.Fatalf("reprocessing silently discarded history: %+v", service.state.History[second.ID])
+	if !service.processNext(context.Background()) {
+		t.Fatal("replacement generation did not run")
+	}
+	snapshot = service.snapshot()
+	if len(snapshot.Sources) != 1 || snapshot.Sources[0].Stale || len(snapshot.Processing) != 0 ||
+		snapshot.Sources[0].ProcessorVersion != silverProcessorVersion {
+		t.Fatalf("replacement generation did not become current: %+v", snapshot)
 	}
 }
 
-func TestSilverMetadataChangeDoesNotReprocessIdenticalContent(t *testing.T) {
+func TestSilverReconcilesCommitAfterImmediateEnqueueFailure(t *testing.T) {
 	root := t.TempDir()
-	bronze := newBronzeStore(root + "/bronze")
-	putSilverBronze(t, bronze, "66666666-6666-4666-8666-666666666666", "old.txt", "text/plain", 1, "Ada Lovelace wrote this.")
-	service, err := newSilverService(root+"/silver", bronze)
+	bronze := newBronzeStore(filepath.Join(root, "bronze"))
+	service, err := newSilverService(filepath.Join(root, "silver"), bronze)
 	if err != nil {
 		t.Fatal(err)
 	}
 	attachSilverQueue(service, bronze)
+	originalPath := service.path
+	blocker := filepath.Join(root, "blocker")
+	if err := os.WriteFile(blocker, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	service.path = filepath.Join(blocker, "state.json")
+	content := "Ada Lovelace survived a queue outage."
+	sum := sha256.Sum256([]byte(content))
+	item := bronzeItem{ID: "99999999-9999-4999-8999-999999999999", Revision: 1,
+		Hash: hex.EncodeToString(sum[:]), Title: "outage.txt", Mime: "text/plain",
+		Size: int64(len(content)), Created: 1, Modified: 1}
+	response := bronzeRequest(t, bronze, http.MethodPut, item, []byte(content))
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("enqueue failure status: %d", response.Code)
+	}
+	if _, err := bronze.load(item.ID); err != nil {
+		t.Fatalf("Bronze was not persisted before enqueue failed: %v", err)
+	}
+	service.path = originalPath
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	service.start(ctx)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if snapshot := service.snapshot(); len(snapshot.Sources) == 1 && snapshot.Sources[0].BronzeSourceID == item.ID {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("persisted Bronze was not reconciled into Silver without a restart")
+}
+
+func TestSilverProcessingIdentityIncludesFormatMetadata(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	item := putSilverBronze(t, bronze, "66666666-6666-4666-8666-666666666666", "data.txt", "text/plain", 1, `{"name":"Ada Lovelace"}`)
+	service, err := newSilverService(root+"/silver", bronze)
+	if err != nil {
+		t.Fatal(err)
+	}
 	service.processNext(context.Background())
-	putSilverBronze(t, bronze, "66666666-6666-4666-8666-666666666666", "renamed.txt", "text/plain", 2, "Ada Lovelace wrote this.")
-	snapshot := service.snapshot()
-	if len(service.state.Jobs) != 1 || len(snapshot.Sources) != 1 || snapshot.Sources[0].Title != "renamed.txt" {
-		t.Fatalf("metadata-only change reprocessed or stayed stale: jobs=%d sources=%+v", len(service.state.Jobs), snapshot.Sources)
+	item.Title = "data.json"
+	item.Mime = "application/json"
+	changed, err := service.enqueue(item)
+	if err != nil || !changed || len(service.state.Jobs) != 2 || service.state.Jobs[1].State != "queued" {
+		t.Fatalf("format metadata did not produce distinct work: changed=%v err=%v jobs=%+v", changed, err, service.state.Jobs)
+	}
+	if service.state.Jobs[0].Title == service.state.Jobs[1].Title || service.state.Jobs[0].Mime == service.state.Jobs[1].Mime {
+		t.Fatalf("format identity was not captured in jobs: %+v", service.state.Jobs)
 	}
 }
 
@@ -173,7 +222,7 @@ func TestSilverFormatAwareParsingAndGenericFallback(t *testing.T) {
 	tests := []struct {
 		name, title, mime, content, kind string
 	}{
-		{"json", "data.json", "application/json", `{"person":{"name":"Ada Lovelace"}}`, "parsed-json-value"},
+		{"json", "data", "application/json; charset=utf-8", `{"person":{"name":"Ada Lovelace"}}`, "parsed-json-value"},
 		{"csv", "data.csv", "text/csv", "name,email\nAda Lovelace,ada@example.test\n", "parsed-table-row"},
 		{"markdown", "note.md", "text/markdown", "# Project Notes\n\nAda Lovelace drafted this.", "markdown-heading"},
 		{"unknown", "archive.odd", "application/octet-stream", "Ada Lovelace left readable text.", "text-block"},
@@ -203,6 +252,60 @@ func TestSilverBinaryBronzeDoesNotPretendToBeText(t *testing.T) {
 	fragments, supported, err := parseSilverText(bronzeItem{Title: "image.bin", Mime: "application/octet-stream"}, []byte{0, 1, 2, 3})
 	if err != nil || supported || fragments != nil {
 		t.Fatalf("binary detection: fragments=%v supported=%v err=%v", fragments, supported, err)
+	}
+}
+
+type countingReader struct {
+	reader io.Reader
+	read   int
+}
+
+func (r *countingReader) Read(value []byte) (int, error) {
+	n, err := r.reader.Read(value)
+	r.read += n
+	return n, err
+}
+
+func TestSilverRejectsKnownBinaryWithoutReadingContent(t *testing.T) {
+	reader := &countingReader{reader: bytes.NewReader(make([]byte, silverMaximumInputBytes+1))}
+	fragments, supported, err := parseSilverReader(bronzeItem{Title: "photo.jpg", Mime: "image/jpeg"}, reader)
+	if err != nil || supported || fragments != nil || reader.read != 0 {
+		t.Fatalf("binary read was not bounded by metadata: read=%d supported=%v fragments=%v err=%v", reader.read, supported, fragments, err)
+	}
+}
+
+func TestSilverReaderHasHardInputBound(t *testing.T) {
+	reader := &countingReader{reader: bytes.NewReader(bytes.Repeat([]byte("x"), silverMaximumInputBytes+1024))}
+	fragments, supported, err := parseSilverReader(bronzeItem{Title: "unknown.dat", Mime: "application/octet-stream"}, reader)
+	if err != nil || supported || fragments != nil || reader.read > silverMaximumInputBytes+1 {
+		t.Fatalf("input bound: read=%d supported=%v fragments=%v err=%v", reader.read, supported, fragments, err)
+	}
+}
+
+func TestSilverEvidenceRangesReferToOriginalBronzeBytes(t *testing.T) {
+	tests := []struct {
+		name, title, mime, content string
+	}{
+		{"generic BOM and whitespace", "note.txt", "text/plain", "\ufeff  " + strings.Repeat("å", silverMaximumBatchBytes) + "  "},
+		{"markdown whitespace", "note.md", "text/markdown", "  # Heading  \n\n  Body text  \n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fragments, supported, err := parseSilverText(bronzeItem{Title: test.title, Mime: test.mime}, []byte(test.content))
+			if err != nil || !supported || len(fragments) == 0 {
+				t.Fatalf("parse: supported=%v fragments=%v err=%v", supported, fragments, err)
+			}
+			for _, fragment := range fragments {
+				if fragment.Selector["kind"] != "utf8-byte-range" {
+					continue
+				}
+				start := fragment.Selector["start_byte"].(int)
+				end := fragment.Selector["end_byte"].(int)
+				if got := test.content[start:end]; got != fragment.Text {
+					t.Fatalf("range %d:%d selected %q, want %q", start, end, got, fragment.Text)
+				}
+			}
+		})
 	}
 }
 

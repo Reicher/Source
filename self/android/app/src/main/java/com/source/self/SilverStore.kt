@@ -16,6 +16,7 @@ data class SilverSource(
     val observationIds: List<String>,
     val entityIds: List<String>,
     val claimIds: List<String>,
+    val stale: Boolean = false,
 )
 
 data class SilverEvidence(
@@ -112,6 +113,7 @@ data class SilverSnapshot(
                     source.getString("bronze_source_id"), source.getString("bronze_content_sha256"),
                     source.getString("title"), source.getString("mime"), source.strings("evidence_ids"),
                     source.strings("observation_ids"), source.strings("entity_ids"), source.strings("claim_ids"),
+                    source.optBoolean("stale", false),
                 ) },
                 value.array("evidence").objects().map { evidence -> SilverEvidence(
                     evidence.getString("id"), evidence.getString("bronze_source_id"),

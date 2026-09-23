@@ -20,16 +20,18 @@ class BronzeSync(private val store: BronzeStore, private val transport: PairingT
                     if (active()) { store.acknowledge(here); onChange() }
                 }
                 here != null && there != null && here.revision > there.revision -> {
+                    check(here.isDeletionOf(there)) { "Immutable local Bronze conflict" }
                     transport.upload(source, address, port, here, if (here.deleted) null else store.content(here))
                     if (active()) { store.acknowledge(here); onChange() }
                 }
                 here != null && there != null && there.revision > here.revision -> {
                     check(here.ackedRevision == here.revision) { "Unsynchronized local Bronze must not be overwritten" }
+                    check(there.isDeletionOf(here)) { "Immutable Source Bronze conflict" }
                     transport.download(source, address, port, there, store)
                     if (active()) onChange()
                 }
                 here != null && there != null -> {
-                    check(here.copy(ackedRevision = 0) == there.copy(ackedRevision = 0)) { "Bronze revision mismatch" }
+                    check(here.sameBronze(there)) { "Bronze revision mismatch" }
                     if (here.ackedRevision != here.revision) {
                         store.acknowledge(here)
                         if (active()) onChange()

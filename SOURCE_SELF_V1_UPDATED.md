@@ -286,7 +286,7 @@ The desktop should support the feeling of leaving things out for yourself:
 - references
 - things to return to later
 
-Items should be easy to add, edit, move, group, open and remove from the desktop.
+Items should be easy to add, move, group, open and remove from the desktop.
 
 Removing something from the desktop does not necessarily mean deleting the underlying Source data.
 
@@ -301,8 +301,8 @@ They should be lightweight enough to use as digital scraps of paper.
 A note can be:
 
 - written
-- edited
-- expanded over time
+- preserved as immutable Bronze
+- superseded by creating another note
 - placed on the desktop
 - grouped with other material
 - used as a starting point for chat
