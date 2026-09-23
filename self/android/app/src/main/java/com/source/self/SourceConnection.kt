@@ -18,8 +18,9 @@ class SourceConnection(
     context: Context,
     private val state: PairingState,
     private val bronze: BronzeStore,
+    private val silver: SilverStore,
     private val onStatus: (connected: Boolean, error: String?, rescan: Boolean) -> Unit,
-    private val onBronzeChanged: () -> Unit,
+    private val onDataChanged: () -> Unit,
 ) {
     private val nsd = context.getSystemService(Context.NSD_SERVICE) as NsdManager
     private val handler = Handler(Looper.getMainLooper())
@@ -145,6 +146,7 @@ class SourceConnection(
         if (!connecting.compareAndSet(false, true)) return
         io.execute {
             var bronzeChanged = false
+            var silverChanged = false
             try {
                 val personId = transport.connect(source, host, targetPort)
                 if (!isCurrent(current, source) || session != syncVersion.get()) return@execute
@@ -152,21 +154,25 @@ class SourceConnection(
                 BronzeSync(bronze, transport).run(source, host, targetPort,
                     { isCurrent(current, source) && session == syncVersion.get() },
                     { bronzeChanged = true })
+                if (!isCurrent(current, source) || session != syncVersion.get()) return@execute
+                silverChanged = silver.install(transport.silver(source, host, targetPort))
                 handler.post {
                     if (!isCurrent(current, source) || session != syncVersion.get()) return@post
-                    if (bronzeChanged) onBronzeChanged()
+                    if (bronzeChanged || silverChanged) onDataChanged()
                     onStatus(true, null, false)
                 }
             } catch (e: Exception) {
                 Log.w("SelfPairing", "Connection failed: ${e.javaClass.simpleName}: ${e.message}")
                 handler.post {
                     if (!isCurrent(current, source) || session != syncVersion.get()) return@post
-                    if (bronzeChanged) onBronzeChanged()
+                    if (bronzeChanged || silverChanged) onDataChanged()
                     needsRescan = !state.isPaired() && e is PairingHttpException && (e.status == 403 || e.status == 409)
                     val message = when {
                         needsRescan -> null
                         e is PairingHttpException && e.status == 404 && e.path == "/v1/bronze" ->
                             "Source needs the Bronze sync update."
+                        e is PairingHttpException && e.status == 404 && e.path == "/v1/silver" ->
+                            "Source needs the Silver sync update."
                         e is PairingHttpException -> "Source rejected the connection."
                         else -> "Could not connect or sync with Source."
                     }
