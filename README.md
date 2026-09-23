@@ -2,7 +2,7 @@
 
 Source / Self is being rebuilt as V1. [SOURCE_SELF_V1_UPDATED.md](SOURCE_SELF_V1_UPDATED.md) is the product specification and source of truth. The previous prototype is preserved in Git history at the `prototype-final-2026-09-21` tag.
 
-Source is a local Go server; Self is a native Android app in Kotlin. The first-start pairing flow creates exactly one Source/Self relationship. Data synchronization and AI inference are separate work.
+Source is a local Go server; Self is a native Android app in Kotlin. The first-start pairing flow creates exactly one Source/Self relationship. Source uses its larger local model for background semantic extraction; Self's separate interactive model remains later V1 work.
 
 ## Build and start Source
 
@@ -15,6 +15,8 @@ go build ./...
 go run .
 ```
 
+Without model environment variables, Source still publishes deterministic format extraction but does not pretend that it produced semantic understanding. For full semantic Silver, run the provisioned GGUF through a local OpenAI-compatible runtime and set `SOURCE_MODEL_URL`, `SOURCE_MODEL_ID`, and `SOURCE_MODEL_REVISION`. The Docker deployment below configures the pinned runtime and model automatically.
+
 On a clean installation, open `http://127.0.0.1:8081` in a browser **on the Source machine**. It shows a temporary QR code without text until pairing, then a simple status indicator. The setup page is bound to loopback; the TLS pairing endpoint listens on port 8080 and is advertised as `_sourceself._tcp` via mDNS/DNS-SD. Both devices must be on a LAN that permits multicast DNS and direct connections to Source's port 8080. A local firewall may need to allow that port.
 
 Source keeps its private key, certificate, one-person/one-Self pairing record, Bronze, and authoritative Silver processing state in `source/data/pairing/` when started from `source/`. Keep this directory across restarts. `-data`, `-listen`, and `-setup` can override the defaults. First-time identity creation stages all three identity files and activates them together; losing only part of an active identity is treated as an error. For a fresh container installation, mount the **parent** of the `-data` directory: Source must be able to rename the staged directory into place. An empty `-data` mount point is rejected with a clear error; an existing complete identity there can still be loaded. The QR token is valid for two minutes and is never persisted. LAN discovery alone does not authenticate a peer: Self pins the certificate fingerprint from the QR code and Source pins Self's certificate at pairing.
@@ -23,7 +25,7 @@ Source keeps its private key, certificate, one-person/one-Self pairing record, B
 
 Every push to `main` starts the [Deploy workflow](.github/workflows/deploy.yml) on the repository's Linux runner labeled `source-node`. The runner needs Docker Compose and access to the Docker daemon. It builds the V1 Go server, starts it with host networking for mDNS, and checks both the loopback setup page and the TLS health endpoint. Self is an Android app and is built by CI rather than installed on the server.
 
-The deployment keeps Source's identity and pairing record in `$HOME/.local/share/source-v1/pairing` on the runner host. Set `SOURCE_DATA_ROOT` to another **absolute** directory before running `./scripts/deploy.sh` if needed. Keep that directory across deployments and backups. The container runs as the runner account, and the script can also be run manually from a checkout on the server. It needs no model download because V1 does not run inference yet.
+The deployment keeps Source's identity, pairing record, and local model under `$HOME/.local/share/source-v1/` on the runner host. Set `SOURCE_DATA_ROOT` and, if desired, `SOURCE_MODEL_ROOT` to other **absolute** directories before running `./scripts/deploy.sh`. Keep both across deployments and backups. The first deployment downloads and verifies the pinned Source model; later deployments verify and reuse it. The model runs in a pinned `llama-server` container bound only to host loopback, while the Go service owns prompts, validation, durable jobs, resolution, and published Silver.
 
 On the server, port 8443 serves the LAN TLS pairing API. Port 8081 is bound only to host loopback. To open setup from another computer, use an SSH tunnel, then visit `http://127.0.0.1:8081` locally:
 
@@ -54,7 +56,7 @@ After pairing, Self opens on a local personal Desktop backed by the complete Bro
 
 Source automatically queues every new Bronze item for Silver processing and reconciles the durable Bronze manifest with the queue so a transient enqueue failure repairs itself without a restart. The queue, completed batch checkpoints, processor revision, published datasets, and reprocessing history are durable under `silver/` in the same `-data` directory. Work continues without Self connected and resumes after a normal Source restart. Only complete generations are published.
 
-V1 deterministically parses JSON, CSV, and Markdown where useful, with a generic UTF-8 fallback for arbitrary text-like Bronze. It persists exact Evidence, open-ended extraction and semantic Observations, and a conservative optional exact-label Entity/Claim resolution. Source exposes the complete authoritative snapshot to its paired Self; Self stores it atomically for offline inspection. Bronze detail opens the knowledge derived from that source, and Entity detail navigates back to every supporting Bronze item. See [the Silver model](docs/SILVER.md).
+V1 deterministically parses JSON, CSV, and Markdown where useful, with a generic UTF-8 fallback for arbitrary text-like Bronze. The Source-local model then emits generic entity, attribute, and relationship candidate Observations. Source validates every response and resolves only sufficiently confident candidates; uncertain interpretations remain traceable Observations instead of being forced into Entities or Claims. Source exposes the complete authoritative snapshot to its paired Self; Self stores it atomically for offline inspection. Bronze detail opens the knowledge derived from that source, and Entity detail navigates back to every supporting Bronze item. See [the Silver model](docs/SILVER.md).
 
 To fetch the latest `main`, build its debug APK, and install it on one connected Android phone while preserving the app's pairing data, run:
 
@@ -77,8 +79,8 @@ python3 scripts/provision_models.py source
 python3 scripts/provision_models.py --verify
 ```
 
-Downloads resume from `.download` files after interruption and are verified before use. Source's model is placed in `data/models/`. Self's verified model is split into three install-time Android asset packs under `self/android/model_pack_*/src/main/assets/`. These large files are ignored by Git. Once Self's model is provisioned, `cd self/android && ./gradlew :app:bundleDebug` builds an Android App Bundle containing the packs. Installing that bundle and its packs on a device requires an APK set generated with bundletool; a plain debug APK does not include the model packs.
+Downloads resume from `.download` files after interruption and are verified before use. Source's model is placed in `data/models/` for local development, or under `SOURCE_MODEL_ROOT` when that variable is set. Deployment uses the latter so a clean Actions checkout cannot delete the multi-gigabyte model. Self's verified model is split into three install-time Android asset packs under `self/android/model_pack_*/src/main/assets/`. These large files are ignored by Git. Once Self's model is provisioned, `cd self/android && ./gradlew :app:bundleDebug` builds an Android App Bundle containing the packs. Installing that bundle and its packs on a device requires an APK set generated with bundletool; a plain debug APK does not include the model packs.
 
 To install the bundle and its model packs on one connected Android device, run `./scripts/install_self.sh` from the repository root. Set `ANDROID_SERIAL` if multiple devices are connected. The script verifies the Self model, builds the bundle, downloads a pinned bundletool, installs the generated APK set, and starts Self.
 
-CI validates the applications and pinned manifest without downloading either multi-gigabyte model. No model is loaded or used for inference in this pairing work.
+CI validates the applications, model adapter, semantic validation and pinned manifest with fake/runtime-stub responses; it does not download or load either multi-gigabyte model.

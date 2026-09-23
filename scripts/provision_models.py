@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 import urllib.error
@@ -14,6 +15,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "models" / "models.json"
 CHUNK = 1024 * 1024
+
+
+def source_model_path(entry):
+    configured = os.environ.get("SOURCE_MODEL_ROOT")
+    root = Path(configured) if configured else ROOT / "data" / "models"
+    return root / entry["file"]
 
 
 def digest(path):
@@ -149,7 +156,7 @@ def provision_self(entry):
 
 def verify(target, entry):
     if target == "source":
-        paths = [(ROOT / "data" / "models" / entry["file"], entry)]
+        paths = [(source_model_path(entry), entry)]
     else:
         paths = list(zip(part_paths(entry["parts"]), entry["parts"]))
     for path, expected in paths:
@@ -176,7 +183,7 @@ def main():
         elif target == "self":
             provision_self(manifest[target])
         else:
-            download(manifest[target], ROOT / "data" / "models" / manifest[target]["file"])
+            download(manifest[target], source_model_path(manifest[target]))
 
 
 if __name__ == "__main__":

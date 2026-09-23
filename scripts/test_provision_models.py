@@ -35,6 +35,14 @@ class Response:
 
 
 class ProvisionModelsTest(unittest.TestCase):
+    def test_source_model_root_can_live_outside_checkout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict("os.environ", {"SOURCE_MODEL_ROOT": directory}):
+                self.assertEqual(
+                    provision_models.source_model_path(entry(b"model")),
+                    Path(directory) / "model.gguf",
+                )
+
     def test_accepts_completed_partial_download(self):
         data = b"completed model"
         with tempfile.TemporaryDirectory() as directory:

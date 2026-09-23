@@ -11,7 +11,7 @@ jobs:
   source:
     runs-on: [self-hosted, linux, source-node]
     environment: source-node
-    timeout-minutes: 20
+    timeout-minutes: 60
     concurrency:
       group: source-v1-deployment
       cancel-in-progress: false

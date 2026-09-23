@@ -13,7 +13,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,8 +24,13 @@ import (
 
 const (
 	silverSchemaVersion     = 1
-	silverProcessorID       = "source.silver.generic-text"
-	silverProcessorVersion  = "2"
+	silverProcessorID       = "source.silver.pipeline"
+	silverExtractionID      = "source.silver.format-extraction"
+	silverExtractionVersion = "1"
+	silverResolverID        = "source.silver.candidate-resolver"
+	silverResolverVersion   = "1"
+	silverProcessorVersion  = "3-" + silverExtractionVersion + "-" + semanticProcessorVersion + "-" + silverResolverVersion
+	silverResolutionMinimum = 0.70
 	silverMaximumBatchBytes = 4096
 	silverInspectionBytes   = 8192
 	silverMaximumInputBytes = 8 * 1024 * 1024
@@ -79,6 +83,8 @@ type silverSource struct {
 	Mime                string   `json:"mime"`
 	ProcessorID         string   `json:"processor_id"`
 	ProcessorVersion    string   `json:"processor_version"`
+	ModelID             string   `json:"model_id,omitempty"`
+	ModelRevision       string   `json:"model_revision,omitempty"`
 	EvidenceIDs         []string `json:"evidence_ids"`
 	ObservationIDs      []string `json:"observation_ids"`
 	EntityIDs           []string `json:"entity_ids"`
@@ -114,18 +120,39 @@ type silverSnapshot struct {
 	Processing    []silverProcessing  `json:"processing"`
 }
 
-type silverMention struct {
-	ObservationID string `json:"observation_id"`
-	Label         string `json:"label"`
-	Normalized    string `json:"normalized"`
+type silverEntityCandidate struct {
+	ObservationID string  `json:"observation_id"`
+	Ref           string  `json:"ref"`
+	Label         string  `json:"label"`
+	Type          string  `json:"type,omitempty"`
+	Normalized    string  `json:"normalized"`
+	Confidence    float64 `json:"confidence"`
+}
+
+type silverAttributeCandidate struct {
+	ObservationID string          `json:"observation_id"`
+	SubjectRef    string          `json:"subject_ref"`
+	Predicate     string          `json:"predicate"`
+	Value         json.RawMessage `json:"value"`
+	Confidence    float64         `json:"confidence"`
+}
+
+type silverRelationshipCandidate struct {
+	ObservationID string  `json:"observation_id"`
+	SubjectRef    string  `json:"subject_ref"`
+	Predicate     string  `json:"predicate"`
+	ObjectRef     string  `json:"object_ref"`
+	Confidence    float64 `json:"confidence"`
 }
 
 type silverCheckpoint struct {
-	BatchIndex   int                 `json:"batch_index"`
-	BatchSHA256  string              `json:"batch_sha256"`
-	Evidence     []silverEvidence    `json:"evidence"`
-	Observations []silverObservation `json:"observations"`
-	Mentions     []silverMention     `json:"mentions,omitempty"`
+	BatchIndex    int                           `json:"batch_index"`
+	BatchSHA256   string                        `json:"batch_sha256"`
+	Evidence      []silverEvidence              `json:"evidence"`
+	Observations  []silverObservation           `json:"observations"`
+	Entities      []silverEntityCandidate       `json:"entity_candidates,omitempty"`
+	Attributes    []silverAttributeCandidate    `json:"attribute_candidates,omitempty"`
+	Relationships []silverRelationshipCandidate `json:"relationship_candidates,omitempty"`
 }
 
 type silverJob struct {
@@ -136,10 +163,14 @@ type silverJob struct {
 	Mime                string             `json:"mime"`
 	ProcessorID         string             `json:"processor_id"`
 	ProcessorVersion    string             `json:"processor_version"`
+	ModelID             string             `json:"model_id,omitempty"`
+	ModelRevision       string             `json:"model_revision,omitempty"`
 	State               string             `json:"state"`
 	TotalBatches        int                `json:"total_batches"`
 	Checkpoints         []silverCheckpoint `json:"checkpoints,omitempty"`
 	Error               string             `json:"error,omitempty"`
+	Attempts            int                `json:"attempts,omitempty"`
+	RetryAt             int64              `json:"retry_at,omitempty"`
 	AcceptedAt          int64              `json:"accepted_at"`
 	UpdatedAt           int64              `json:"updated_at"`
 }
@@ -167,11 +198,20 @@ type silverService struct {
 	state           silverDiskState
 	persisted       []byte
 	wake            chan struct{}
+	semantic        semanticModel
 	afterCheckpoint func(string, int)
 }
 
 func newSilverService(dir string, bronze *bronzeStore) (*silverService, error) {
-	s := &silverService{path: filepath.Join(dir, "state.json"), bronze: bronze, wake: make(chan struct{}, 1)}
+	model, err := semanticModelFromEnvironment()
+	if err != nil {
+		return nil, err
+	}
+	return newSilverServiceWithModel(dir, bronze, model)
+}
+
+func newSilverServiceWithModel(dir string, bronze *bronzeStore, model semanticModel) (*silverService, error) {
+	s := &silverService{path: filepath.Join(dir, "state.json"), bronze: bronze, wake: make(chan struct{}, 1), semantic: model}
 	value, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
 		s.state = silverDiskState{SchemaVersion: silverSchemaVersion, Published: map[string]silverDataset{}, History: map[string][]silverDataset{}, Entities: map[string]silverEntityRecord{}}
@@ -201,6 +241,7 @@ func newSilverService(dir string, bronze *bronzeStore) (*silverService, error) {
 		if s.state.Jobs[index].State == "running" || s.state.Jobs[index].State == "failed" {
 			s.state.Jobs[index].State = "queued"
 			s.state.Jobs[index].Error = ""
+			s.state.Jobs[index].RetryAt = 0
 			recovered = true
 		}
 	}
@@ -242,8 +283,31 @@ func (s *silverService) signal() {
 	}
 }
 
+func (s *silverService) modelIdentity() (string, string) {
+	if s.semantic == nil {
+		return "", ""
+	}
+	return s.semantic.identity()
+}
+
+func (s *silverService) retryDueFailuresLocked(now time.Time) bool {
+	changed := false
+	for index := range s.state.Jobs {
+		job := &s.state.Jobs[index]
+		if job.State != "failed" || job.RetryAt == 0 || job.RetryAt > now.UnixMilli() {
+			continue
+		}
+		job.State = "queued"
+		job.Error = ""
+		job.RetryAt = 0
+		job.UpdatedAt = now.UnixMilli()
+		changed = true
+	}
+	return changed
+}
+
 // reconcile makes the durable Bronze manifest the source of truth for Silver
-// work. It repairs a missing queue entry without retrying a present failed job.
+// work. It repairs missed queue entries and requeues transient failures when due.
 func (s *silverService) reconcile() error {
 	items, err := s.bronze.manifest()
 	if err != nil {
@@ -258,6 +322,19 @@ func (s *silverService) reconcile() error {
 				return err
 			}
 		}
+	}
+	s.mu.Lock()
+	retried := s.retryDueFailuresLocked(time.Now())
+	if retried {
+		s.state.Revision++
+		if err := s.saveLocked(); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
+	s.mu.Unlock()
+	if retried {
+		s.signal()
 	}
 	return nil
 }
@@ -277,26 +354,38 @@ func (s *silverService) needsReconcileLocked(item bronzeItem) bool {
 		}
 		return false
 	}
-	if published, ok := s.state.Published[item.ID]; ok && silverSourceMatchesItem(published.Source, item) {
+	modelID, modelRevision := s.modelIdentity()
+	if published, ok := s.state.Published[item.ID]; ok && s.sourceMatchesCurrent(published.Source, item) {
 		return false
 	}
 	for _, job := range s.state.Jobs {
-		if job.State != "cancelled" && silverJobMatchesItem(job, item) {
+		if job.State != "cancelled" && silverJobMatchesItem(job, item, modelID, modelRevision) {
 			return false
 		}
 	}
 	return true
 }
 
-func silverJobMatchesItem(job silverJob, item bronzeItem) bool {
+func silverJobMatchesItem(job silverJob, item bronzeItem, modelID, modelRevision string) bool {
 	return job.BronzeSourceID == item.ID && job.BronzeContentSHA256 == item.Hash &&
 		job.Title == item.Title && job.Mime == item.Mime &&
-		job.ProcessorID == silverProcessorID && job.ProcessorVersion == silverProcessorVersion
+		job.ProcessorID == silverProcessorID && job.ProcessorVersion == silverProcessorVersion &&
+		job.ModelID == modelID && job.ModelRevision == modelRevision
 }
 
-func silverSourceMatchesItem(source silverSource, item bronzeItem) bool {
+func silverSourceMatchesItem(source silverSource, item bronzeItem, modelID, modelRevision string) bool {
 	return silverSourceMatchesBronze(source, item) &&
-		source.ProcessorID == silverProcessorID && source.ProcessorVersion == silverProcessorVersion
+		source.ProcessorID == silverProcessorID && source.ProcessorVersion == silverProcessorVersion &&
+		source.ModelID == modelID && source.ModelRevision == modelRevision
+}
+
+func (s *silverService) sourceMatchesCurrent(source silverSource, item bronzeItem) bool {
+	if s.semantic == nil && source.ModelID != "" {
+		return silverSourceMatchesBronze(source, item) &&
+			source.ProcessorID == silverProcessorID && source.ProcessorVersion == silverProcessorVersion
+	}
+	modelID, modelRevision := s.modelIdentity()
+	return silverSourceMatchesItem(source, item, modelID, modelRevision)
 }
 
 func silverSourceMatchesBronze(source silverSource, item bronzeItem) bool {
@@ -307,10 +396,11 @@ func silverSourceMatchesBronze(source silverSource, item bronzeItem) bool {
 func (s *silverService) enqueue(item bronzeItem) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	modelID, modelRevision := s.modelIdentity()
 	changed := false
 	for index := range s.state.Jobs {
 		job := &s.state.Jobs[index]
-		if job.BronzeSourceID == item.ID && !silverJobMatchesItem(*job, item) && (job.State == "queued" || job.State == "running" || job.State == "failed") {
+		if job.BronzeSourceID == item.ID && !silverJobMatchesItem(*job, item, modelID, modelRevision) && (job.State == "queued" || job.State == "running" || job.State == "failed") {
 			job.State = "cancelled"
 			job.Checkpoints = nil
 			job.UpdatedAt = time.Now().UnixMilli()
@@ -344,7 +434,7 @@ func (s *silverService) enqueue(item bronzeItem) (bool, error) {
 		}
 		return changed, nil
 	}
-	if published, ok := s.state.Published[item.ID]; ok && silverSourceMatchesItem(published.Source, item) {
+	if published, ok := s.state.Published[item.ID]; ok && s.sourceMatchesCurrent(published.Source, item) {
 		if changed {
 			s.state.Revision++
 			return true, s.saveLocked()
@@ -353,7 +443,7 @@ func (s *silverService) enqueue(item bronzeItem) (bool, error) {
 	}
 	for index := range s.state.Jobs {
 		job := &s.state.Jobs[index]
-		if job.State != "cancelled" && silverJobMatchesItem(*job, item) {
+		if job.State != "cancelled" && silverJobMatchesItem(*job, item, modelID, modelRevision) {
 			if job.State == "failed" {
 				job.State = "queued"
 				job.Error = ""
@@ -378,6 +468,7 @@ func (s *silverService) enqueue(item bronzeItem) (bool, error) {
 	s.state.Jobs = append(s.state.Jobs, silverJob{
 		ID: fmt.Sprintf("job-%d", s.state.NextJob), BronzeSourceID: item.ID, BronzeContentSHA256: item.Hash,
 		Title: item.Title, Mime: item.Mime, ProcessorID: silverProcessorID, ProcessorVersion: silverProcessorVersion,
+		ModelID: modelID, ModelRevision: modelRevision,
 		State: "queued", AcceptedAt: now, UpdatedAt: now,
 	})
 	s.state.Revision++
@@ -417,6 +508,8 @@ func (s *silverService) processNext(ctx context.Context) bool {
 		if current := s.jobLocked(job.ID); current != nil && current.State == "running" {
 			current.State = "failed"
 			current.Error = err.Error()
+			current.Attempts++
+			current.RetryAt = time.Now().Add(silverRetryDelay(current.Attempts)).UnixMilli()
 			current.UpdatedAt = time.Now().UnixMilli()
 			s.state.Revision++
 			_ = s.saveLocked()
@@ -424,6 +517,14 @@ func (s *silverService) processNext(ctx context.Context) bool {
 		s.mu.Unlock()
 	}
 	return ctx.Err() == nil
+}
+
+func silverRetryDelay(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	delay := time.Second << min(attempt-1, 8)
+	return min(delay, 5*time.Minute)
 }
 
 func (s *silverService) processJob(ctx context.Context, jobID string) error {
@@ -487,7 +588,7 @@ func (s *silverService) processJob(ctx context.Context, jobID string) error {
 		}
 		s.mu.Unlock()
 
-		checkpoint, err := extractSilverBatch(copy, fragment, batchIndex, batchHash)
+		checkpoint, err := extractSilverBatch(ctx, copy, fragment, batchIndex, batchHash, s.semantic)
 		if err != nil {
 			return err
 		}
@@ -520,7 +621,8 @@ func (s *silverService) publish(jobID string, current bronzeItem) error {
 		return context.Canceled
 	}
 	latest, err := s.bronze.load(current.ID)
-	if err != nil || latest.Deleted || !silverJobMatchesItem(*job, latest) {
+	modelID, modelRevision := s.modelIdentity()
+	if err != nil || latest.Deleted || !silverJobMatchesItem(*job, latest, modelID, modelRevision) {
 		return s.cancelJobLocked(job)
 	}
 	if len(job.Checkpoints) != job.TotalBatches {
@@ -530,35 +632,14 @@ func (s *silverService) publish(jobID string, current bronzeItem) error {
 	dataset := silverDataset{Source: silverSource{
 		BronzeSourceID: job.BronzeSourceID, BronzeContentSHA256: job.BronzeContentSHA256,
 		Title: job.Title, Mime: job.Mime, ProcessorID: job.ProcessorID, ProcessorVersion: job.ProcessorVersion,
+		ModelID: job.ModelID, ModelRevision: job.ModelRevision,
 	}, PublishedAt: time.Now().UnixMilli()}
 	sort.Slice(job.Checkpoints, func(i, j int) bool { return job.Checkpoints[i].BatchIndex < job.Checkpoints[j].BatchIndex })
-	var mentions []silverMention
+	entitySeen := map[string]bool{}
 	for _, checkpoint := range job.Checkpoints {
 		dataset.Evidence = append(dataset.Evidence, checkpoint.Evidence...)
 		dataset.Observations = append(dataset.Observations, checkpoint.Observations...)
-		mentions = append(mentions, checkpoint.Mentions...)
-	}
-	producer := silverProducer{ProcessorID: "source.silver.exact-label-resolver", ProcessorVersion: "1"}
-	entitySeen := map[string]bool{}
-	for _, mention := range mentions {
-		entity, ok := s.resolveEntityLocked(mention.Label, mention.Normalized)
-		if !ok {
-			continue
-		}
-		if !entitySeen[entity.ID] {
-			dataset.Entities = append(dataset.Entities, entity)
-			entitySeen[entity.ID] = true
-		}
-		value, _ := json.Marshal(mention.Label)
-		claim := silverClaim{SubjectEntityID: entity.ID, Predicate: "name", Value: value, SupportingObservationIDs: []string{mention.ObservationID}, Producer: producer, State: "active"}
-		claim.ID = stableID("source-silver-claim", struct {
-			Subject      string          `json:"subject"`
-			Predicate    string          `json:"predicate"`
-			Value        json.RawMessage `json:"value"`
-			Observations []string        `json:"observations"`
-			Producer     silverProducer  `json:"producer"`
-		}{entity.ID, claim.Predicate, claim.Value, claim.SupportingObservationIDs, producer})
-		dataset.Claims = append(dataset.Claims, claim)
+		s.resolveCheckpointCandidatesLocked(&dataset, checkpoint, entitySeen, job.ModelID, job.ModelRevision)
 	}
 	for _, evidence := range dataset.Evidence {
 		dataset.Source.EvidenceIDs = append(dataset.Source.EvidenceIDs, evidence.ID)
@@ -579,9 +660,72 @@ func (s *silverService) publish(jobID string, current bronzeItem) error {
 	job.State = "completed"
 	job.Checkpoints = nil
 	job.Error = ""
+	job.Attempts = 0
+	job.RetryAt = 0
 	job.UpdatedAt = time.Now().UnixMilli()
 	s.state.Revision++
 	return s.saveLocked()
+}
+
+type resolvedSilverCandidate struct {
+	Entity        silverEntity
+	ObservationID string
+}
+
+func (s *silverService) resolveCheckpointCandidatesLocked(dataset *silverDataset, checkpoint silverCheckpoint, entitySeen map[string]bool, modelID, modelRevision string) {
+	producer := silverProducer{ProcessorID: silverResolverID, ProcessorVersion: silverResolverVersion, ModelID: modelID, ModelRevision: modelRevision}
+	resolved := map[string]resolvedSilverCandidate{}
+	for _, candidate := range checkpoint.Entities {
+		if candidate.Confidence < silverResolutionMinimum {
+			continue
+		}
+		entity, ok := s.resolveEntityLocked(candidate.Label, candidate.Normalized)
+		if !ok {
+			continue
+		}
+		resolved[candidate.Ref] = resolvedSilverCandidate{Entity: entity, ObservationID: candidate.ObservationID}
+		if !entitySeen[entity.ID] {
+			dataset.Entities = append(dataset.Entities, entity)
+			entitySeen[entity.ID] = true
+		}
+		name, _ := json.Marshal(candidate.Label)
+		appendSilverClaim(dataset, entity.ID, "name", name, "", []string{candidate.ObservationID}, producer)
+		if candidate.Type != "" {
+			entityType, _ := json.Marshal(candidate.Type)
+			appendSilverClaim(dataset, entity.ID, "type", entityType, "", []string{candidate.ObservationID}, producer)
+		}
+	}
+	for _, candidate := range checkpoint.Attributes {
+		subject, ok := resolved[candidate.SubjectRef]
+		if !ok || candidate.Confidence < silverResolutionMinimum {
+			continue
+		}
+		appendSilverClaim(dataset, subject.Entity.ID, candidate.Predicate, candidate.Value, "",
+			[]string{candidate.ObservationID, subject.ObservationID}, producer)
+	}
+	for _, candidate := range checkpoint.Relationships {
+		subject, subjectOK := resolved[candidate.SubjectRef]
+		object, objectOK := resolved[candidate.ObjectRef]
+		if !subjectOK || !objectOK || candidate.Confidence < silverResolutionMinimum {
+			continue
+		}
+		appendSilverClaim(dataset, subject.Entity.ID, candidate.Predicate, nil, object.Entity.ID,
+			[]string{candidate.ObservationID, subject.ObservationID, object.ObservationID}, producer)
+	}
+}
+
+func appendSilverClaim(dataset *silverDataset, subject, predicate string, value json.RawMessage, object string, observations []string, producer silverProducer) {
+	claim := silverClaim{SubjectEntityID: subject, Predicate: predicate, Value: value, ObjectEntityID: object,
+		SupportingObservationIDs: observations, Producer: producer, State: "active"}
+	claim.ID = stableID("source-silver-claim", struct {
+		Subject      string          `json:"subject"`
+		Predicate    string          `json:"predicate"`
+		Value        json.RawMessage `json:"value,omitempty"`
+		Object       string          `json:"object,omitempty"`
+		Observations []string        `json:"observations"`
+		Producer     silverProducer  `json:"producer"`
+	}{claim.SubjectEntityID, claim.Predicate, claim.Value, claim.ObjectEntityID, claim.SupportingObservationIDs, producer})
+	dataset.Claims = append(dataset.Claims, claim)
 }
 
 func (s *silverService) resolveEntityLocked(label, normalized string) (silverEntity, bool) {
@@ -721,7 +865,7 @@ func (s *silverService) snapshot() silverSnapshot {
 		if err != nil || current.Deleted || !silverSourceMatchesBronze(dataset.Source, current) {
 			continue
 		}
-		dataset.Source.Stale = !silverSourceMatchesItem(dataset.Source, current)
+		dataset.Source.Stale = !s.sourceMatchesCurrent(dataset.Source, current)
 		snapshot.Sources = append(snapshot.Sources, dataset.Source)
 		for _, value := range dataset.Evidence {
 			evidenceMap[value.ID] = value
@@ -1157,8 +1301,8 @@ func fragmentWithTextRange(kind string, start, end int, text string, payload any
 	return parsedSilverFragment{Kind: kind, Selector: map[string]any{"kind": "utf8-byte-range", "start_byte": start, "end_byte": end}, Excerpt: truncate(text, 240), Payload: payload, Text: text}
 }
 
-func extractSilverBatch(job silverJob, fragment parsedSilverFragment, index int, batchHash string) (silverCheckpoint, error) {
-	producer := silverProducer{ProcessorID: job.ProcessorID, ProcessorVersion: job.ProcessorVersion}
+func extractSilverBatch(ctx context.Context, job silverJob, fragment parsedSilverFragment, index int, batchHash string, model semanticModel) (silverCheckpoint, error) {
+	producer := silverProducer{ProcessorID: silverExtractionID, ProcessorVersion: silverExtractionVersion}
 	evidence := silverEvidence{BronzeSourceID: job.BronzeSourceID, BronzeContentSHA256: job.BronzeContentSHA256, Selector: fragment.Selector, Excerpt: fragment.Excerpt}
 	evidence.ID = stableID("source-silver-evidence", struct {
 		Source, Hash string
@@ -1171,50 +1315,67 @@ func extractSilverBatch(job silverJob, fragment parsedSilverFragment, index int,
 	observation := silverObservation{Kind: fragment.Kind, Payload: payload, EvidenceIDs: []string{evidence.ID}, Producer: producer}
 	observation.ID = observationID(observation)
 	checkpoint := silverCheckpoint{BatchIndex: index, BatchSHA256: batchHash, Evidence: []silverEvidence{evidence}, Observations: []silverObservation{observation}}
-	semanticText := strings.Join(strings.Fields(fragment.Text), " ")
-	if semanticText != "" {
-		semanticPayload, _ := json.Marshal(map[string]any{"statement": semanticText})
-		semantic := silverObservation{Kind: "semantic-statement", Payload: semanticPayload, EvidenceIDs: []string{evidence.ID}, Producer: producer}
+	if model == nil || strings.TrimSpace(fragment.Text) == "" {
+		return checkpoint, nil
+	}
+	modelID, modelRevision := model.identity()
+	if modelID != job.ModelID || modelRevision != job.ModelRevision {
+		return silverCheckpoint{}, errors.New("Source model identity changed during Silver processing")
+	}
+	result, err := model.extract(ctx, semanticInput{Title: job.Title, Mime: job.Mime, Text: fragment.Text})
+	if err != nil {
+		return silverCheckpoint{}, err
+	}
+	semanticProducer := silverProducer{ProcessorID: semanticProcessorID, ProcessorVersion: semanticProcessorVersion, ModelID: modelID, ModelRevision: modelRevision}
+	for _, candidate := range result.Entities {
+		label := strings.TrimSpace(candidate.Label)
+		entityType := strings.TrimSpace(candidate.Type)
+		candidate.Label = label
+		candidate.Type = entityType
+		payload, _ := json.Marshal(map[string]any{"ref": candidate.Ref, "label": label, "type": entityType})
+		semantic := silverObservation{Kind: "entity-candidate", Payload: payload, EvidenceIDs: []string{evidence.ID}, Confidence: candidate.Confidence, Producer: semanticProducer}
 		semantic.ID = observationID(semantic)
 		checkpoint.Observations = append(checkpoint.Observations, semantic)
+		checkpoint.Entities = append(checkpoint.Entities, silverEntityCandidate{
+			ObservationID: semantic.ID, Ref: candidate.Ref, Label: label, Type: entityType,
+			Normalized: strings.ToLower(strings.Join(strings.Fields(label), " ")), Confidence: *candidate.Confidence,
+		})
 	}
-	seen := map[string]bool{}
-	for _, label := range genericEntityMentions(fragment.Text) {
-		normalized := strings.ToLower(strings.Join(strings.Fields(label), " "))
-		if seen[normalized] {
-			continue
-		}
-		seen[normalized] = true
-		mentionPayload, _ := json.Marshal(map[string]any{"label": label})
-		mention := silverObservation{Kind: "entity-mention", Payload: mentionPayload, EvidenceIDs: []string{evidence.ID}, Producer: producer}
-		mention.ID = observationID(mention)
-		checkpoint.Observations = append(checkpoint.Observations, mention)
-		checkpoint.Mentions = append(checkpoint.Mentions, silverMention{ObservationID: mention.ID, Label: label, Normalized: normalized})
+	for _, candidate := range result.Attributes {
+		payload, _ := json.Marshal(struct {
+			SubjectRef string          `json:"subject_ref"`
+			Predicate  string          `json:"predicate"`
+			Value      json.RawMessage `json:"value"`
+		}{candidate.SubjectRef, candidate.Predicate, candidate.Value})
+		semantic := silverObservation{Kind: "attribute-candidate", Payload: payload, EvidenceIDs: []string{evidence.ID}, Confidence: candidate.Confidence, Producer: semanticProducer}
+		semantic.ID = observationID(semantic)
+		checkpoint.Observations = append(checkpoint.Observations, semantic)
+		checkpoint.Attributes = append(checkpoint.Attributes, silverAttributeCandidate{
+			ObservationID: semantic.ID, SubjectRef: candidate.SubjectRef, Predicate: candidate.Predicate,
+			Value: candidate.Value, Confidence: *candidate.Confidence,
+		})
+	}
+	for _, candidate := range result.Relationships {
+		payload, _ := json.Marshal(map[string]any{"subject_ref": candidate.SubjectRef, "predicate": candidate.Predicate, "object_ref": candidate.ObjectRef})
+		semantic := silverObservation{Kind: "relationship-candidate", Payload: payload, EvidenceIDs: []string{evidence.ID}, Confidence: candidate.Confidence, Producer: semanticProducer}
+		semantic.ID = observationID(semantic)
+		checkpoint.Observations = append(checkpoint.Observations, semantic)
+		checkpoint.Relationships = append(checkpoint.Relationships, silverRelationshipCandidate{
+			ObservationID: semantic.ID, SubjectRef: candidate.SubjectRef, Predicate: candidate.Predicate,
+			ObjectRef: candidate.ObjectRef, Confidence: *candidate.Confidence,
+		})
 	}
 	return checkpoint, nil
 }
 
-var entityMentionPattern = regexp.MustCompile(`\b\p{Lu}[\p{L}\p{M}'’-]*(?:[ \t]+\p{Lu}[\p{L}\p{M}'’-]*)+\b`)
-
-func genericEntityMentions(text string) []string {
-	matches := entityMentionPattern.FindAllString(text, -1)
-	result := make([]string, 0, len(matches))
-	for _, match := range matches {
-		value := strings.TrimSpace(match)
-		if len([]rune(value)) <= 120 {
-			result = append(result, value)
-		}
-	}
-	return result
-}
-
 func observationID(observation silverObservation) string {
 	return stableID("source-silver-observation", struct {
-		Kind     string          `json:"kind"`
-		Payload  json.RawMessage `json:"payload"`
-		Evidence []string        `json:"evidence"`
-		Producer silverProducer  `json:"producer"`
-	}{observation.Kind, observation.Payload, observation.EvidenceIDs, observation.Producer})
+		Kind       string          `json:"kind"`
+		Payload    json.RawMessage `json:"payload"`
+		Evidence   []string        `json:"evidence"`
+		Confidence *float64        `json:"confidence,omitempty"`
+		Producer   silverProducer  `json:"producer"`
+	}{observation.Kind, observation.Payload, observation.EvidenceIDs, observation.Confidence, observation.Producer})
 }
 
 func stableID(prefix string, value any) string {

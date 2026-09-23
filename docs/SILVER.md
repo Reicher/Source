@@ -15,7 +15,7 @@ Bronze
   → media/text detection
   → deterministic parser or generic text fallback
   → Evidence + extraction Observations
-  → semantic Observations
+  → generic model-driven semantic candidate Observations
   → optional Entity/Claim resolution
   → atomic authoritative publication on Source
   → complete mirror on Self
@@ -29,6 +29,17 @@ or unrecognized text still takes the generic text path.
 V1 recognizes JSON values, CSV rows, and Markdown headings/blocks. It also
 accepts unknown UTF-8 text. These parsers are deliberately small and are not a
 catalogue Source must complete before understanding other text.
+
+## Local model runtime
+
+The semantic processor depends on a replaceable `semanticModel` boundary. The
+V1 deployment runs the pinned Source GGUF through a loopback-only
+`llama-server`, but Silver does not expose or depend directly on that API.
+`SOURCE_MODEL_URL`, `SOURCE_MODEL_ID`, and `SOURCE_MODEL_REVISION` configure the
+adapter. A configured runtime failure fails and retries the private job without
+replacing prior published Silver. When no model is configured, deterministic
+format extraction can still be published; adding a model later changes the job
+identity and schedules a semantic replacement generation.
 
 ## Authority
 
@@ -62,7 +73,10 @@ modelId?          when a model was used
 modelRevision?    when available
 ```
 
-The initial processors are deterministic and therefore omit model fields.
+Deterministic extraction Observations omit model fields. Semantic candidate
+Observations identify both the semantic processor and the exact configured
+model. Claims produced by the candidate resolver retain the model identity and
+link back to the supporting candidate Observations.
 
 ### Evidence
 
@@ -94,10 +108,14 @@ confidence?      0..1 when available
 producer
 ```
 
-Current examples are `text-block`, `markdown-heading`, `parsed-table-row`,
-`parsed-json-value`, `semantic-statement`, and `entity-mention`. Consumers must
-ignore unknown kinds rather than reject the dataset. An Observation can remain
-unresolved indefinitely and does not require an Entity or Claim.
+Current extraction examples are `text-block`, `markdown-heading`,
+`parsed-table-row`, and `parsed-json-value`. The generic semantic processor
+emits `entity-candidate`, `attribute-candidate`, and
+`relationship-candidate`. Candidate payloads use response-local entity
+references so a relationship can be described before Source-local Entity IDs
+exist. Consumers must ignore unknown kinds rather than reject the dataset. An
+Observation can remain unresolved indefinitely and does not require an Entity
+or Claim.
 
 ### Entity and Claim
 
@@ -118,12 +136,15 @@ Claim
   state            active | superseded | retracted
 ```
 
-Types and predicates are not global enums. V1's optional resolver is deliberately
-conservative: generic two-or-more-word capitalized mentions become candidates;
-an exact normalized label reuses one unambiguous Entity, otherwise a new Entity
-is created. It emits an active `name` Claim supported by the mention Observation.
-This is a small demonstration of optional structuring, not a general entity
-ontology or a content-specific extractor.
+Types and predicates are not global enums. The local model proposes generic
+entities, attributes, and relationships with confidence rather than relying on
+capitalization or content-domain rules. The resolver is deliberately
+conservative: candidates below the resolution threshold remain Observations;
+an accepted exact normalized label reuses one unambiguous Entity, otherwise a
+new Entity is created. Accepted entity candidates produce `name` and optional
+`type` Claims. Accepted attribute and relationship candidates become value or
+object Claims only when their referenced entities were resolved. No contacts,
+family, travel, or other content-domain processor participates in this flow.
 
 The same exact label in multiple Bronze sources can resolve to the same Entity.
 Each source retains its own Claim and provenance, allowing the Entity view to
@@ -157,16 +178,20 @@ Acceptance records the Bronze identifier, immutable content hash, title, and MIM
 type. The format-relevant metadata participates in job identity because it can
 select a parser. The worker reads the content-addressed Bronze blob with bounded
 inspection and rejects known binary formats before loading their content. Jobs
-are deduplicated by that complete input identity and processor revision. A
-failed job can be queued again, and running/failed work is recovered as queued
-on restart. Periodic manifest reconciliation repairs work that was missed by an
+are deduplicated by that complete input identity, processor revision, model
+identifier, and model revision. A failed inference is retained with a bounded
+exponential retry delay, and running/failed work is recovered as queued on
+restart. Periodic manifest reconciliation repairs work that was missed by an
 immediate enqueue failure without requiring a restart.
 
 Text is divided into deterministic parser fragments. Each completed fragment is
-stored as a checkpoint containing staged Evidence, Observations, and resolution
-candidates. Checkpoints are reused only when batch index and content hash still
-match. They are private working state and never appear in the authoritative
-snapshot.
+stored as a checkpoint containing staged Evidence, extraction Observations,
+validated model candidate Observations, and private resolution candidates.
+Model content is untrusted: it is sent as encoded data, cannot invoke tools, and
+must pass strict shape, reference, predicate, scalar-value, confidence, and size
+validation. Checkpoints are reused only within a job whose input, processor and
+model identity match. They are private working state and never appear in the
+authoritative snapshot.
 
 Before publication Source rechecks that the Bronze source still has the job's
 content hash. Publication writes the complete dataset and completed job state in
@@ -196,8 +221,10 @@ navigation.
 
 ## Reprocessing
 
-An identical Bronze input identity already completed by the same processor
-revision is not needlessly queued. Changing the processor revision permits a new
-generation. Completed prior generations remain Source history; incomplete
-checkpoints do not. Better parsers or future models can therefore improve Silver
-without changing Bronze or silently overwriting the previous interpretation.
+An identical Bronze input identity already completed by the same processor and
+model revision is not needlessly queued. Changing the processor or model
+revision permits a new generation. The prior complete generation remains
+visible as stale until its atomic replacement is ready. Completed prior
+generations remain Source history; incomplete checkpoints do not. Better
+parsers, prompts, schemas, or models can therefore improve Silver without
+changing Bronze or silently overwriting the previous interpretation.
