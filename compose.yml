@@ -1,6 +1,35 @@
 name: source-v1
 
 services:
+  source-model:
+    image: "${SOURCE_LLAMA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-b10964}"
+    user: "${SOURCE_UID:?}:${SOURCE_GID:?}"
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - --model
+      - /models/Qwen_Qwen3.5-9B-Q5_K_M.gguf
+      - --alias
+      - source-semantic
+      - --host
+      - 127.0.0.1
+      - --port
+      - "8082"
+      - --ctx-size
+      - "8192"
+      - --parallel
+      - "1"
+      - --jinja
+    volumes:
+      - "${SOURCE_MODEL_ROOT:?}:/models:ro"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
   source:
     build:
       context: ./source
@@ -9,9 +38,15 @@ services:
     image: source/v1:local
     user: "${SOURCE_UID:?}:${SOURCE_GID:?}"
     restart: unless-stopped
+    depends_on:
+      - source-model
     # Source advertises its LAN address with mDNS, which needs the host network.
     network_mode: host
     command: ["-listen", ":8443", "-setup", "127.0.0.1:8081", "-data", "/data/pairing"]
+    environment:
+      SOURCE_MODEL_URL: http://127.0.0.1:8082
+      SOURCE_MODEL_ID: source-semantic
+      SOURCE_MODEL_REVISION: 182be2fd6c7bc44887d88a91cb03ff009cc9f549
     volumes:
       - "${SOURCE_DATA_ROOT:?}:/data"
     read_only: true

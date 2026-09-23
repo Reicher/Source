@@ -11,8 +11,8 @@ class SilverStoreTest {
             SilverEvidence("evidence-2", "bronze-2", "hash-2", null, "Ada Lovelace reviewed this"),
         )
         val observations = listOf(
-            SilverObservation("observation-1", "entity-mention", "Ada Lovelace", listOf("evidence-1"), "generic", "1"),
-            SilverObservation("observation-2", "entity-mention", "Ada Lovelace", listOf("evidence-2"), "generic", "1"),
+            SilverObservation("observation-1", "entity-candidate", "Ada Lovelace", listOf("evidence-1"), "source.silver.semantic-model", "1"),
+            SilverObservation("observation-2", "entity-candidate", "Ada Lovelace", listOf("evidence-2"), "source.silver.semantic-model", "1"),
         )
         val claims = listOf(
             SilverClaim("claim-1", entity.id, "name", "Ada Lovelace", null, listOf("observation-1"), "active"),

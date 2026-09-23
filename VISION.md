@@ -77,10 +77,10 @@ processing decides what parsed content may mean.
 
 Evidence identifies the Bronze revision and fragment behind a result. An
 Observation is an immutable, open processor result such as extracted text, a
-parsed table row, a semantic statement, or an entity mention. It may remain
-unresolved indefinitely. Entity and Claim resolution is optional further
-structuring when it adds value; it is not a validity condition for an
-Observation.
+parsed table row, or a model-proposed entity, attribute, or relationship
+candidate. It may remain unresolved indefinitely. Entity and Claim resolution
+is optional further structuring when it adds value; it is not a validity
+condition for an Observation.
 
 Gold is a rebuildable, use-specific projection over current Silver. It is not a
 second source of knowledge and is outside the first pipeline implementation.

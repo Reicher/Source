@@ -233,7 +233,9 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                     evidence?.excerpt?.takeIf(String::isNotBlank)?.let { excerpt ->
                         addView(label("Evidence: $excerpt", 13f).apply { setTextColor(secondaryColor) })
                     }
-                    addView(label("${observation.processorId} v${observation.processorVersion}", 12f).apply {
+                    val confidence = observation.confidence?.let { " · ${(it * 100).toInt()}%" } ?: ""
+                    val model = observation.modelId?.let { " · $it@${observation.modelRevision ?: "unknown"}" } ?: ""
+                    addView(label("${observation.processorId} v${observation.processorVersion}$model$confidence", 12f).apply {
                         setTextColor(secondaryColor)
                     })
                 }, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
@@ -278,6 +280,12 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         if (payload is org.json.JSONObject) {
             for (key in listOf("statement", "label", "text")) {
                 payload.optString(key).takeIf(String::isNotBlank)?.let { return it }
+            }
+            if (payload.has("subject_ref") && payload.has("predicate") && payload.has("object_ref")) {
+                return "${payload.optString("subject_ref")} ${payload.optString("predicate")} ${payload.optString("object_ref")}"
+            }
+            if (payload.has("subject_ref") && payload.has("predicate") && payload.has("value")) {
+                return "${payload.optString("subject_ref")} ${payload.optString("predicate")}: ${payload.opt("value")}"
             }
             if (payload.has("path") && payload.has("value")) return "${payload.optString("path")}: ${payload.opt("value")}"
         }

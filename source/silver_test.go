@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -38,12 +39,37 @@ func attachSilverQueue(service *silverService, bronze *bronzeStore) {
 	}
 }
 
+type testSemanticModel struct {
+	id, revision string
+	run          func(semanticInput) (semanticResult, error)
+}
+
+func (m testSemanticModel) identity() (string, string) { return m.id, m.revision }
+
+func (m testSemanticModel) extract(_ context.Context, input semanticInput) (semanticResult, error) {
+	return m.run(input)
+}
+
+func testConfidence(value float64) *float64 { return &value }
+
+func namedPeopleTestModel() semanticModel {
+	return testSemanticModel{id: "test-people", revision: "1", run: func(input semanticInput) (semanticResult, error) {
+		var entities []semanticEntityCandidate
+		for index, label := range []string{"Ada Lovelace", "Grace Hopper"} {
+			if strings.Contains(input.Text, label) {
+				entities = append(entities, semanticEntityCandidate{Ref: fmt.Sprintf("e%d", index+1), Label: label, Confidence: testConfidence(0.99)})
+			}
+		}
+		return semanticResult{Entities: entities}, nil
+	}}
+}
+
 func TestSilverQueueAndCheckpointsSurviveRestart(t *testing.T) {
 	root := t.TempDir()
 	bronze := newBronzeStore(root + "/bronze")
 	item := putSilverBronze(t, bronze, "11111111-1111-4111-8111-111111111111", "people.txt", "text/plain", 1,
 		"Ada Lovelace designed a machine.\n\nGrace Hopper built compilers.")
-	service, err := newSilverService(root+"/silver", bronze)
+	service, err := newSilverServiceWithModel(root+"/silver", bronze, namedPeopleTestModel())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +93,7 @@ func TestSilverQueueAndCheckpointsSurviveRestart(t *testing.T) {
 		t.Fatalf("checkpoint was not persisted: %+v", service.state.Jobs[0])
 	}
 
-	restarted, err := newSilverService(root+"/silver", bronze)
+	restarted, err := newSilverServiceWithModel(root+"/silver", bronze, namedPeopleTestModel())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,11 +112,11 @@ func TestSilverQueueAndCheckpointsSurviveRestart(t *testing.T) {
 	if len(snapshot.Sources) != 1 || snapshot.Sources[0].BronzeContentSHA256 != item.Hash {
 		t.Fatalf("complete generation was not published: %+v", snapshot.Sources)
 	}
-	if len(snapshot.Evidence) != 2 || len(snapshot.Observations) < 6 {
+	if len(snapshot.Evidence) != 2 || len(snapshot.Observations) < 4 {
 		t.Fatalf("expected evidence-backed extraction and semantics: evidence=%d observations=%d", len(snapshot.Evidence), len(snapshot.Observations))
 	}
 	if len(snapshot.Entities) != 2 || len(snapshot.Claims) != 2 {
-		t.Fatalf("generic exact-label resolution missing: entities=%d claims=%d", len(snapshot.Entities), len(snapshot.Claims))
+		t.Fatalf("model candidate resolution missing: entities=%d claims=%d", len(snapshot.Entities), len(snapshot.Claims))
 	}
 }
 
@@ -202,7 +228,7 @@ func TestSilverProcessingIdentityIncludesFormatMetadata(t *testing.T) {
 	root := t.TempDir()
 	bronze := newBronzeStore(root + "/bronze")
 	item := putSilverBronze(t, bronze, "66666666-6666-4666-8666-666666666666", "data.txt", "text/plain", 1, `{"name":"Ada Lovelace"}`)
-	service, err := newSilverService(root+"/silver", bronze)
+	service, err := newSilverServiceWithModel(root+"/silver", bronze, namedPeopleTestModel())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +340,7 @@ func TestSilverEntityAggregatesSourcesAndDeletionRemovesDerivedData(t *testing.T
 	bronze := newBronzeStore(root + "/bronze")
 	first := putSilverBronze(t, bronze, "33333333-3333-4333-8333-333333333333", "first.txt", "text/plain", 1, "Ada Lovelace wrote this.")
 	second := putSilverBronze(t, bronze, "44444444-4444-4444-8444-444444444444", "second.txt", "text/plain", 1, "Ada Lovelace reviewed this.")
-	service, err := newSilverService(root+"/silver", bronze)
+	service, err := newSilverServiceWithModel(root+"/silver", bronze, namedPeopleTestModel())
 	if err != nil {
 		t.Fatal(err)
 	}

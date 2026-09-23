@@ -17,6 +17,8 @@ data class SilverSource(
     val entityIds: List<String>,
     val claimIds: List<String>,
     val stale: Boolean = false,
+    val modelId: String? = null,
+    val modelRevision: String? = null,
 )
 
 data class SilverEvidence(
@@ -34,6 +36,9 @@ data class SilverObservation(
     val evidenceIds: List<String>,
     val processorId: String,
     val processorVersion: String,
+    val confidence: Double? = null,
+    val modelId: String? = null,
+    val modelRevision: String? = null,
 )
 
 data class SilverEntity(val id: String)
@@ -46,6 +51,10 @@ data class SilverClaim(
     val objectEntityId: String?,
     val supportingObservationIds: List<String>,
     val state: String,
+    val processorId: String? = null,
+    val processorVersion: String? = null,
+    val modelId: String? = null,
+    val modelRevision: String? = null,
 )
 
 data class SilverProcessing(
@@ -114,6 +123,8 @@ data class SilverSnapshot(
                     source.getString("title"), source.getString("mime"), source.strings("evidence_ids"),
                     source.strings("observation_ids"), source.strings("entity_ids"), source.strings("claim_ids"),
                     source.optBoolean("stale", false),
+                    source.optString("model_id").takeIf(String::isNotEmpty),
+                    source.optString("model_revision").takeIf(String::isNotEmpty),
                 ) },
                 value.array("evidence").objects().map { evidence -> SilverEvidence(
                     evidence.getString("id"), evidence.getString("bronze_source_id"),
@@ -126,15 +137,24 @@ data class SilverSnapshot(
                         observation.getString("id"), observation.getString("kind"),
                         observation.get("payload"), observation.strings("evidence_ids"),
                         producer.getString("processor_id"), producer.getString("processor_version"),
+                        observation.optDouble("confidence").takeUnless(Double::isNaN),
+                        producer.optString("model_id").takeIf(String::isNotEmpty),
+                        producer.optString("model_revision").takeIf(String::isNotEmpty),
                     )
                 },
                 value.array("entities").objects().map { SilverEntity(it.getString("id")) },
-                value.array("claims").objects().map { claim -> SilverClaim(
-                    claim.getString("id"), claim.getString("subject_entity_id"), claim.getString("predicate"),
-                    claim.opt("value").takeUnless { it == null || it === JSONObject.NULL },
-                    claim.optString("object_entity_id").takeIf(String::isNotEmpty),
-                    claim.strings("supporting_observation_ids"), claim.getString("state"),
-                ) },
+                value.array("claims").objects().map { claim ->
+                    val producer = claim.getJSONObject("producer")
+                    SilverClaim(
+                        claim.getString("id"), claim.getString("subject_entity_id"), claim.getString("predicate"),
+                        claim.opt("value").takeUnless { it == null || it === JSONObject.NULL },
+                        claim.optString("object_entity_id").takeIf(String::isNotEmpty),
+                        claim.strings("supporting_observation_ids"), claim.getString("state"),
+                        producer.getString("processor_id"), producer.getString("processor_version"),
+                        producer.optString("model_id").takeIf(String::isNotEmpty),
+                        producer.optString("model_revision").takeIf(String::isNotEmpty),
+                    )
+                },
                 value.array("processing").objects().map { processing -> SilverProcessing(
                     processing.getString("bronze_source_id"), processing.getString("state"),
                     processing.getInt("completed_batches"), processing.getInt("total_batches"),
