@@ -46,10 +46,14 @@ func main() {
 	}
 	defer mdns.Shutdown()
 
-	lanServer := &http.Server{Handler: identity.lanHandler(), ReadHeaderTimeout: 5 * time.Second, TLSConfig: identity.tlsConfig()}
-	localServer := &http.Server{Handler: identity.setupHandler(local.Addr().String()), ReadHeaderTimeout: 5 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	lanHandler, err := identity.newLanHandler(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	lanServer := &http.Server{Handler: lanHandler, ReadHeaderTimeout: 5 * time.Second, TLSConfig: identity.tlsConfig()}
+	localServer := &http.Server{Handler: identity.setupHandler(local.Addr().String()), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

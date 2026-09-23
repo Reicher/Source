@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -222,8 +223,26 @@ func (i *identity) token() (string, time.Time, error) {
 }
 
 func (i *identity) lanHandler() http.Handler {
+	handler, err := i.newLanHandler(context.Background())
+	if err != nil {
+		panic(err)
+	}
+	return handler
+}
+
+func (i *identity) newLanHandler(ctx context.Context) (http.Handler, error) {
 	mux := http.NewServeMux()
-	bronze := newBronzeStore(filepath.Join(filepath.Dir(i.statePath), "bronze"))
+	dataDir := filepath.Dir(i.statePath)
+	bronze := newBronzeStore(filepath.Join(dataDir, "bronze"))
+	silver, err := newSilverService(filepath.Join(dataDir, "silver"), bronze)
+	if err != nil {
+		return nil, fmt.Errorf("load Silver processing state: %w", err)
+	}
+	bronze.onCommit = func(item bronzeItem) error {
+		_, err := silver.enqueue(item)
+		return err
+	}
+	silver.start(ctx)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.HandleFunc("POST /v1/pair", func(w http.ResponseWriter, r *http.Request) {
 		if r.TLS == nil || len(r.TLS.PeerCertificates) != 1 {
@@ -287,7 +306,10 @@ func (i *identity) lanHandler() http.Handler {
 	})
 	mux.Handle("/v1/bronze", i.trusted(bronze))
 	mux.Handle("/v1/bronze/", i.trusted(bronze))
-	return mux
+	mux.Handle("GET /v1/silver", i.trusted(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, silver.snapshot())
+	})))
+	return mux, nil
 }
 
 func (i *identity) trusted(next http.Handler) http.Handler {

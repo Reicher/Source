@@ -18,6 +18,7 @@ private const val PICK_FILE = 1001
 class MainActivity : Activity() {
     private lateinit var state: PairingState
     private lateinit var bronze: BronzeStore
+    private lateinit var silver: SilverStore
     private lateinit var desktop: DesktopStore
     private lateinit var connection: SourceConnection
     private lateinit var views: SelfViews
@@ -28,6 +29,8 @@ class MainActivity : Activity() {
     private var scanning = false
     private var identityReady = true
     private var detailId: String? = null
+    private var knowledgeSourceId: String? = null
+    private var entityId: String? = null
     private var section = AppSection.DESKTOP
     private val systemBack = OnBackInvokedCallback { handleBack() }
 
@@ -36,15 +39,18 @@ class MainActivity : Activity() {
         onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, systemBack)
         state = PairingState(this)
         bronze = BronzeStore(this)
+        silver = SilverStore(this)
         desktop = DesktopStore(this)
         desktop.reconcileBronze(bronze.all())
         views = SelfViews(this, bronze)
         detailId = savedInstanceState?.getString("detail")
+        knowledgeSourceId = savedInstanceState?.getString("knowledge_source")
+        entityId = savedInstanceState?.getString("entity")
         section = savedInstanceState?.getString("section")?.let {
             runCatching { AppSection.valueOf(it) }.getOrNull()
         } ?: AppSection.DESKTOP
         disconnectedAt = savedInstanceState?.getLong("disconnected_at")?.takeIf { it > 0 }
-        connection = SourceConnection(this, state, bronze, { isConnected, message, rescan ->
+        connection = SourceConnection(this, state, bronze, silver, { isConnected, message, rescan ->
             if (connected && !isConnected && disconnectedAt == null) disconnectedAt = System.currentTimeMillis()
             if (isConnected) disconnectedAt = null
             connected = isConnected
@@ -68,6 +74,8 @@ class MainActivity : Activity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString("detail", detailId)
+        outState.putString("knowledge_source", knowledgeSourceId)
+        outState.putString("entity", entityId)
         outState.putString("section", section.name)
         disconnectedAt?.let { outState.putLong("disconnected_at", it) }
         super.onSaveInstanceState(outState)
@@ -167,9 +175,32 @@ class MainActivity : Activity() {
         }
         val selected = detailId?.let(bronze::get)?.takeUnless { it.deleted }
         if (detailId != null && selected == null) detailId = null
-        val content = if (selected != null) {
+        val silverSnapshot = silver.snapshot()
+        val selectedEntity = entityId?.let { id -> silverSnapshot.entities.firstOrNull { it.id == id } }
+        if (entityId != null && selectedEntity == null) entityId = null
+        val knowledgeItem = knowledgeSourceId?.let(bronze::get)?.takeUnless { it.deleted }
+        if (knowledgeSourceId != null && knowledgeItem == null) knowledgeSourceId = null
+        val content = if (selectedEntity != null) {
+            views.entityDetail(selectedEntity, silverSnapshot) { sourceId ->
+                detailId = sourceId
+                knowledgeSourceId = null
+                entityId = null
+                render()
+            }
+        } else if (knowledgeItem != null) {
+            views.silverDetail(knowledgeItem, silverSnapshot.forBronze(knowledgeItem.id)) { id ->
+                entityId = id
+                render()
+            }
+        } else if (selected != null) {
+            val knowledge = silverSnapshot.forBronze(selected.id)
             views.bronzeDetail(
                 selected,
+                knowledge,
+                onKnowledge = {
+                    knowledgeSourceId = selected.id
+                    render()
+                },
                 onArchive = {
                     desktop.remove(DESKTOP_OBJECT_BRONZE, selected.id)
                     detailId = null
@@ -185,11 +216,16 @@ class MainActivity : Activity() {
                 onItemMenu = ::desktopItemMenu,
             )
             AppSection.SELF -> views.self(bronze.all().count { !it.deleted })
-            AppSection.SOURCE -> views.source(connected, disconnectedAt, error)
+            AppSection.SOURCE -> views.source(connected, disconnectedAt, error, silverSnapshot) { id ->
+                entityId = id
+                render()
+            }
         }
         setContentView(views.app(content, section, connected) { destination ->
             section = destination
             detailId = null
+            knowledgeSourceId = null
+            entityId = null
             render()
         })
     }
@@ -204,8 +240,11 @@ class MainActivity : Activity() {
     }
 
     private fun openDesktopItem(ref: DesktopObjectRef) {
-        if (ref.objectType != DESKTOP_OBJECT_BRONZE) return
-        detailId = ref.objectId
+        when (ref.objectType) {
+            DESKTOP_OBJECT_BRONZE -> detailId = ref.objectId
+            DESKTOP_OBJECT_SILVER -> entityId = ref.objectId
+            else -> return
+        }
         render()
     }
 
@@ -242,14 +281,13 @@ class MainActivity : Activity() {
 
     private fun handleBack() {
         when {
+            entityId != null -> { entityId = null; render() }
+            knowledgeSourceId != null -> { knowledgeSourceId = null; render() }
             detailId != null -> { detailId = null; render() }
             section != AppSection.DESKTOP -> { section = AppSection.DESKTOP; render() }
             else -> finish()
         }
     }
-
-    @Deprecated("Handled by Android's system Back control")
-    override fun onBackPressed() = handleBack()
 
     override fun onDestroy() {
         onBackInvokedDispatcher.unregisterOnBackInvokedCallback(systemBack)

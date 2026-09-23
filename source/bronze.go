@@ -36,8 +36,9 @@ type bronzeItem struct {
 }
 
 type bronzeStore struct {
-	mu  sync.Mutex
-	dir string
+	mu       sync.Mutex
+	dir      string
+	onCommit func(bronzeItem) error
 }
 
 func newBronzeStore(dir string) *bronzeStore {
@@ -142,6 +143,12 @@ func (s *bronzeStore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			http.Error(w, "storage unavailable", http.StatusInternalServerError)
 			return
+		}
+		if s.onCommit != nil {
+			if err := s.onCommit(stored); err != nil {
+				http.Error(w, "processing queue unavailable", http.StatusInternalServerError)
+				return
+			}
 		}
 		writeJSON(w, stored)
 	default:

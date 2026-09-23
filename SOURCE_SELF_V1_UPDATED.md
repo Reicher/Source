@@ -216,19 +216,23 @@ Bronze is the source material.
 
 ### Silver
 
-Silver is what Source believes the Bronze means.
+Silver is everything Source can reliably extract, interpret and structure from
+Bronze. It includes decoded or parsed structure and evidence-backed,
+open-ended Observations as well as optional Entities, Claims and relationships.
 
 Examples:
 
-- people
-- places
-- projects
-- events
-- relationships
-- facts and claims
-- topics and concepts
+- extracted text and parsed rows or fields
+- semantic statements and unresolved observations
+- people, places, projects, events, topics and concepts when useful
+- relationships, facts and claims when Source can resolve them usefully
 
-Silver is derived and can change as Source improves its understanding.
+An Observation does not need to become an Entity or Claim. Silver has no fixed
+ontology. Recognized formats should use deterministic parsing where useful,
+while arbitrary text-like Bronze must always have a generic fallback.
+
+Silver is derived and can change as Source improves its understanding. Bronze
+remains canonical and must not be changed by Silver processing.
 
 Source is the authority for persistent Silver.
 
@@ -378,9 +382,13 @@ The normal model is:
 
 1. data arrives at Source
 2. Source stores it
-3. Source processes it when appropriate
-4. Silver is updated
+3. Source durably queues and checkpoints processing independent of Self
+4. complete Silver is published atomically
 5. the updated data and Silver mirror back to Self
+
+Pending work and completed batch checkpoints survive ordinary Source restarts.
+Partial work is private processing state and is not exposed as completed
+authoritative Silver.
 
 Users should be able to see that processing is happening and roughly how much remains.
 

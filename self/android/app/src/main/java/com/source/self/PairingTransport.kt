@@ -67,6 +67,14 @@ class PairingTransport(private val state: PairingState) {
         } finally { close(connection) }
     }
 
+    fun silver(source: SourceRef, address: String, port: Int): JSONObject {
+        val connection = open(base(address, port), "/v1/silver", source.pin, "GET")
+        try {
+            if (connection.responseCode != 200) throw PairingHttpException(connection.responseCode, "/v1/silver")
+            return JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
+        } finally { close(connection) }
+    }
+
     fun upload(source: SourceRef, address: String, port: Int, item: BronzeItem, file: File?) {
         val connection = open(base(address, port), "/v1/bronze/${item.id}", source.pin,
             if (item.deleted) "DELETE" else "PUT")
