@@ -173,7 +173,9 @@ content hash. Publication writes the complete dataset and completed job state in
 one atomic state replacement. Consequently a restart may reveal either the old
 complete generation or the new complete generation, never a partially published
 one. A dataset whose recorded input identity no longer matches its Bronze
-metadata is not presented as current.
+metadata is not presented as current. When only the processor revision is old,
+the last complete dataset remains visible with a stale marker until its atomic
+replacement is ready.
 
 Deletion cancels working jobs and removes current and historical derived records
 for that Bronze source. Entity registry entries no longer supported by retained

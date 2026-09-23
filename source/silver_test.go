@@ -127,6 +127,37 @@ func TestSilverFailedSaveDoesNotExposeUnpublishedGeneration(t *testing.T) {
 	}
 }
 
+func TestSilverKeepsPreviousProcessorGenerationVisibleAsStale(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(filepath.Join(root, "bronze"))
+	item := putSilverBronze(t, bronze, "12121212-1212-4121-8121-121212121212", "note.txt", "text/plain", 1, "Ada Lovelace wrote notes.")
+	service, err := newSilverService(filepath.Join(root, "silver"), bronze)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.processNext(context.Background())
+
+	prior := service.state.Published[item.ID]
+	prior.Source.ProcessorVersion = "1"
+	service.state.Published[item.ID] = prior
+	service.state.Jobs[0].ProcessorVersion = "1"
+	if _, err := service.enqueue(item); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := service.snapshot()
+	if len(snapshot.Sources) != 1 || !snapshot.Sources[0].Stale || len(snapshot.Processing) != 1 {
+		t.Fatalf("previous generation was not exposed as stale during replacement: %+v", snapshot)
+	}
+	if !service.processNext(context.Background()) {
+		t.Fatal("replacement generation did not run")
+	}
+	snapshot = service.snapshot()
+	if len(snapshot.Sources) != 1 || snapshot.Sources[0].Stale || len(snapshot.Processing) != 0 ||
+		snapshot.Sources[0].ProcessorVersion != silverProcessorVersion {
+		t.Fatalf("replacement generation did not become current: %+v", snapshot)
+	}
+}
+
 func TestSilverReconcilesCommitAfterImmediateEnqueueFailure(t *testing.T) {
 	root := t.TempDir()
 	bronze := newBronzeStore(filepath.Join(root, "bronze"))

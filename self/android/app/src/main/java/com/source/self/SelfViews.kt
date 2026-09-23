@@ -140,6 +140,11 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             addView(label(status, 18f, true).apply { setTextColor(if (connected) accentColor else Color.WHITE) })
             message?.let { addView(label(it, 14f).apply { setTextColor(secondaryColor) }) }
         })
+        if (silver.sources.any { it.stale }) {
+            body.addView(label("Some knowledge is being updated; previous results remain visible.", 14f).apply {
+                setTextColor(secondaryColor)
+            }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+        }
         if (silver.entities.isNotEmpty()) {
             body.addView(label("Entities", 19f, true), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(20) })
             body.addView(ScrollView(activity).apply {
@@ -174,6 +179,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         ).apply { setTextColor(secondaryColor) }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(20) })
         root.addView(ScrollView(activity).apply { addView(body) }, LinearLayout.LayoutParams(-1, 0, 1f))
         val knowledgeLabel = when {
+            knowledge.source?.stale == true -> "Knowledge · Updating · ${knowledge.itemCount} previous items"
             knowledge.source != null -> "Knowledge · ${knowledge.itemCount} extracted items"
             knowledge.processing != null -> "Knowledge · ${knowledge.processing.state.replaceFirstChar(Char::uppercase)}"
             else -> "Knowledge · No extracted items"
@@ -194,6 +200,14 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         root.addView(label("Derived from ${item.title}", 14f).apply { setTextColor(secondaryColor) },
             LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(14) })
         val body = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
+        if (knowledge.source?.stale == true) {
+            val progress = knowledge.processing?.let {
+                if (it.totalBatches > 0) " · ${it.completedBatches}/${it.totalBatches}" else ""
+            } ?: ""
+            body.addView(label("Showing previous knowledge while Source updates it$progress", 15f).apply {
+                setTextColor(secondaryColor)
+            })
+        }
         if (knowledge.source == null) {
             val state = knowledge.processing?.let {
                 val progress = if (it.totalBatches > 0) " · ${it.completedBatches}/${it.totalBatches}" else ""

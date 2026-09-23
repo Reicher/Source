@@ -83,6 +83,7 @@ type silverSource struct {
 	ObservationIDs      []string `json:"observation_ids"`
 	EntityIDs           []string `json:"entity_ids"`
 	ClaimIDs            []string `json:"claim_ids"`
+	Stale               bool     `json:"stale,omitempty"`
 }
 
 type silverDataset struct {
@@ -294,9 +295,13 @@ func silverJobMatchesItem(job silverJob, item bronzeItem) bool {
 }
 
 func silverSourceMatchesItem(source silverSource, item bronzeItem) bool {
-	return source.BronzeSourceID == item.ID && source.BronzeContentSHA256 == item.Hash &&
-		source.Title == item.Title && source.Mime == item.Mime &&
+	return silverSourceMatchesBronze(source, item) &&
 		source.ProcessorID == silverProcessorID && source.ProcessorVersion == silverProcessorVersion
+}
+
+func silverSourceMatchesBronze(source silverSource, item bronzeItem) bool {
+	return source.BronzeSourceID == item.ID && source.BronzeContentSHA256 == item.Hash &&
+		source.Title == item.Title && source.Mime == item.Mime
 }
 
 func (s *silverService) enqueue(item bronzeItem) (bool, error) {
@@ -713,9 +718,10 @@ func (s *silverService) snapshot() silverSnapshot {
 	for _, id := range ids {
 		dataset := s.state.Published[id]
 		current, err := s.bronze.load(id)
-		if err != nil || current.Deleted || !silverSourceMatchesItem(dataset.Source, current) {
+		if err != nil || current.Deleted || !silverSourceMatchesBronze(dataset.Source, current) {
 			continue
 		}
+		dataset.Source.Stale = !silverSourceMatchesItem(dataset.Source, current)
 		snapshot.Sources = append(snapshot.Sources, dataset.Source)
 		for _, value := range dataset.Evidence {
 			evidenceMap[value.ID] = value
