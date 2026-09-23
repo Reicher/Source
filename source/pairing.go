@@ -51,6 +51,7 @@ type identity struct {
 	statePath string
 	qrToken   string
 	qrExpires time.Time
+	jobs      *sourceJobs
 }
 
 func randomString(n int) (string, error) {
@@ -238,6 +239,14 @@ func (i *identity) newLanHandler(ctx context.Context) (http.Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load Silver processing state: %w", err)
 	}
+	syncJobs, err := newSyncJobStore(filepath.Join(dataDir, "jobs"))
+	if err != nil {
+		return nil, fmt.Errorf("load sync job state: %w", err)
+	}
+	jobs := &sourceJobs{sync: syncJobs, silver: silver}
+	i.mu.Lock()
+	i.jobs = jobs
+	i.mu.Unlock()
 	bronze.onCommit = func(item bronzeItem) error {
 		_, err := silver.enqueue(item)
 		return err
@@ -307,9 +316,49 @@ func (i *identity) newLanHandler(ctx context.Context) (http.Handler, error) {
 	mux.Handle("/v1/bronze", i.trusted(bronze))
 	mux.Handle("/v1/bronze/", i.trusted(bronze))
 	mux.Handle("GET /v1/silver", i.trusted(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, silver.snapshot())
+		snapshot := silver.snapshot()
+		snapshot.Jobs = jobs.snapshot()
+		writeJSON(w, snapshot)
+	})))
+	mux.Handle("POST /v1/jobs/sync", i.trusted(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Jobs []syncJobPlanItem `json:"jobs"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256*1024)).Decode(&request); err != nil {
+			http.Error(w, "invalid sync job plan", http.StatusBadRequest)
+			return
+		}
+		result, err := syncJobs.plan(request.Jobs)
+		if errors.Is(err, errInvalidSyncJobPlan) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		} else if err != nil {
+			http.Error(w, "job storage unavailable", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"jobs": result})
+	})))
+	mux.Handle("POST /v1/jobs/sync/{id}/complete", i.trusted(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := syncJobs.complete(r.PathValue("id")); errors.Is(err, os.ErrNotExist) {
+			http.NotFound(w, r)
+			return
+		} else if err != nil {
+			http.Error(w, "job storage unavailable", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]string{"status": "completed"})
 	})))
 	return mux, nil
+}
+
+func (i *identity) jobSnapshot() sourceJobSnapshot {
+	i.mu.Lock()
+	jobs := i.jobs
+	i.mu.Unlock()
+	if jobs == nil {
+		return sourceJobSnapshot{Queued: []sourceJob{}, Completed: []sourceJob{}}
+	}
+	return jobs.snapshot()
 }
 
 func (i *identity) trusted(next http.Handler) http.Handler {
@@ -347,7 +396,7 @@ func (i *identity) setupHandler(host string) http.Handler {
 		i.mu.Unlock()
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if paired {
-			_, _ = w.Write([]byte("<!doctype html><style>html,body{height:100%;margin:0}body{display:grid;place-items:center}.paired{width:64px;height:64px;border-radius:50%;background:#2ba66a}</style><div id='paired' class='paired'></div>"))
+			_, _ = w.Write([]byte("<!doctype html><meta name='viewport' content='width=device-width'><title>Source jobs</title><style>html{color-scheme:dark}body{box-sizing:border-box;max-width:720px;margin:0 auto;padding:28px 20px;background:#0e1415;color:#fff;font:15px system-ui}header{display:flex;align-items:center;gap:10px;margin-bottom:24px}h1{font-size:26px;margin:0}.paired{width:12px;height:12px;border-radius:50%;background:#74dca7}h2{font-size:17px;margin:22px 0 8px}.job{display:grid;grid-template-columns:1fr auto;gap:3px 12px;padding:10px 12px;margin:6px 0;border-radius:10px;background:#1d2727}.meta,.time,.empty,.more{color:#bdc9c3;font-size:13px}.time{grid-column:2;grid-row:1/3;align-self:center}.more{padding:6px 12px}</style><header><h1>Source</h1><div id='paired' class='paired'></div></header><main id='jobs'><section><h2>Queue <span id='queued-count'></span></h2><div id='queued'></div></section><section><h2>Completed <span id='completed-count'></span></h2><div id='completed'></div></section></main><script src='/setup.js'></script>"))
 			return
 		}
 		_, _ = w.Write([]byte("<!doctype html><meta http-equiv=refresh content=30><style>html,body{height:100%;margin:0}body{display:grid;place-items:center}img{width:min(80vw,520px)}.paired{width:64px;height:64px;border-radius:50%;background:#2ba66a}</style><img id='pairing-qr' alt='' src='/qr.png'><script src='/setup.js'></script>"))
@@ -361,6 +410,9 @@ func (i *identity) setupHandler(host string) http.Handler {
 		} else {
 			_, _ = w.Write([]byte("no"))
 		}
+	})
+	mux.HandleFunc("GET /jobs", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, i.jobSnapshot())
 	})
 	mux.HandleFunc("GET /setup.js", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")

@@ -118,6 +118,7 @@ type silverSnapshot struct {
 	Entities      []silverEntity      `json:"entities"`
 	Claims        []silverClaim       `json:"claims"`
 	Processing    []silverProcessing  `json:"processing"`
+	Jobs          sourceJobSnapshot   `json:"jobs"`
 }
 
 type silverEntityCandidate struct {
@@ -893,6 +894,28 @@ func (s *silverService) snapshot() silverSnapshot {
 	sort.Slice(snapshot.Processing, func(i, j int) bool {
 		return snapshot.Processing[i].BronzeSourceID < snapshot.Processing[j].BronzeSourceID
 	})
+	return snapshot
+}
+
+func (s *silverService) jobSnapshot() sourceJobSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snapshot := sourceJobSnapshot{Revision: s.state.Revision}
+	for _, job := range s.state.Jobs {
+		visible := sourceJob{
+			ID: job.ID, Kind: "silver_extraction", Title: job.Title,
+			State: job.State, QueuedAt: job.AcceptedAt,
+		}
+		switch job.State {
+		case "completed":
+			visible.CompletedAt = job.UpdatedAt
+			snapshot.Completed = append(snapshot.Completed, visible)
+		case "cancelled":
+			continue
+		default:
+			snapshot.Queued = append(snapshot.Queued, visible)
+		}
+	}
 	return snapshot
 }
 

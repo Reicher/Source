@@ -153,9 +153,16 @@ class SourceConnection(
                 if (!state.isPaired()) state.savePaired(source, personId)
                 BronzeSync(bronze, transport).run(source, host, targetPort,
                     { isCurrent(current, source) && session == syncVersion.get() },
-                    { bronzeChanged = true })
+                    { bronzeChanged = true },
+                    {
+                        val changed = silver.install(transport.silver(source, host, targetPort))
+                        silverChanged = silverChanged || changed
+                        if (changed) handler.post {
+                            if (isCurrent(current, source) && session == syncVersion.get()) onDataChanged()
+                        }
+                    })
                 if (!isCurrent(current, source) || session != syncVersion.get()) return@execute
-                silverChanged = silver.install(transport.silver(source, host, targetPort))
+                silverChanged = silver.install(transport.silver(source, host, targetPort)) || silverChanged
                 handler.post {
                     if (!isCurrent(current, source) || session != syncVersion.get()) return@post
                     if (bronzeChanged || silverChanged) onDataChanged()

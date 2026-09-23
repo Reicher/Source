@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -182,6 +183,73 @@ func TestExpiredQRAndLocalSetup(t *testing.T) {
 	setup.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("rebound host: %d", response.Code)
+	}
+}
+
+func TestTrustedSyncJobsAppearInSilverAndLocalOverview(t *testing.T) {
+	i, err := loadIdentity(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate := testClientCert(t)
+	client, err := x509.ParseCertificate(certificate.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	i.state.SelfPin = fingerprint(client)
+	i.state.PersonID = "person"
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	handler, err := i.newLanHandler(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/jobs/sync", strings.NewReader(
+		`{"jobs":[{"key":"item:1:to_source","title":"note.txt","direction":"to_source"}]}`))
+	request.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{client}}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("plan jobs: %d: %s", response.Code, response.Body.String())
+	}
+	var planned struct {
+		Jobs []syncJobPlanResult `json:"jobs"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &planned); err != nil || len(planned.Jobs) != 1 {
+		t.Fatalf("plan response: %+v, %v", planned, err)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/v1/silver", nil)
+	request.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{client}}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	var silver silverSnapshot
+	if err := json.Unmarshal(response.Body.Bytes(), &silver); err != nil {
+		t.Fatal(err)
+	}
+	if len(silver.Jobs.Queued) != 1 || silver.Jobs.Queued[0].Title != "note.txt" || silver.Jobs.Queued[0].Key != "" {
+		t.Fatalf("Silver omitted or exposed internal sync job data: %+v", silver.Jobs)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/v1/jobs/sync/"+planned.Jobs[0].JobID+"/complete", nil)
+	request.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{client}}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("complete job: %d", response.Code)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/jobs", nil)
+	request.Host = "127.0.0.1:8081"
+	request.RemoteAddr = "127.0.0.1:12345"
+	response = httptest.NewRecorder()
+	i.setupHandler("127.0.0.1:8081").ServeHTTP(response, request)
+	var jobs sourceJobSnapshot
+	if err := json.Unmarshal(response.Body.Bytes(), &jobs); err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs.Queued) != 0 || len(jobs.Completed) != 1 || jobs.Completed[0].CompletedAt <= 0 {
+		t.Fatalf("local overview did not show completion: %+v", jobs)
 	}
 }
 
