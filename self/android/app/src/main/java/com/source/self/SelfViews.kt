@@ -140,22 +140,57 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             addView(label(status, 18f, true).apply { setTextColor(if (connected) accentColor else Color.WHITE) })
             message?.let { addView(label(it, 14f).apply { setTextColor(secondaryColor) }) }
         })
-        if (silver.sources.any { it.stale }) {
-            body.addView(label("Some knowledge is being updated; previous results remain visible.", 14f).apply {
-                setTextColor(secondaryColor)
-            }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+        val content = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            if (silver.sources.any { it.stale }) {
+                addView(label("Some knowledge is being updated; previous results remain visible.", 14f).apply {
+                    setTextColor(secondaryColor)
+                }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+            }
+            addView(label("Queue (${silver.jobs.queued.size})", 19f, true), sectionMargin())
+            if (silver.jobs.queued.isEmpty()) {
+                addView(label("No jobs waiting", 14f).apply { setTextColor(secondaryColor) })
+            } else {
+                silver.jobs.queued.forEach { addView(jobRow(it, false)) }
+            }
+            addView(label("Completed (${silver.jobs.completed.size})", 19f, true), sectionMargin())
+            if (silver.jobs.completed.isEmpty()) {
+                addView(label("No completed jobs", 14f).apply { setTextColor(secondaryColor) })
+            } else {
+                silver.jobs.completed.take(5).forEach { addView(jobRow(it, true)) }
+                if (silver.jobs.completed.size > 5) addView(label(
+                    "+ ${silver.jobs.completed.size - 5} earlier", 13f
+                ).apply { setTextColor(secondaryColor) })
+            }
+            if (silver.entities.isNotEmpty()) {
+                addView(label("Entities", 19f, true), sectionMargin())
+                silver.entities.sortedBy(silver::label).forEach { entity ->
+                    addView(actionButton(silver.label(entity)) { onEntity(entity.id) })
+                }
+            }
         }
-        if (silver.entities.isNotEmpty()) {
-            body.addView(label("Entities", 19f, true), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(20) })
-            body.addView(ScrollView(activity).apply {
-                addView(LinearLayout(activity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    silver.entities.sortedBy(silver::label).forEach { entity ->
-                        addView(actionButton(silver.label(entity)) { onEntity(entity.id) })
-                    }
-                })
-            }, LinearLayout.LayoutParams(-1, 0, 1f))
+        body.addView(ScrollView(activity).apply { addView(content) }, LinearLayout.LayoutParams(-1, 0, 1f))
+    }
+
+    private fun jobRow(job: SourceJob, completed: Boolean): View = LinearLayout(activity).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(12), dp(9), dp(12), dp(9))
+        background = GradientDrawable().apply {
+            setColor(surfaceColor)
+            cornerRadius = dp(10).toFloat()
         }
+        addView(label(job.title, 15f, true))
+        val kind = if (job.kind == "silver_extraction") {
+            "Silver extraction · ${job.state.replace('_', ' ')}"
+        } else {
+            "Sync · ${if (job.direction == "to_source") "to Source" else "to Self"}"
+        }
+        val time = if (completed && job.completedAt != null) {
+            " · ${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(job.completedAt))}"
+        } else ""
+        addView(label(kind + time, 13f).apply { setTextColor(secondaryColor) })
+    }.also { view ->
+        view.layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) }
     }
 
     fun bronzeDetail(

@@ -64,6 +64,24 @@ data class SilverProcessing(
     val totalBatches: Int,
 )
 
+data class SourceJob(
+    val id: String,
+    val kind: String,
+    val title: String,
+    val direction: String?,
+    val state: String,
+    val queuedAt: Long,
+    val completedAt: Long?,
+)
+
+data class SourceJobs(
+    val revision: Long,
+    val queued: List<SourceJob>,
+    val completed: List<SourceJob>,
+) {
+    companion object { val EMPTY = SourceJobs(0, emptyList(), emptyList()) }
+}
+
 data class SilverKnowledge(
     val source: SilverSource?,
     val evidence: List<SilverEvidence>,
@@ -83,6 +101,7 @@ data class SilverSnapshot(
     val entities: List<SilverEntity>,
     val claims: List<SilverClaim>,
     val processing: List<SilverProcessing>,
+    val jobs: SourceJobs = SourceJobs.EMPTY,
 ) {
     fun forBronze(id: String): SilverKnowledge {
         val source = sources.firstOrNull { it.bronzeSourceId == id }
@@ -116,6 +135,7 @@ data class SilverSnapshot(
 
         fun fromJson(value: JSONObject): SilverSnapshot {
             require(value.getInt("schema_version") == 1) { "Unsupported Silver schema" }
+            val jobs = value.optJSONObject("jobs")
             return SilverSnapshot(
                 value.getLong("revision"),
                 value.array("sources").objects().map { source -> SilverSource(
@@ -159,8 +179,18 @@ data class SilverSnapshot(
                     processing.getString("bronze_source_id"), processing.getString("state"),
                     processing.getInt("completed_batches"), processing.getInt("total_batches"),
                 ) },
+                if (jobs == null) SourceJobs.EMPTY else SourceJobs(
+                    jobs.optLong("revision"), jobs.array("queued").objects().map(::sourceJob),
+                    jobs.array("completed").objects().map(::sourceJob),
+                ),
             )
         }
+
+        private fun sourceJob(value: JSONObject) = SourceJob(
+            value.getString("id"), value.getString("kind"), value.getString("title"),
+            value.optString("direction").takeIf(String::isNotEmpty), value.getString("state"),
+            value.getLong("queued_at"), value.optLong("completed_at").takeIf { value.has("completed_at") },
+        )
     }
 }
 
@@ -179,7 +209,8 @@ class SilverStore(context: Context) {
     @Synchronized fun install(json: JSONObject): Boolean {
         val next = SilverSnapshot.fromJson(json)
         if (next.revision < value.revision) return false
-        if (next.revision == value.revision) return false
+        if (next.revision == value.revision && next.jobs.revision < value.jobs.revision) return false
+        if (next == value) return false
         val bytes = json.toString().toByteArray(Charsets.UTF_8)
         val output = file.startWrite()
         try {

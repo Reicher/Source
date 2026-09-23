@@ -75,6 +75,23 @@ class PairingTransport(private val state: PairingState) {
         } finally { close(connection) }
     }
 
+    fun planSync(source: SourceRef, address: String, port: Int, jobs: List<SyncJobPlan>): Map<String, String> {
+        val values = JSONArray()
+        jobs.forEach { job -> values.put(JSONObject()
+            .put("key", job.key).put("title", job.title).put("direction", job.direction)) }
+        val response = call(base(address, port), "/v1/jobs/sync", source.pin, "POST",
+            JSONObject().put("jobs", values).toString())
+        val planned = response.getJSONArray("jobs")
+        return (0 until planned.length()).associate { index ->
+            val job = planned.getJSONObject(index)
+            job.getString("key") to job.getString("job_id")
+        }
+    }
+
+    fun completeSync(source: SourceRef, address: String, port: Int, jobId: String) {
+        call(base(address, port), "/v1/jobs/sync/$jobId/complete", source.pin, "POST", null)
+    }
+
     fun upload(source: SourceRef, address: String, port: Int, item: BronzeItem, file: File?) {
         val connection = open(base(address, port), "/v1/bronze/${item.id}", source.pin,
             if (item.deleted) "DELETE" else "PUT")
