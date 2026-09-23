@@ -71,6 +71,8 @@ func TestBronzeIdempotenceInterruptionAndTombstone(t *testing.T) {
 	deleted.Revision++
 	deleted.Modified++
 	deleted.Deleted = true
+	deleted.Hash = ""
+	deleted.Size = 0
 	if got := bronzeRequest(t, store, http.MethodDelete, deleted, nil).Code; got != http.StatusOK {
 		t.Fatalf("delete: %d", got)
 	}
@@ -90,21 +92,45 @@ func TestBronzeIdempotenceInterruptionAndTombstone(t *testing.T) {
 	}
 }
 
-func TestBronzeOfflineChangesBeforeFirstSync(t *testing.T) {
+func TestBronzeCreateAndDeleteBeforeFirstSync(t *testing.T) {
 	store := newBronzeStore(t.TempDir())
-	content := []byte("third version")
+	content := []byte("immutable note")
 	sum := sha256.Sum256(content)
-	item := bronzeItem{ID: "22222222-2222-4222-8222-222222222222", Revision: 3,
-		Hash: hex.EncodeToString(sum[:]), Title: "Edited offline", Mime: "text/plain",
-		Size: int64(len(content)), Created: 1, Modified: 3}
+	item := bronzeItem{ID: "22222222-2222-4222-8222-222222222222", Revision: 1,
+		Hash: hex.EncodeToString(sum[:]), Title: "Offline note", Mime: "text/plain",
+		Size: int64(len(content)), Created: 1, Modified: 1}
 	if got := bronzeRequest(t, store, http.MethodPut, item, content).Code; got != http.StatusOK {
-		t.Fatalf("offline edits: %d", got)
+		t.Fatalf("offline creation: %d", got)
 	}
-	item.ID = "33333333-3333-4333-8333-333333333333"
-	item.Revision = 2
-	item.Deleted = true
-	if got := bronzeRequest(t, store, http.MethodDelete, item, nil).Code; got != http.StatusOK {
+	tombstone := bronzeItem{ID: "33333333-3333-4333-8333-333333333333", Revision: 2, Deleted: true,
+		Title: "Deleted offline", Mime: "text/plain", Created: 1, Modified: 2}
+	if got := bronzeRequest(t, store, http.MethodDelete, tombstone, nil).Code; got != http.StatusOK {
 		t.Fatalf("offline creation and deletion: %d", got)
+	}
+}
+
+func TestBronzeRejectsReplacement(t *testing.T) {
+	store := newBronzeStore(t.TempDir())
+	content := []byte("original")
+	sum := sha256.Sum256(content)
+	item := bronzeItem{ID: "88888888-8888-4888-8888-888888888888", Revision: 1,
+		Hash: hex.EncodeToString(sum[:]), Title: "Note", Mime: "text/plain",
+		Size: int64(len(content)), Created: 1, Modified: 1}
+	if got := bronzeRequest(t, store, http.MethodPut, item, content).Code; got != http.StatusOK {
+		t.Fatalf("create: %d", got)
+	}
+	replacement := []byte("replacement")
+	replacementSum := sha256.Sum256(replacement)
+	item.Revision = 2
+	item.Modified = 2
+	item.Hash = hex.EncodeToString(replacementSum[:])
+	item.Size = int64(len(replacement))
+	if got := bronzeRequest(t, store, http.MethodPut, item, replacement).Code; got != http.StatusConflict {
+		t.Fatalf("replacement status: %d", got)
+	}
+	stored, err := store.load(item.ID)
+	if err != nil || stored.Revision != 1 || stored.Hash == item.Hash {
+		t.Fatalf("replacement changed immutable Bronze: %+v, %v", stored, err)
 	}
 }
 

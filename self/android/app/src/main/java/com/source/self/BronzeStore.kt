@@ -26,6 +26,12 @@ data class BronzeItem(
     val modified: Long,
     val ackedRevision: Long = 0,
 ) {
+    fun sameBronze(other: BronzeItem): Boolean = copy(ackedRevision = 0) == other.copy(ackedRevision = 0)
+
+    fun isDeletionOf(other: BronzeItem): Boolean = deleted && !other.deleted &&
+        revision == other.revision + 1 && title == other.title && mime == other.mime &&
+        created == other.created && modified > other.modified && hash.isEmpty() && size == 0L
+
     fun json(includeAck: Boolean = false) = JSONObject().apply {
         put("id", id); put("revision", revision); put("hash", hash); put("deleted", deleted)
         put("title", title); put("mime", mime); put("size", size)
@@ -54,7 +60,6 @@ class BronzeStore(private val context: Context) {
         check(items.mkdirs() || items.isDirectory)
         check(blobs.mkdirs() || blobs.isDirectory)
         pruneUnused()
-        migrateUntitledNotes()
     }
 
     private fun metadata(id: String) = AtomicFile(File(items, "$id.json"))
@@ -123,14 +128,6 @@ class BronzeStore(private val context: Context) {
 
     private fun noteFilename(id: String): String = "note-${id.take(12)}.txt"
 
-    // Earlier builds used a placeholder instead of a filename for empty notes.
-    @Synchronized private fun migrateUntitledNotes() {
-        all().filter { !it.deleted && it.mime == "text/plain" && it.title == "Note" }.forEach { item ->
-            save(item.copy(title = noteFilename(item.id), revision = item.revision + 1,
-                modified = maxOf(System.currentTimeMillis(), item.modified + 1)))
-        }
-    }
-
     @Synchronized fun createNote(text: String): BronzeItem {
         val now = System.currentTimeMillis()
         val id = UUID.randomUUID().toString()
@@ -147,14 +144,6 @@ class BronzeStore(private val context: Context) {
         val (hash, size) = resolver.openInputStream(uri)?.use { storeContent(it) } ?: error("Could not open selected file")
         val now = System.currentTimeMillis()
         return BronzeItem(UUID.randomUUID().toString(), 1, hash, false, name.take(512), mime, size, now, now).also(::save)
-    }
-
-    @Synchronized fun editText(id: String, text: String): BronzeItem {
-        val old = get(id) ?: error("Bronze item missing")
-        check(!old.deleted && old.mime == "text/plain")
-        val (hash, size) = storeContent(text.byteInputStream())
-        return old.copy(revision = old.revision + 1, hash = hash, size = size,
-            modified = maxOf(System.currentTimeMillis(), old.modified + 1)).also(::save)
     }
 
     @Synchronized fun delete(id: String) {
@@ -175,7 +164,10 @@ class BronzeStore(private val context: Context) {
             if (!item.deleted) storeContent(input ?: error("Bronze content missing"), item)
             synchronized(this) {
                 val current = get(item.id)
-                if (current == null || current.revision < item.revision)
+                check(current == null || item.sameBronze(current) || item.isDeletionOf(current)) {
+                    "Immutable Bronze conflict"
+                }
+                if (current == null || !item.sameBronze(current) || current.ackedRevision != item.revision)
                     save(item.copy(ackedRevision = item.revision))
             }
         } finally {

@@ -69,7 +69,7 @@ func (s *bronzeStore) load(id string) (bronzeItem, error) {
 func validBronze(item bronzeItem) bool {
 	return bronzeID.MatchString(item.ID) && item.Revision > 0 && item.Created > 0 && item.Modified >= item.Created &&
 		len(item.Title) > 0 && len(item.Title) <= 512 && len(item.Mime) > 0 && len(item.Mime) <= 255 &&
-		item.Size >= 0 && (item.Deleted || bronzeHash.MatchString(item.Hash))
+		((item.Deleted && item.Hash == "" && item.Size == 0) || (!item.Deleted && item.Size >= 0 && bronzeHash.MatchString(item.Hash)))
 }
 
 func readBronzeHeader(r *http.Request) (bronzeItem, error) {
@@ -205,12 +205,18 @@ func (s *bronzeStore) commit(item bronzeItem, staged string) (bronzeItem, error)
 		return bronzeItem{}, err
 	}
 	if exists {
-		if item.Revision < current.Revision || (item.Revision == current.Revision && item != current) {
-			return bronzeItem{}, errRevisionConflict
-		}
-		if item.Revision == current.Revision {
+		if item == current {
 			return current, nil
 		}
+		// Bronze content and metadata are immutable. The sole successor to a
+		// live item is its tombstone; all other replacements are conflicts.
+		if current.Deleted || !item.Deleted || item.Revision != current.Revision+1 ||
+			item.Title != current.Title || item.Mime != current.Mime || item.Created != current.Created ||
+			item.Modified <= current.Modified {
+			return bronzeItem{}, errRevisionConflict
+		}
+	} else if (!item.Deleted && item.Revision != 1) || (item.Deleted && item.Revision != 2) {
+		return bronzeItem{}, errRevisionConflict
 	}
 	if staged != "" {
 		if err := s.commitBlob(staged, item.Hash); err != nil {

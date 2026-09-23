@@ -137,10 +137,11 @@ job state are excluded. Entity identifiers are random opaque UUIDs. Equal input
 under the same processor revision therefore converges on the same derived record
 IDs without permitting Self to originate them.
 
-Bronze is never edited by Silver processing. Evidence and Observations are
-immutable. A later generation publishes new records and retains the previous
-completed generation in Source history; it does not mutate the prior records in
-place.
+Bronze content and metadata are immutable after creation. It can be imported or
+created and later deleted, but never edited in place. Evidence and Observations
+are likewise immutable. A later processor generation publishes new records and
+retains the previous completed generation in Source history; it does not mutate
+the prior records in place.
 
 ## Durable job lifecycle
 
@@ -149,13 +150,17 @@ Source stores jobs with these states:
 ```text
 queued → running → completed
                  ↘ failed
-queued/running/failed → cancelled when Bronze changes or is deleted
+queued/running/failed → cancelled when its input identity is invalidated or Bronze is deleted
 ```
 
-Acceptance records only the Bronze identifier and immutable content hash; the
-worker reads the content-addressed Bronze blob. Jobs are deduplicated by Bronze
-source, content hash, processor ID, and processor version. A failed job can be
-queued again, and running/failed work is recovered as queued on restart.
+Acceptance records the Bronze identifier, immutable content hash, title, and MIME
+type. The format-relevant metadata participates in job identity because it can
+select a parser. The worker reads the content-addressed Bronze blob with bounded
+inspection and rejects known binary formats before loading their content. Jobs
+are deduplicated by that complete input identity and processor revision. A
+failed job can be queued again, and running/failed work is recovered as queued
+on restart. Periodic manifest reconciliation repairs work that was missed by an
+immediate enqueue failure without requiring a restart.
 
 Text is divided into deterministic parser fragments. Each completed fragment is
 stored as a checkpoint containing staged Evidence, Observations, and resolution
@@ -167,8 +172,8 @@ Before publication Source rechecks that the Bronze source still has the job's
 content hash. Publication writes the complete dataset and completed job state in
 one atomic state replacement. Consequently a restart may reveal either the old
 complete generation or the new complete generation, never a partially published
-one. For changed Bronze, the old generation is not presented as current while
-the replacement is processing.
+one. A dataset whose recorded input identity no longer matches its Bronze
+metadata is not presented as current.
 
 Deletion cancels working jobs and removes current and historical derived records
 for that Bronze source. Entity registry entries no longer supported by retained
@@ -189,8 +194,8 @@ navigation.
 
 ## Reprocessing
 
-Identical content already completed by the same processor revision is not
-needlessly queued. Changing Bronze or the processor revision permits a new
+An identical Bronze input identity already completed by the same processor
+revision is not needlessly queued. Changing the processor revision permits a new
 generation. Completed prior generations remain Source history; incomplete
 checkpoints do not. Better parsers or future models can therefore improve Silver
 without changing Bronze or silently overwriting the previous interpretation.

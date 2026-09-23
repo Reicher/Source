@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -18,14 +19,18 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
 const (
 	silverSchemaVersion     = 1
 	silverProcessorID       = "source.silver.generic-text"
-	silverProcessorVersion  = "1"
+	silverProcessorVersion  = "2"
 	silverMaximumBatchBytes = 4096
+	silverInspectionBytes   = 8192
+	silverMaximumInputBytes = 8 * 1024 * 1024
+	silverReconcileInterval = time.Second
 )
 
 type silverProducer struct {
@@ -204,27 +209,25 @@ func newSilverService(dir string, bronze *bronzeStore) (*silverService, error) {
 			return nil, err
 		}
 	}
-	items, err := bronze.manifest()
-	if err != nil {
+	if err := s.reconcile(); err != nil {
 		return nil, err
-	}
-	for _, item := range items {
-		if _, err := s.enqueue(item); err != nil {
-			return nil, err
-		}
 	}
 	return s, nil
 }
 
 func (s *silverService) start(ctx context.Context) {
 	go func() {
+		ticker := time.NewTicker(silverReconcileInterval)
+		defer ticker.Stop()
 		for {
+			_ = s.reconcile()
 			for s.processNext(ctx) {
 			}
 			select {
 			case <-ctx.Done():
 				return
 			case <-s.wake:
+			case <-ticker.C:
 			}
 		}
 	}()
@@ -238,13 +241,71 @@ func (s *silverService) signal() {
 	}
 }
 
+// reconcile makes the durable Bronze manifest the source of truth for Silver
+// work. It repairs a missing queue entry without retrying a present failed job.
+func (s *silverService) reconcile() error {
+	items, err := s.bronze.manifest()
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		s.mu.Lock()
+		needed := s.needsReconcileLocked(item)
+		s.mu.Unlock()
+		if needed {
+			if _, err := s.enqueue(item); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *silverService) needsReconcileLocked(item bronzeItem) bool {
+	if item.Deleted {
+		if _, ok := s.state.Published[item.ID]; ok {
+			return true
+		}
+		if _, ok := s.state.History[item.ID]; ok {
+			return true
+		}
+		for _, job := range s.state.Jobs {
+			if job.BronzeSourceID == item.ID {
+				return true
+			}
+		}
+		return false
+	}
+	if published, ok := s.state.Published[item.ID]; ok && silverSourceMatchesItem(published.Source, item) {
+		return false
+	}
+	for _, job := range s.state.Jobs {
+		if job.State != "cancelled" && silverJobMatchesItem(job, item) {
+			return false
+		}
+	}
+	return true
+}
+
+func silverJobMatchesItem(job silverJob, item bronzeItem) bool {
+	return job.BronzeSourceID == item.ID && job.BronzeContentSHA256 == item.Hash &&
+		job.Title == item.Title && job.Mime == item.Mime &&
+		job.ProcessorID == silverProcessorID && job.ProcessorVersion == silverProcessorVersion
+}
+
+func silverSourceMatchesItem(source silverSource, item bronzeItem) bool {
+	return source.BronzeSourceID == item.ID && source.BronzeContentSHA256 == item.Hash &&
+		source.Title == item.Title && source.Mime == item.Mime &&
+		source.ProcessorID == silverProcessorID && source.ProcessorVersion == silverProcessorVersion
+}
+
 func (s *silverService) enqueue(item bronzeItem) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	changed := false
 	for index := range s.state.Jobs {
 		job := &s.state.Jobs[index]
-		if job.BronzeSourceID == item.ID && job.BronzeContentSHA256 != item.Hash && (job.State == "queued" || job.State == "running" || job.State == "failed") {
+		if job.BronzeSourceID == item.ID && !silverJobMatchesItem(*job, item) && (job.State == "queued" || job.State == "running" || job.State == "failed") {
 			job.State = "cancelled"
 			job.Checkpoints = nil
 			job.UpdatedAt = time.Now().UnixMilli()
@@ -278,14 +339,7 @@ func (s *silverService) enqueue(item bronzeItem) (bool, error) {
 		}
 		return changed, nil
 	}
-	if published, ok := s.state.Published[item.ID]; ok && published.Source.BronzeContentSHA256 == item.Hash &&
-		published.Source.ProcessorID == silverProcessorID && published.Source.ProcessorVersion == silverProcessorVersion {
-		if published.Source.Title != item.Title || published.Source.Mime != item.Mime {
-			published.Source.Title = item.Title
-			published.Source.Mime = item.Mime
-			s.state.Published[item.ID] = published
-			changed = true
-		}
+	if published, ok := s.state.Published[item.ID]; ok && silverSourceMatchesItem(published.Source, item) {
 		if changed {
 			s.state.Revision++
 			return true, s.saveLocked()
@@ -294,13 +348,7 @@ func (s *silverService) enqueue(item bronzeItem) (bool, error) {
 	}
 	for index := range s.state.Jobs {
 		job := &s.state.Jobs[index]
-		if job.BronzeSourceID == item.ID && job.BronzeContentSHA256 == item.Hash && job.ProcessorID == silverProcessorID && job.ProcessorVersion == silverProcessorVersion && job.State != "cancelled" {
-			if job.Title != item.Title || job.Mime != item.Mime {
-				job.Title = item.Title
-				job.Mime = item.Mime
-				job.UpdatedAt = time.Now().UnixMilli()
-				changed = true
-			}
+		if job.State != "cancelled" && silverJobMatchesItem(*job, item) {
 			if job.State == "failed" {
 				job.State = "queued"
 				job.Error = ""
@@ -387,17 +435,16 @@ func (s *silverService) processJob(ctx context.Context, jobID string) error {
 	if err != nil {
 		return err
 	}
-	data, err := io.ReadAll(file)
-	_ = file.Close()
+	fragments, supported, err := parseSilverReader(item, file)
+	closeErr := file.Close()
 	if err != nil {
 		return err
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 	if item.Hash != copy.BronzeContentSHA256 {
 		return s.cancelJob(jobID)
-	}
-	fragments, supported, err := parseSilverText(item, data)
-	if err != nil {
-		return err
 	}
 	if !supported {
 		fragments = nil
@@ -468,7 +515,7 @@ func (s *silverService) publish(jobID string, current bronzeItem) error {
 		return context.Canceled
 	}
 	latest, err := s.bronze.load(current.ID)
-	if err != nil || latest.Deleted || latest.Hash != job.BronzeContentSHA256 {
+	if err != nil || latest.Deleted || !silverJobMatchesItem(*job, latest) {
 		return s.cancelJobLocked(job)
 	}
 	if len(job.Checkpoints) != job.TotalBatches {
@@ -666,7 +713,7 @@ func (s *silverService) snapshot() silverSnapshot {
 	for _, id := range ids {
 		dataset := s.state.Published[id]
 		current, err := s.bronze.load(id)
-		if err != nil || current.Deleted || current.Hash != dataset.Source.BronzeContentSHA256 {
+		if err != nil || current.Deleted || !silverSourceMatchesItem(dataset.Source, current) {
 			continue
 		}
 		snapshot.Sources = append(snapshot.Sources, dataset.Source)
@@ -727,14 +774,94 @@ func (f parsedSilverFragment) identity() string {
 	return string(value)
 }
 
+func parseSilverReader(item bronzeItem, reader io.Reader) ([]parsedSilverFragment, bool, error) {
+	if !declaredSilverText(item.Mime) && knownBinarySilverInput(item) {
+		return nil, false, nil
+	}
+	buffered := bufio.NewReaderSize(reader, silverInspectionBytes)
+	prefix, err := buffered.Peek(silverInspectionBytes)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, bufio.ErrBufferFull) {
+		return nil, false, err
+	}
+	if !declaredSilverText(item.Mime) && silverPrefixLooksBinary(prefix) {
+		return nil, false, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(buffered, silverMaximumInputBytes+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if len(data) > silverMaximumInputBytes {
+		return nil, false, nil
+	}
+	return parseSilverText(item, data)
+}
+
+func declaredSilverText(mime string) bool {
+	mime = normalizedSilverMime(mime)
+	return strings.HasPrefix(mime, "text/") || mime == "application/json" || mime == "application/csv"
+}
+
+func normalizedSilverMime(mime string) string {
+	return strings.ToLower(strings.TrimSpace(strings.SplitN(mime, ";", 2)[0]))
+}
+
+func knownBinarySilverInput(item bronzeItem) bool {
+	mime := normalizedSilverMime(item.Mime)
+	if strings.HasPrefix(mime, "image/") || strings.HasPrefix(mime, "audio/") ||
+		strings.HasPrefix(mime, "video/") || strings.HasPrefix(mime, "font/") {
+		return true
+	}
+	switch mime {
+	case "application/pdf", "application/zip", "application/gzip", "application/x-gzip",
+		"application/x-7z-compressed", "application/x-rar-compressed":
+		return true
+	}
+	lowerName := strings.ToLower(item.Title)
+	for _, extension := range []string{".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".pdf", ".zip", ".gz", ".7z", ".rar", ".mp3", ".wav", ".flac", ".mp4", ".mov", ".avi", ".mkv"} {
+		if strings.HasSuffix(lowerName, extension) {
+			return true
+		}
+	}
+	return false
+}
+
+func silverPrefixLooksBinary(data []byte) bool {
+	if bytes.IndexByte(data, 0) >= 0 {
+		return true
+	}
+	valid := data
+	if !utf8.Valid(valid) {
+		valid = nil
+		for trim := 1; trim < utf8.UTFMax && trim < len(data); trim++ {
+			candidate := data[:len(data)-trim]
+			if utf8.Valid(candidate) {
+				valid = candidate
+				break
+			}
+		}
+		if valid == nil {
+			return true
+		}
+	}
+	control := 0
+	for _, r := range string(valid) {
+		if r < 0x20 && r != '\n' && r != '\r' && r != '\t' {
+			control++
+		}
+	}
+	return len(valid) > 0 && control*100 > len(valid)
+}
+
 func parseSilverText(item bronzeItem, data []byte) ([]parsedSilverFragment, bool, error) {
 	if len(data) == 0 {
 		return []parsedSilverFragment{}, true, nil
 	}
+	byteOffset := 0
 	if bytes.HasPrefix(data, []byte{0xef, 0xbb, 0xbf}) {
 		data = data[3:]
+		byteOffset = 3
 	}
-	declaredText := strings.HasPrefix(item.Mime, "text/") || item.Mime == "application/json" || item.Mime == "application/csv"
+	declaredText := declaredSilverText(item.Mime)
 	if !utf8.Valid(data) || bytes.IndexByte(data, 0) >= 0 {
 		if declaredText {
 			return nil, true, errors.New("text-like Bronze is not valid UTF-8")
@@ -752,22 +879,41 @@ func parseSilverText(item bronzeItem, data []byte) ([]parsedSilverFragment, bool
 	}
 	text := string(data)
 	lowerName := strings.ToLower(item.Title)
-	if item.Mime == "application/json" || strings.HasSuffix(lowerName, ".json") {
+	mime := normalizedSilverMime(item.Mime)
+	if mime == "application/json" || strings.HasSuffix(lowerName, ".json") {
 		if fragments, ok := parseJSONFragments(text); ok {
 			return fragments, true, nil
 		}
 	}
-	if item.Mime == "text/csv" || item.Mime == "application/csv" || strings.HasSuffix(lowerName, ".csv") {
+	if mime == "text/csv" || mime == "application/csv" || strings.HasSuffix(lowerName, ".csv") {
 		if fragments, ok := parseCSVFragments(text); ok {
 			return fragments, true, nil
 		}
 	}
-	if item.Mime == "text/markdown" || strings.HasSuffix(lowerName, ".md") || strings.HasSuffix(lowerName, ".markdown") {
+	if mime == "text/markdown" || strings.HasSuffix(lowerName, ".md") || strings.HasSuffix(lowerName, ".markdown") {
 		if fragments := parseMarkdownFragments(text); len(fragments) > 0 {
-			return fragments, true, nil
+			return offsetSilverFragments(fragments, byteOffset), true, nil
 		}
 	}
-	return parseGenericFragments(text), true, nil
+	return offsetSilverFragments(parseGenericFragments(text), byteOffset), true, nil
+}
+
+func offsetSilverFragments(fragments []parsedSilverFragment, byteOffset int) []parsedSilverFragment {
+	if byteOffset == 0 {
+		return fragments
+	}
+	for index := range fragments {
+		if fragments[index].Selector["kind"] != "utf8-byte-range" {
+			continue
+		}
+		if start, ok := fragments[index].Selector["start_byte"].(int); ok {
+			fragments[index].Selector["start_byte"] = start + byteOffset
+		}
+		if end, ok := fragments[index].Selector["end_byte"].(int); ok {
+			fragments[index].Selector["end_byte"] = end + byteOffset
+		}
+	}
+	return fragments
 }
 
 func parseJSONFragments(text string) ([]parsedSilverFragment, bool) {
@@ -909,8 +1055,8 @@ func parseMarkdownFragments(text string) []parsedSilverFragment {
 		if len(paragraph) == 0 {
 			return
 		}
-		value := strings.TrimSpace(strings.Join(paragraph, "\n"))
-		fragments = append(fragments, fragmentWithTextRange("text-block", paragraphStart, end, value, map[string]any{"text": value}))
+		start, trimmedEnd, value := trimmedSilverRange(text, paragraphStart, end)
+		fragments = append(fragments, fragmentWithTextRange("text-block", start, trimmedEnd, value, map[string]any{"text": value}))
 		paragraph = nil
 		paragraphStart = -1
 	}
@@ -922,7 +1068,8 @@ func parseMarkdownFragments(text string) []parsedSilverFragment {
 			if prefix <= 6 && len(trimmed) > prefix && trimmed[prefix] == ' ' {
 				flush(offset)
 				value := strings.TrimSpace(trimmed[prefix:])
-				fragments = append(fragments, fragmentWithTextRange("markdown-heading", offset, offset+len(lineWithNewline), value, map[string]any{"level": prefix, "text": value}))
+				lineStart := offset + strings.Index(line, value)
+				fragments = append(fragments, fragmentWithTextRange("markdown-heading", lineStart, lineStart+len(value), value, map[string]any{"level": prefix, "text": value}))
 				offset += len(lineWithNewline)
 				continue
 			}
@@ -952,9 +1099,9 @@ func parseGenericFragments(text string) []parsedSilverFragment {
 		} else {
 			end = start + end
 		}
-		value := strings.TrimSpace(text[start:end])
+		trimmedStart, trimmedEnd, value := trimmedSilverRange(text, start, end)
 		if value != "" {
-			fragments = append(fragments, fragmentWithTextRange("text-block", start, end, value, map[string]any{"text": value}))
+			fragments = append(fragments, fragmentWithTextRange("text-block", trimmedStart, trimmedEnd, value, map[string]any{"text": value}))
 		}
 		if end == len(text) {
 			break
@@ -962,6 +1109,14 @@ func parseGenericFragments(text string) []parsedSilverFragment {
 		start = end + 2
 	}
 	return splitLargeFragments(fragments)
+}
+
+func trimmedSilverRange(text string, start, end int) (int, int, string) {
+	value := text[start:end]
+	trimmedLeft := strings.TrimLeftFunc(value, unicode.IsSpace)
+	trimmed := strings.TrimRightFunc(trimmedLeft, unicode.IsSpace)
+	trimmedStart := start + len(value) - len(trimmedLeft)
+	return trimmedStart, trimmedStart + len(trimmed), trimmed
 }
 
 func splitLargeFragments(input []parsedSilverFragment) []parsedSilverFragment {

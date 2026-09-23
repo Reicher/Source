@@ -13,8 +13,9 @@ remain true as that implementation grows.
 
 - **Local first.** Core storage, processing, inspection, and AI must not require
   an external service.
-- **Bronze is canonical.** Imported and created material is preserved as the
-  source. Derived knowledge never edits Bronze.
+- **Bronze is canonical.** Imported and created material is preserved immutably
+  as the source. It can be deleted, but neither users nor derived processing edit
+  it in place.
 - **Source is authoritative.** Source alone produces persistent Silver. Self
   mirrors complete published Silver for responsive and offline inspection; it
   does not create another Silver history.
@@ -89,13 +90,12 @@ second source of knowledge and is outside the first pipeline implementation.
 Silver work is accepted, queued, checkpointed, resumed, and published by Source
 independently of Self connectivity. Processing state survives ordinary service
 restarts. A completed batch checkpoint is reusable only for the same Bronze
-content and processor revision. Partial checkpoints are private working state;
+input identity and processor revision. Partial checkpoints are private working state;
 only a complete generation is atomically published as authoritative Silver.
 
-Changed Bronze or changed processor/model revisions can schedule a new
-generation. Existing completed Silver remains history rather than being
-silently rewritten. A stale generation can never replace Silver for newer
-Bronze. The detailed record and lifecycle contract is in
+New Bronze or changed processor/model revisions can schedule a new generation.
+Existing completed Silver remains history rather than being silently rewritten.
+A stale generation can never replace Silver for a different input identity. The detailed record and lifecycle contract is in
 [`docs/SILVER.md`](docs/SILVER.md).
 
 ## Navigation and presentation
