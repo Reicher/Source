@@ -124,6 +124,19 @@ data class SilverSnapshot(
         it.subjectEntityId == entityId || it.objectEntityId == entityId
     }
 
+    fun describe(claim: SilverClaim): String {
+        val predicate = claim.predicate.replace('_', ' ').replace('-', ' ')
+        val objectId = claim.objectEntityId
+        if (objectId != null) {
+            val subject = entities.firstOrNull { it.id == claim.subjectEntityId }
+            val objectEntity = entities.firstOrNull { it.id == objectId }
+            val subjectLabel = subject?.let(::label) ?: "Unknown"
+            val objectLabel = objectEntity?.let(::label) ?: "Unknown"
+            return "$subjectLabel — $predicate → $objectLabel"
+        }
+        return "$predicate · ${claim.value ?: "Unknown"}"
+    }
+
     fun supportingBronze(entityId: String): List<String> {
         val observationIds = claimsFor(entityId).flatMap { it.supportingObservationIds }.toSet()
         val evidenceIds = observations.filter { it.id in observationIds }.flatMap { it.evidenceIds }.toSet()

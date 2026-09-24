@@ -28,7 +28,7 @@ const (
 	silverExtractionID      = "source.silver.format-extraction"
 	silverExtractionVersion = "1"
 	silverResolverID        = "source.silver.candidate-resolver"
-	silverResolverVersion   = "1"
+	silverResolverVersion   = "2"
 	silverProcessorVersion  = "3-" + silverExtractionVersion + "-" + semanticProcessorVersion + "-" + silverResolverVersion
 	silverResolutionMinimum = 0.70
 	silverMaximumBatchBytes = 4096
@@ -177,9 +177,11 @@ type silverJob struct {
 }
 
 type silverEntityRecord struct {
-	Entity     silverEntity `json:"entity"`
-	Label      string       `json:"label"`
-	Normalized string       `json:"normalized"`
+	Entity        silverEntity `json:"entity"`
+	Label         string       `json:"label"`
+	Normalized    string       `json:"normalized"`
+	Type          string       `json:"type,omitempty"`
+	TypeAmbiguous bool         `json:"type_ambiguous,omitempty"`
 }
 
 type silverDiskState struct {
@@ -233,6 +235,7 @@ func newSilverServiceWithModel(dir string, bronze *bronzeStore, model semanticMo
 	if s.state.Entities == nil {
 		s.state.Entities = map[string]silverEntityRecord{}
 	}
+	s.backfillEntityTypesLocked()
 	s.persisted, err = json.Marshal(s.state)
 	if err != nil {
 		return nil, err
@@ -680,7 +683,7 @@ func (s *silverService) resolveCheckpointCandidatesLocked(dataset *silverDataset
 		if candidate.Confidence < silverResolutionMinimum {
 			continue
 		}
-		entity, ok := s.resolveEntityLocked(candidate.Label, candidate.Normalized)
+		entity, ok := s.resolveEntityLocked(candidate.Label, candidate.Normalized, candidate.Type)
 		if !ok {
 			continue
 		}
@@ -729,10 +732,21 @@ func appendSilverClaim(dataset *silverDataset, subject, predicate string, value 
 	dataset.Claims = append(dataset.Claims, claim)
 }
 
-func (s *silverService) resolveEntityLocked(label, normalized string) (silverEntity, bool) {
+func (s *silverService) resolveEntityLocked(label, normalized, entityType string) (silverEntity, bool) {
+	entityType = strings.ToLower(strings.TrimSpace(entityType))
 	var match *silverEntity
+	sameLabel := 0
 	for _, record := range s.state.Entities {
 		if record.Normalized != normalized {
+			continue
+		}
+		sameLabel++
+		if entityType == "" {
+			if sameLabel > 1 || record.Type != "" || record.TypeAmbiguous {
+				match = nil
+				continue
+			}
+		} else if record.Type != entityType {
 			continue
 		}
 		if match != nil && match.ID != record.Entity.ID {
@@ -741,16 +755,65 @@ func (s *silverService) resolveEntityLocked(label, normalized string) (silverEnt
 		value := record.Entity
 		match = &value
 	}
-	if match != nil {
+	if match != nil && (entityType != "" || sameLabel == 1) {
 		return *match, true
+	}
+	if entityType == "" && sameLabel > 0 {
+		return silverEntity{}, false
 	}
 	id, err := randomUUID()
 	if err != nil {
 		return silverEntity{}, false
 	}
 	entity := silverEntity{ID: id}
-	s.state.Entities[id] = silverEntityRecord{Entity: entity, Label: label, Normalized: normalized}
+	s.state.Entities[id] = silverEntityRecord{Entity: entity, Label: label, Normalized: normalized, Type: entityType}
 	return entity, true
+}
+
+func (s *silverService) backfillEntityTypesLocked() {
+	types := map[string]map[string]bool{}
+	collect := func(dataset silverDataset) {
+		for _, claim := range dataset.Claims {
+			if claim.State != "active" || claim.Predicate != "type" || claim.ObjectEntityID != "" {
+				continue
+			}
+			var entityType string
+			if err := json.Unmarshal(claim.Value, &entityType); err != nil {
+				continue
+			}
+			entityType = strings.ToLower(strings.TrimSpace(entityType))
+			if entityType == "" {
+				continue
+			}
+			if types[claim.SubjectEntityID] == nil {
+				types[claim.SubjectEntityID] = map[string]bool{}
+			}
+			types[claim.SubjectEntityID][entityType] = true
+		}
+	}
+	for _, dataset := range s.state.Published {
+		collect(dataset)
+	}
+	for _, history := range s.state.History {
+		for _, dataset := range history {
+			collect(dataset)
+		}
+	}
+	for id, record := range s.state.Entities {
+		switch len(types[id]) {
+		case 0:
+			continue
+		case 1:
+			for entityType := range types[id] {
+				record.Type = entityType
+			}
+			record.TypeAmbiguous = false
+		default:
+			record.Type = ""
+			record.TypeAmbiguous = true
+		}
+		s.state.Entities[id] = record
+	}
 }
 
 func (s *silverService) cancelJob(jobID string) error {

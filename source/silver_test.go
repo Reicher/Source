@@ -366,6 +366,52 @@ func TestSilverEntityAggregatesSourcesAndDeletionRemovesDerivedData(t *testing.T
 	}
 }
 
+func TestSilverEntityResolutionRequiresMatchingLabelAndType(t *testing.T) {
+	service := &silverService{state: silverDiskState{Entities: map[string]silverEntityRecord{}}}
+
+	person, ok := service.resolveEntityLocked("Atlas", "atlas", "person")
+	if !ok {
+		t.Fatal("person candidate was not resolved")
+	}
+	samePerson, ok := service.resolveEntityLocked("  Atlas  ", "atlas", "person")
+	if !ok || samePerson.ID != person.ID {
+		t.Fatalf("matching label and type did not reuse Entity: first=%+v second=%+v", person, samePerson)
+	}
+	organization, ok := service.resolveEntityLocked("Atlas", "atlas", "organization")
+	if !ok || organization.ID == person.ID {
+		t.Fatalf("incompatible types were merged: person=%+v organization=%+v", person, organization)
+	}
+	untyped, ok := service.resolveEntityLocked("Atlas", "atlas", "")
+	if ok || untyped.ID != "" || len(service.state.Entities) != 2 {
+		t.Fatalf("typeless same-label candidate was forced into resolved knowledge: person=%+v organization=%+v untyped=%+v", person, organization, untyped)
+	}
+	newUntyped, ok := service.resolveEntityLocked("Comet", "comet", "")
+	if !ok {
+		t.Fatal("new typeless candidate was not resolved")
+	}
+	sameUntyped, ok := service.resolveEntityLocked("Comet", "comet", "")
+	if !ok || sameUntyped.ID != newUntyped.ID {
+		t.Fatalf("sole typeless match was not reused: first=%+v second=%+v", newUntyped, sameUntyped)
+	}
+}
+
+func TestSilverEntityResolutionLeavesAmbiguousMatchUnresolved(t *testing.T) {
+	service := &silverService{state: silverDiskState{Entities: map[string]silverEntityRecord{
+		"first":  {Entity: silverEntity{ID: "first"}, Label: "Alex", Normalized: "alex", Type: "person"},
+		"second": {Entity: silverEntity{ID: "second"}, Label: "Alex", Normalized: "alex", Type: "person"},
+	}}}
+	dataset := silverDataset{}
+	checkpoint := silverCheckpoint{Entities: []silverEntityCandidate{{
+		ObservationID: "observation", Ref: "alex", Label: "Alex", Normalized: "alex", Type: "person", Confidence: 0.99,
+	}}}
+
+	service.resolveCheckpointCandidatesLocked(&dataset, checkpoint, map[string]bool{}, "model", "1")
+
+	if len(dataset.Entities) != 0 || len(dataset.Claims) != 0 || len(service.state.Entities) != 2 {
+		t.Fatalf("ambiguous candidate was forced into resolved knowledge: dataset=%+v registry=%+v", dataset, service.state.Entities)
+	}
+}
+
 func TestSilverSnapshotRequiresPairedSelf(t *testing.T) {
 	identity, err := loadIdentity(t.TempDir())
 	if err != nil {

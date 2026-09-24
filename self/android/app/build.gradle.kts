@@ -32,4 +32,5 @@ dependencies {
     implementation("androidx.core:core:1.6.0")
     implementation("androidx.fragment:fragment:1.3.6")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20250517")
 }
