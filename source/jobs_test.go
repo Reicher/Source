@@ -60,7 +60,7 @@ func TestSyncJobPlanValidation(t *testing.T) {
 	}
 }
 
-func TestVisibleJobSnapshotKeepsStatusBounded(t *testing.T) {
+func TestJobSnapshotsKeepExistingClientsCompatibleAndStatusBounded(t *testing.T) {
 	store, err := newSyncJobStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -75,8 +75,13 @@ func TestVisibleJobSnapshotKeepsStatusBounded(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	jobs := (&sourceJobs{sync: store, silver: &silverService{}}).snapshot()
-	if jobs.CompletedCount != 7 || len(jobs.Completed) != 5 {
-		t.Fatalf("completed job status was not bounded: %+v", jobs)
+	jobs := &sourceJobs{sync: store, silver: &silverService{}}
+	snapshot := jobs.snapshot()
+	if snapshot.CompletedCount != 7 || len(snapshot.Completed) != 7 {
+		t.Fatalf("existing job response lost completed jobs: %+v", snapshot)
+	}
+	_, status, _ := jobs.refreshStatus()
+	if status.CompletedCount != 7 || len(status.Completed) != 5 {
+		t.Fatalf("lightweight job status was not bounded: %+v", status)
 	}
 }

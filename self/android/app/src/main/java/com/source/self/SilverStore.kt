@@ -107,6 +107,48 @@ data class SourceJobs(
     }
 }
 
+private fun SourceJob.persistenceJson(): JSONObject = JSONObject()
+    .put("id", id)
+    .put("kind", kind)
+    .put("title", title)
+    .put("state", state)
+    .put("queued_at", queuedAt)
+    .also { value -> direction?.let { value.put("direction", it) } }
+    .also { value -> completedAt?.let { value.put("completed_at", it) } }
+
+private fun SourceJobs.persistenceJson(): JSONObject = JSONObject()
+    .put("revision", revision)
+    .put("queued_count", queuedCount)
+    .put("completed_count", completedCount)
+    .put("queued", JSONArray().also { values -> queued.forEach { values.put(it.persistenceJson()) } })
+    .put("completed", JSONArray().also { values -> completed.forEach { values.put(it.persistenceJson()) } })
+
+private fun SilverProcessing.persistenceJson(): JSONObject = JSONObject()
+    .put("bronze_source_id", bronzeSourceId)
+    .put("state", state)
+    .put("completed_batches", completedBatches)
+    .put("total_batches", totalBatches)
+
+internal fun SourceStatus.persistenceJson(): JSONObject {
+    val persistedJobs = requireNotNull(jobs)
+    val persistedProcessing = requireNotNull(processing)
+    return JSONObject()
+        .put("silver_revision", requireNotNull(silverRevision))
+        .put("jobs_revision", requireNotNull(jobsRevision))
+        .put("jobs", persistedJobs.persistenceJson())
+        .put("processing", JSONArray().also { values ->
+            persistedProcessing.forEach { values.put(it.persistenceJson()) }
+        })
+}
+
+internal fun sourceStatusFromPersistenceJson(value: JSONObject): SourceStatus = SourceStatus(
+    personId = "",
+    silverRevision = value.getLong("silver_revision"),
+    jobsRevision = value.getLong("jobs_revision"),
+    jobs = SourceJobs.fromJson(value.getJSONObject("jobs")),
+    processing = SilverProcessing.list(value.getJSONArray("processing")),
+)
+
 data class SilverKnowledge(
     val source: SilverSource?,
     val evidence: List<SilverEvidence>,
@@ -234,6 +276,7 @@ data class SilverSnapshot(
 class SilverStore(context: Context) {
     private val root = File(context.filesDir, "silver")
     private val file = AtomicFile(File(root, "snapshot.json"))
+    private val statusFile = AtomicFile(File(root, "status.json"))
     private var value: SilverSnapshot
 
     init {
@@ -248,6 +291,7 @@ class SilverStore(context: Context) {
     @Synchronized fun updateStatus(status: SourceStatus): Boolean {
         val next = value.withStatus(status)
         if (next == value) return false
+        write(statusFile, status.persistenceJson().toString().toByteArray(Charsets.UTF_8))
         value = next
         return true
     }
@@ -257,24 +301,35 @@ class SilverStore(context: Context) {
         if (next.revision < value.revision) return false
         if (next.revision == value.revision && next.jobs.revision < value.jobs.revision) return false
         if (next == value) return false
-        val bytes = json.toString().toByteArray(Charsets.UTF_8)
-        val output = file.startWrite()
-        try {
-            output.write(bytes)
-            file.finishWrite(output)
-            val changed = next != value
-            value = next
-            return changed
-        } catch (error: Exception) {
-            file.failWrite(output)
-            throw error
-        }
+        write(file, json.toString().toByteArray(Charsets.UTF_8))
+        val changed = next != value
+        value = next
+        return changed
     }
 
-    private fun load(): SilverSnapshot = try {
-        SilverSnapshot.fromJson(JSONObject(file.openRead().bufferedReader().use { it.readText() }))
-    } catch (_: FileNotFoundException) {
-        SilverSnapshot.EMPTY
+    private fun load(): SilverSnapshot {
+        val snapshot = try {
+            SilverSnapshot.fromJson(JSONObject(file.openRead().bufferedReader().use { it.readText() }))
+        } catch (_: FileNotFoundException) {
+            SilverSnapshot.EMPTY
+        }
+        val status = try {
+            sourceStatusFromPersistenceJson(JSONObject(statusFile.openRead().bufferedReader().use { it.readText() }))
+        } catch (_: FileNotFoundException) {
+            return snapshot
+        }
+        return snapshot.withStatus(status)
+    }
+
+    private fun write(target: AtomicFile, bytes: ByteArray) {
+        val output = target.startWrite()
+        try {
+            output.write(bytes)
+            target.finishWrite(output)
+        } catch (error: Exception) {
+            target.failWrite(output)
+            throw error
+        }
     }
 }
 

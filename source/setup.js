@@ -59,7 +59,7 @@ if (jobsRoot) {
       queuedCount.textContent = `(${jobs.queued_count})`;
       completedCount.textContent = `(${jobs.completed_count})`;
       renderList(queued, jobs.queued, false, jobs.queued_count);
-      renderList(completed, jobs.completed, true, jobs.completed_count);
+      renderList(completed, jobs.completed.slice(0, 5), true, jobs.completed_count);
     } catch (_) {
       queued.replaceChildren();
       const unavailable = document.createElement('div');

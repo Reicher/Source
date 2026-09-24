@@ -157,9 +157,10 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             if (silver.jobs.completed.isEmpty()) {
                 addView(label("No completed jobs", 14f).apply { setTextColor(secondaryColor) })
             } else {
-                silver.jobs.completed.forEach { addView(jobRow(it, true)) }
-                if (silver.jobs.completedCount > silver.jobs.completed.size) addView(label(
-                    "+ ${silver.jobs.completedCount - silver.jobs.completed.size} earlier", 13f
+                val visibleCompleted = silver.jobs.completed.take(5)
+                visibleCompleted.forEach { addView(jobRow(it, true)) }
+                if (silver.jobs.completedCount > visibleCompleted.size) addView(label(
+                    "+ ${silver.jobs.completedCount - visibleCompleted.size} earlier", 13f
                 ).apply { setTextColor(secondaryColor) })
             }
             if (silver.entities.isNotEmpty()) {

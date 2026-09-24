@@ -213,7 +213,7 @@ type sourceJobs struct {
 
 func (j *sourceJobs) refreshStatus() (int64, sourceJobSnapshot, []silverProcessing) {
 	silverRevision, silverJobs, processing := j.silver.refreshStatus()
-	return silverRevision, mergeJobSnapshots(j.sync.snapshot(), silverJobs), processing
+	return silverRevision, boundedJobSnapshot(mergeJobSnapshots(j.sync.snapshot(), silverJobs)), processing
 }
 
 func (j *sourceJobs) snapshot() sourceJobSnapshot {
@@ -238,8 +238,12 @@ func mergeJobSnapshots(snapshot, silver sourceJobSnapshot) sourceJobSnapshot {
 	})
 	snapshot.QueuedCount = len(snapshot.Queued)
 	snapshot.CompletedCount = len(snapshot.Completed)
+	return snapshot
+}
+
+func boundedJobSnapshot(snapshot sourceJobSnapshot) sourceJobSnapshot {
 	if len(snapshot.Completed) > 5 {
-		snapshot.Completed = snapshot.Completed[:5]
+		snapshot.Completed = append([]sourceJob(nil), snapshot.Completed[:5]...)
 	}
 	return snapshot
 }

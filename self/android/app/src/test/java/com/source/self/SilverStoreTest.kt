@@ -21,6 +21,19 @@ class SilverStoreTest {
         assertTrue(snapshot.needsSilverSnapshot(SourceStatus("person")))
     }
 
+    @Test fun lightweightStatusRoundTripsForRestartPersistence() {
+        val queued = SourceJob("queued", "sync", "note.txt", "to_source", "queued", 1, null)
+        val completed = SourceJob("done", "silver_extraction", "photo.jpg", null, "completed", 2, 3)
+        val status = SourceStatus(
+            "person", 7, 12, SourceJobs(12, listOf(queued), listOf(completed), 1, 9),
+            listOf(SilverProcessing("bronze", "processing", 2, 4)),
+        )
+
+        val restored = sourceStatusFromPersistenceJson(status.persistenceJson())
+
+        assertEquals(status.copy(personId = ""), restored)
+    }
+
     @Test fun sourceKnowledgeAndEntityProvenanceRemainNavigable() {
         val entity = SilverEntity("entity-1")
         val evidence = listOf(
