@@ -288,10 +288,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         if (claims.isNotEmpty()) {
             body.addView(label("Knowledge", 18f, true))
             claims.forEach { claim ->
-                val display = claim.value?.toString() ?: claim.objectEntityId?.let { objectId ->
-                    silver.entities.firstOrNull { it.id == objectId }?.let(silver::label)
-                } ?: "Unknown"
-                body.addView(label("${claim.predicate.replace('-', ' ')} · $display", 15f))
+                body.addView(label(silver.describe(claim), 15f))
             }
         }
         val sources = silver.supportingBronze(entity.id)

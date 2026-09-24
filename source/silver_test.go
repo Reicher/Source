@@ -366,6 +366,76 @@ func TestSilverEntityAggregatesSourcesAndDeletionRemovesDerivedData(t *testing.T
 	}
 }
 
+func TestSilverEntityResolutionRequiresMatchingLabelAndType(t *testing.T) {
+	service := &silverService{state: silverDiskState{Entities: map[string]silverEntityRecord{}}}
+
+	person, ok := service.resolveEntityLocked("Atlas", "atlas", "person")
+	if !ok {
+		t.Fatal("person candidate was not resolved")
+	}
+	samePerson, ok := service.resolveEntityLocked("  Atlas  ", "atlas", "person")
+	if !ok || samePerson.ID != person.ID {
+		t.Fatalf("matching label and type did not reuse Entity: first=%+v second=%+v", person, samePerson)
+	}
+	organization, ok := service.resolveEntityLocked("Atlas", "atlas", "organization")
+	if !ok || organization.ID == person.ID {
+		t.Fatalf("incompatible types were merged: person=%+v organization=%+v", person, organization)
+	}
+	untyped, ok := service.resolveEntityLocked("Atlas", "atlas", "")
+	if !ok || untyped.ID == person.ID || untyped.ID == organization.ID {
+		t.Fatalf("typeless candidate was merged with a typed Entity: person=%+v organization=%+v untyped=%+v", person, organization, untyped)
+	}
+	sameUntyped, ok := service.resolveEntityLocked("Atlas", "atlas", "")
+	if !ok || sameUntyped.ID != untyped.ID {
+		t.Fatalf("sole compatible typeless match was not reused: first=%+v second=%+v", untyped, sameUntyped)
+	}
+}
+
+func TestSilverEntityResolutionLeavesAmbiguousMatchUnresolved(t *testing.T) {
+	service := &silverService{state: silverDiskState{Entities: map[string]silverEntityRecord{
+		"first":  {Entity: silverEntity{ID: "first"}, Label: "Alex", Normalized: "alex", Type: "person"},
+		"second": {Entity: silverEntity{ID: "second"}, Label: "Alex", Normalized: "alex", Type: "person"},
+	}}}
+	dataset := silverDataset{}
+	checkpoint := silverCheckpoint{Entities: []silverEntityCandidate{{
+		ObservationID: "observation", Ref: "alex", Label: "Alex", Normalized: "alex", Type: "person", Confidence: 0.99,
+	}}}
+
+	service.resolveCheckpointCandidatesLocked(&dataset, checkpoint, map[string]bool{}, "model", "1")
+
+	if len(dataset.Entities) != 0 || len(dataset.Claims) != 0 || len(service.state.Entities) != 2 {
+		t.Fatalf("ambiguous candidate was forced into resolved knowledge: dataset=%+v registry=%+v", dataset, service.state.Entities)
+	}
+}
+
+func TestSilverEntityTypeBackfillIgnoresGenericTypeAttributes(t *testing.T) {
+	resolver := silverProducer{ProcessorID: silverResolverID, ProcessorVersion: "1"}
+	service := &silverService{state: silverDiskState{
+		Entities: map[string]silverEntityRecord{
+			"alex": {Entity: silverEntity{ID: "alex"}, Label: "Alex", Normalized: "alex"},
+		},
+		Published: map[string]silverDataset{
+			"source": {
+				Observations: []silverObservation{
+					{ID: "entity-observation", Kind: "entity-candidate"},
+					{ID: "attribute-observation", Kind: "attribute-candidate"},
+				},
+				Claims: []silverClaim{
+					{SubjectEntityID: "alex", Predicate: "type", Value: json.RawMessage(`"person"`), SupportingObservationIDs: []string{"entity-observation"}, Producer: resolver, State: "active"},
+					{SubjectEntityID: "alex", Predicate: "type", Value: json.RawMessage(`"engineer"`), SupportingObservationIDs: []string{"attribute-observation", "entity-observation"}, Producer: resolver, State: "active"},
+				},
+			},
+		},
+	}}
+
+	service.backfillEntityTypesLocked()
+
+	record := service.state.Entities["alex"]
+	if record.Type != "person" || record.TypeAmbiguous {
+		t.Fatalf("generic type attribute polluted entity type backfill: %+v", record)
+	}
+}
+
 func TestSilverSnapshotRequiresPairedSelf(t *testing.T) {
 	identity, err := loadIdentity(t.TempDir())
 	if err != nil {

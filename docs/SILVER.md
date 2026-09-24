@@ -140,11 +140,14 @@ Types and predicates are not global enums. The local model proposes generic
 entities, attributes, and relationships with confidence rather than relying on
 capitalization or content-domain rules. The resolver is deliberately
 conservative: candidates below the resolution threshold remain Observations;
-an accepted exact normalized label reuses one unambiguous Entity, otherwise a
-new Entity is created. Accepted entity candidates produce `name` and optional
-`type` Claims. Accepted attribute and relationship candidates become value or
-object Claims only when their referenced entities were resolved. No contacts,
-family, travel, or other content-domain processor participates in this flow.
+an accepted exact normalized label and type reuse one unambiguous compatible
+Entity, otherwise a new Entity is created. Missing types match only other
+missing types. If more than one compatible Entity exists, the candidate remains
+an unresolved Observation. Accepted entity candidates produce `name` and
+optional `type` Claims. Accepted attribute and relationship candidates become
+value or object Claims only when their referenced entities were resolved. No
+contacts, family, travel, or other content-domain processor participates in
+this flow.
 
 The same exact label in multiple Bronze sources can resolve to the same Entity.
 Each source retains its own Claim and provenance, allowing the Entity view to

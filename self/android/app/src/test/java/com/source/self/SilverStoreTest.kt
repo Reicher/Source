@@ -28,4 +28,26 @@ class SilverStoreTest {
         assertEquals("Ada Lovelace", snapshot.label(entity))
         assertEquals(listOf("bronze-1", "bronze-2"), snapshot.supportingBronze(entity.id))
     }
+
+    @Test fun relationshipDescriptionsPreserveDirectionFromEitherEntity() {
+        val martin = SilverEntity("martin")
+        val josefin = SilverEntity("josefin")
+        val relationship = SilverClaim(
+            "relationship", martin.id, "sibling_of", null, josefin.id,
+            emptyList(), "active",
+        )
+        val snapshot = SilverSnapshot(
+            1, emptyList(), emptyList(), emptyList(), listOf(martin, josefin),
+            listOf(
+                SilverClaim("martin-name", martin.id, "name", "Martin", null, emptyList(), "active"),
+                SilverClaim("josefin-name", josefin.id, "name", "Josefin", null, emptyList(), "active"),
+                relationship,
+            ),
+            emptyList(),
+        )
+
+        assertEquals(listOf(relationship), snapshot.claimsFor(martin.id).filter { it.objectEntityId != null })
+        assertEquals(listOf(relationship), snapshot.claimsFor(josefin.id).filter { it.objectEntityId != null })
+        assertEquals("Martin — sibling of → Josefin", snapshot.describe(relationship))
+    }
 }
