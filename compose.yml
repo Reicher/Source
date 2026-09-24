@@ -42,7 +42,7 @@ services:
       - source-model
     # Source advertises its LAN address with mDNS, which needs the host network.
     network_mode: host
-    command: ["-listen", ":8443", "-setup", "127.0.0.1:8081", "-data", "/data/pairing"]
+    command: ["-listen", "${SOURCE_LAN_ADDRESS:?}:8443", "-setup", "127.0.0.1:8081", "-data", "/data/pairing"]
     environment:
       SOURCE_MODEL_URL: http://127.0.0.1:8082
       SOURCE_MODEL_ID: source-semantic

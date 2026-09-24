@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -56,5 +57,26 @@ func TestSyncJobPlanValidation(t *testing.T) {
 	}
 	if _, err := store.plan([]syncJobPlanItem{{Key: "job", Title: "item", Direction: "sideways"}}); err == nil {
 		t.Fatal("invalid direction accepted")
+	}
+}
+
+func TestVisibleJobSnapshotKeepsStatusBounded(t *testing.T) {
+	store, err := newSyncJobStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 7; index++ {
+		key := fmt.Sprintf("item-%d:1:to_source", index)
+		planned, err := store.plan([]syncJobPlanItem{{Key: key, Title: key, Direction: "to_source"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.complete(planned[0].JobID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	jobs := (&sourceJobs{sync: store, silver: &silverService{}}).snapshot()
+	if jobs.CompletedCount != 7 || len(jobs.Completed) != 5 {
+		t.Fatalf("completed job status was not bounded: %+v", jobs)
 	}
 }

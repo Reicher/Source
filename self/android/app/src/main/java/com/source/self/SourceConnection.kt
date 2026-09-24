@@ -27,13 +27,14 @@ class SourceConnection(
     private val io = Executors.newSingleThreadExecutor()
     private val connecting = AtomicBoolean(false)
     private val syncVersion = AtomicInteger(0)
-    private val transport = PairingTransport(state)
+    private val synchronizer = SourceSynchronizer(state, bronze, silver)
     private var discovery: NsdManager.DiscoveryListener? = null
     private var address: String? = null
     private var resolvedName: String? = null
     private var port = 0
     @Volatile private var generation = 0
     @Volatile private var active = false
+    private var foregroundRegistered = false
     private var needsRescan = false
 
     private val tick = object : Runnable {
@@ -49,8 +50,12 @@ class SourceConnection(
     fun start() {
         generation++
         syncVersion.incrementAndGet()
-        transport.cancel()
+        synchronizer.cancel()
         active = true
+        if (!foregroundRegistered) {
+            ForegroundSyncState.enter()
+            foregroundRegistered = true
+        }
         needsRescan = false
         address = null
         resolvedName = null
@@ -63,8 +68,12 @@ class SourceConnection(
     fun stop() {
         generation++
         syncVersion.incrementAndGet()
-        transport.cancel()
+        synchronizer.cancel()
         active = false
+        if (foregroundRegistered) {
+            ForegroundSyncState.leave()
+            foregroundRegistered = false
+        }
         handler.removeCallbacks(tick)
         stopDiscovery()
         io.shutdownNow()
@@ -99,7 +108,7 @@ class SourceConnection(
                 handler.post {
                     if (!active || generation != current || serviceInfo.serviceName != resolvedName) return@post
                     syncVersion.incrementAndGet()
-                    transport.cancel()
+                    synchronizer.cancel()
                     address = null
                     resolvedName = null
                     onStatus(false, null, false)
@@ -145,34 +154,28 @@ class SourceConnection(
         val session = syncVersion.get()
         if (!connecting.compareAndSet(false, true)) return
         io.execute {
-            var bronzeChanged = false
-            var silverChanged = false
+            var changes = SourceSyncChanges()
             try {
-                val personId = transport.connect(source, host, targetPort)
-                if (!isCurrent(current, source) || session != syncVersion.get()) return@execute
-                if (!state.isPaired()) state.savePaired(source, personId)
-                BronzeSync(bronze, transport).run(source, host, targetPort,
+                changes = synchronizer.run(
+                    source,
+                    host,
+                    targetPort,
                     { isCurrent(current, source) && session == syncVersion.get() },
-                    { bronzeChanged = true },
-                    {
-                        val changed = silver.install(transport.silver(source, host, targetPort))
-                        silverChanged = silverChanged || changed
-                        if (changed) handler.post {
-                            if (isCurrent(current, source) && session == syncVersion.get()) onDataChanged()
-                        }
-                    })
+                    { handler.post {
+                        if (isCurrent(current, source) && session == syncVersion.get()) onDataChanged()
+                    } },
+                )
                 if (!isCurrent(current, source) || session != syncVersion.get()) return@execute
-                silverChanged = silver.install(transport.silver(source, host, targetPort)) || silverChanged
                 handler.post {
                     if (!isCurrent(current, source) || session != syncVersion.get()) return@post
-                    if (bronzeChanged || silverChanged) onDataChanged()
+                    if (changes.bronze || changes.silver) onDataChanged()
                     onStatus(true, null, false)
                 }
             } catch (e: Exception) {
                 Log.w("SelfPairing", "Connection failed: ${e.javaClass.simpleName}: ${e.message}")
                 handler.post {
                     if (!isCurrent(current, source) || session != syncVersion.get()) return@post
-                    if (bronzeChanged || silverChanged) onDataChanged()
+                    if (changes.bronze || changes.silver) onDataChanged()
                     needsRescan = !state.isPaired() && e is PairingHttpException && (e.status == 403 || e.status == 409)
                     val message = when {
                         needsRescan -> null

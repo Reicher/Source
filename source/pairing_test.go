@@ -231,12 +231,49 @@ func TestTrustedSyncJobsAppearInSilverAndLocalOverview(t *testing.T) {
 		t.Fatalf("Silver omitted or exposed internal sync job data: %+v", silver.Jobs)
 	}
 
+	request = httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+	request.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{client}}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	var status struct {
+		SilverRevision int64              `json:"silver_revision"`
+		JobsRevision   int64              `json:"jobs_revision"`
+		Jobs           sourceJobSnapshot  `json:"jobs"`
+		Processing     []silverProcessing `json:"processing"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.SilverRevision != silver.Revision || status.JobsRevision != silver.Jobs.Revision {
+		t.Fatalf("status revisions %+v do not match snapshot revisions silver=%d jobs=%d", status, silver.Revision, silver.Jobs.Revision)
+	}
+	if len(status.Jobs.Queued) != 1 || status.Jobs.Queued[0].Title != "note.txt" || status.JobsRevision != status.Jobs.Revision {
+		t.Fatalf("status omitted current lightweight jobs: %+v", status.Jobs)
+	}
+	if strings.Contains(response.Body.String(), "sources") || strings.Contains(response.Body.String(), "evidence") ||
+		strings.Contains(response.Body.String(), "observations") || strings.Contains(response.Body.String(), "claims") {
+		t.Fatalf("lightweight status exposed Silver data payload: %s", response.Body.String())
+	}
+
 	request = httptest.NewRequest(http.MethodPost, "/v1/jobs/sync/"+planned.Jobs[0].JobID+"/complete", nil)
 	request.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{client}}
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("complete job: %d", response.Code)
+	}
+	request = httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+	request.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{client}}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	var completedStatus struct {
+		JobsRevision int64 `json:"jobs_revision"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &completedStatus); err != nil {
+		t.Fatal(err)
+	}
+	if completedStatus.JobsRevision <= status.JobsRevision {
+		t.Fatalf("completed job did not advance status revision: before=%d after=%d", status.JobsRevision, completedStatus.JobsRevision)
 	}
 
 	request = httptest.NewRequest(http.MethodGet, "/jobs", nil)

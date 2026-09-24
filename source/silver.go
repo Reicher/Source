@@ -187,6 +187,8 @@ type silverEntityRecord struct {
 type silverDiskState struct {
 	SchemaVersion int                           `json:"schema_version"`
 	Revision      int64                         `json:"revision"`
+	DataRevision  int64                         `json:"data_revision"`
+	RevisionModel int                           `json:"revision_model"`
 	NextJob       int64                         `json:"next_job"`
 	Jobs          []silverJob                   `json:"jobs"`
 	Published     map[string]silverDataset      `json:"published"`
@@ -217,7 +219,7 @@ func newSilverServiceWithModel(dir string, bronze *bronzeStore, model semanticMo
 	s := &silverService{path: filepath.Join(dir, "state.json"), bronze: bronze, wake: make(chan struct{}, 1), semantic: model}
 	value, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
-		s.state = silverDiskState{SchemaVersion: silverSchemaVersion, Published: map[string]silverDataset{}, History: map[string][]silverDataset{}, Entities: map[string]silverEntityRecord{}}
+		s.state = silverDiskState{SchemaVersion: silverSchemaVersion, RevisionModel: 1, Published: map[string]silverDataset{}, History: map[string][]silverDataset{}, Entities: map[string]silverEntityRecord{}}
 	} else if err != nil {
 		return nil, err
 	} else if err := json.Unmarshal(value, &s.state); err != nil {
@@ -235,10 +237,23 @@ func newSilverServiceWithModel(dir string, bronze *bronzeStore, model semanticMo
 	if s.state.Entities == nil {
 		s.state.Entities = map[string]silverEntityRecord{}
 	}
+	migratedRevision := false
+	if s.state.RevisionModel == 0 {
+		s.state.DataRevision = s.state.Revision
+		s.state.RevisionModel = 1
+		migratedRevision = true
+	} else if s.state.RevisionModel != 1 {
+		return nil, fmt.Errorf("unsupported Silver revision model %d", s.state.RevisionModel)
+	}
 	s.backfillEntityTypesLocked()
 	s.persisted, err = json.Marshal(s.state)
 	if err != nil {
 		return nil, err
+	}
+	if migratedRevision {
+		if err := savePrivate(s.path, s.persisted); err != nil {
+			return nil, err
+		}
 	}
 	recovered := false
 	for index := range s.state.Jobs {
@@ -412,6 +427,7 @@ func (s *silverService) enqueue(item bronzeItem) (bool, error) {
 		}
 	}
 	if item.Deleted {
+		dataChanged := false
 		kept := s.state.Jobs[:0]
 		for _, job := range s.state.Jobs {
 			if job.BronzeSourceID != item.ID {
@@ -424,6 +440,7 @@ func (s *silverService) enqueue(item bronzeItem) (bool, error) {
 		if _, ok := s.state.Published[item.ID]; ok {
 			delete(s.state.Published, item.ID)
 			changed = true
+			dataChanged = true
 		}
 		if _, ok := s.state.History[item.ID]; ok {
 			delete(s.state.History, item.ID)
@@ -432,6 +449,9 @@ func (s *silverService) enqueue(item bronzeItem) (bool, error) {
 		s.pruneEntitiesLocked()
 		if changed {
 			s.state.Revision++
+			if dataChanged {
+				s.state.DataRevision++
+			}
 			if err := s.saveLocked(); err != nil {
 				return false, err
 			}
@@ -476,6 +496,9 @@ func (s *silverService) enqueue(item bronzeItem) (bool, error) {
 		State: "queued", AcceptedAt: now, UpdatedAt: now,
 	})
 	s.state.Revision++
+	if _, published := s.state.Published[item.ID]; published {
+		s.state.DataRevision++
+	}
 	if err := s.saveLocked(); err != nil {
 		return false, err
 	}
@@ -668,6 +691,7 @@ func (s *silverService) publish(jobID string, current bronzeItem) error {
 	job.RetryAt = 0
 	job.UpdatedAt = time.Now().UnixMilli()
 	s.state.Revision++
+	s.state.DataRevision++
 	return s.saveLocked()
 }
 
@@ -911,7 +935,7 @@ func (s *silverService) restoreLocked() {
 func (s *silverService) snapshot() silverSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	snapshot := silverSnapshot{SchemaVersion: silverSchemaVersion, Revision: s.state.Revision}
+	snapshot := silverSnapshot{SchemaVersion: silverSchemaVersion, Revision: s.state.DataRevision}
 	entityMap := map[string]silverEntity{}
 	claimMap := map[string]silverClaim{}
 	evidenceMap := map[string]silverEvidence{}
@@ -958,9 +982,36 @@ func (s *silverService) snapshot() silverSnapshot {
 	return snapshot
 }
 
+func (s *silverService) refreshStatus() (int64, sourceJobSnapshot, []silverProcessing) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state.DataRevision, s.jobSnapshotLocked(), s.processingSnapshotLocked()
+}
+
+func (s *silverService) processingSnapshotLocked() []silverProcessing {
+	processing := []silverProcessing{}
+	for _, job := range s.state.Jobs {
+		if job.State == "completed" || job.State == "cancelled" {
+			continue
+		}
+		processing = append(processing, silverProcessing{
+			BronzeSourceID: job.BronzeSourceID, State: job.State,
+			CompletedBatches: len(job.Checkpoints), TotalBatches: job.TotalBatches, Error: job.Error,
+		})
+	}
+	sort.Slice(processing, func(i, j int) bool {
+		return processing[i].BronzeSourceID < processing[j].BronzeSourceID
+	})
+	return processing
+}
+
 func (s *silverService) jobSnapshot() sourceJobSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.jobSnapshotLocked()
+}
+
+func (s *silverService) jobSnapshotLocked() sourceJobSnapshot {
 	snapshot := sourceJobSnapshot{Revision: s.state.Revision}
 	for _, job := range s.state.Jobs {
 		visible := sourceJob{

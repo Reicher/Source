@@ -21,6 +21,14 @@ private fun pin(cert: X509Certificate): String = MessageDigest.getInstance("SHA-
 
 class PairingHttpException(val status: Int, val path: String) : Exception("Source returned $status for $path")
 
+data class SourceStatus(
+    val personId: String,
+    val silverRevision: Long? = null,
+    val jobsRevision: Long? = null,
+    val jobs: SourceJobs? = null,
+    val processing: List<SilverProcessing>? = null,
+)
+
 class PairingTransport(private val state: PairingState) {
     @Volatile private var current: HttpsURLConnection? = null
     fun cancel() { current?.disconnect() }
@@ -28,7 +36,7 @@ class PairingTransport(private val state: PairingState) {
         connection.disconnect()
         if (current === connection) current = null
     }
-    fun connect(source: SourceRef, address: String, port: Int): String {
+    fun connect(source: SourceRef, address: String, port: Int): SourceStatus {
         val urlHost = if (address.contains(':')) "[$address]" else address
         val base = "https://$urlHost:$port"
         if (!state.isPaired()) {
@@ -36,14 +44,25 @@ class PairingTransport(private val state: PairingState) {
             val response = call(base, "/v1/pair", source.pin, "POST", request.toString())
             val id = response.getString("id")
             require(id == source.id) { "wrong Source response" }
-            return response.getString("person_id")
+            return SourceStatus(response.getString("person_id"))
         }
+        return status(source, address, port)
+    }
+
+    fun status(source: SourceRef, address: String, port: Int): SourceStatus {
+        val base = base(address, port)
         val response = call(base, "/v1/status", source.pin, "GET", null)
         require(response.getString("id") == source.id) { "wrong Source response" }
         require(response.getString("status") == "connected") { "Source rejected connection" }
         val personId = response.getString("person_id")
         require(personId == state.personId()) { "Source relationship changed" }
-        return personId
+        return SourceStatus(
+            personId,
+            response.optLong("silver_revision").takeIf { response.has("silver_revision") },
+            response.optLong("jobs_revision").takeIf { response.has("jobs_revision") },
+            response.optJSONObject("jobs")?.let(SourceJobs::fromJson),
+            response.optJSONArray("processing")?.let(SilverProcessing::list),
+        )
     }
 
     private fun call(base: String, path: String, pinnedSource: String, method: String, body: String?): JSONObject {

@@ -56,10 +56,10 @@ if (jobsRoot) {
       const response = await fetch('/jobs', { cache: 'no-store' });
       if (!response.ok) throw new Error('Jobs unavailable');
       const jobs = await response.json();
-      queuedCount.textContent = `(${jobs.queued.length})`;
-      completedCount.textContent = `(${jobs.completed.length})`;
-      renderList(queued, jobs.queued, false, jobs.queued.length);
-      renderList(completed, jobs.completed.slice(0, 5), true, jobs.completed.length);
+      queuedCount.textContent = `(${jobs.queued_count})`;
+      completedCount.textContent = `(${jobs.completed_count})`;
+      renderList(queued, jobs.queued, false, jobs.queued_count);
+      renderList(completed, jobs.completed, true, jobs.completed_count);
     } catch (_) {
       queued.replaceChildren();
       const unavailable = document.createElement('div');

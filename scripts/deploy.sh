@@ -21,6 +21,8 @@ command -v python3 >/dev/null 2>&1 || {
     exit 1
 }
 
+SOURCE_LAN_ADDRESS=${SOURCE_LAN_ADDRESS:-}
+python3 scripts/validate_lan_address.py "$SOURCE_LAN_ADDRESS"
 SOURCE_DATA_ROOT=${SOURCE_DATA_ROOT:-"$HOME/.local/share/source-v1"}
 case "$SOURCE_DATA_ROOT" in
     /*) ;;
@@ -31,7 +33,7 @@ case "$SOURCE_MODEL_ROOT" in
     /*) ;;
     *) printf '%s\n' "SOURCE_MODEL_ROOT must be an absolute path." >&2; exit 1 ;;
 esac
-export SOURCE_DATA_ROOT SOURCE_MODEL_ROOT
+export SOURCE_LAN_ADDRESS SOURCE_DATA_ROOT SOURCE_MODEL_ROOT
 SOURCE_UID=$(id -u)
 SOURCE_GID=$(id -g)
 SOURCE_REVISION=${SOURCE_REVISION:-$(git rev-parse HEAD)}
@@ -59,7 +61,7 @@ while :; do
             --connect-timeout 3 --max-time 10 \
             --cert "$SOURCE_DATA_ROOT/pairing/source.crt" \
             --key "$SOURCE_DATA_ROOT/pairing/source.key" \
-            https://127.0.0.1:8443/healthz; then
+            "https://$SOURCE_LAN_ADDRESS:8443/healthz"; then
         docker compose ps
         printf 'Source revision %s is healthy.\n' "$SOURCE_REVISION"
         exit 0

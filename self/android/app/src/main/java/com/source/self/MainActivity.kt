@@ -38,8 +38,8 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, systemBack)
         state = PairingState(this)
-        bronze = BronzeStore(this)
-        silver = SilverStore(this)
+        bronze = SelfStores.bronze(this)
+        silver = SelfStores.silver(this)
         desktop = DesktopStore(this)
         desktop.reconcileBronze(bronze.all())
         views = SelfViews(this, bronze)
@@ -68,7 +68,10 @@ class MainActivity : Activity() {
         }
         render()
         if (identityReady) {
-            if (state.source() == null) startScan() else connection.start()
+            if (state.source() == null) startScan() else {
+                connection.start()
+                BackgroundSyncScheduler.enqueueIfPending(this, state, bronze)
+            }
         }
     }
 
@@ -138,6 +141,7 @@ class MainActivity : Activity() {
             try {
                 action()
                 desktop.reconcileBronze(bronze.all())
+                BackgroundSyncScheduler.enqueueIfPending(this, state, bronze)
                 runOnUiThread {
                     render()
                     connection.syncSoon()
@@ -292,6 +296,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         onBackInvokedDispatcher.unregisterOnBackInvokedCallback(systemBack)
         connection.stop()
+        BackgroundSyncScheduler.enqueueIfPending(this, state, bronze)
         views.close()
         io.shutdownNow()
         super.onDestroy()

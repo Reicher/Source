@@ -64,6 +64,55 @@ func namedPeopleTestModel() semanticModel {
 	}}
 }
 
+func TestSilverDataRevisionChangesOnlyWithAuthoritativeSnapshot(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	putSilverBronze(t, bronze, "00000000-0000-4000-8000-000000000001", "queued.txt", "text/plain", 1,
+		"Ada Lovelace queued this note.")
+	service, err := newSilverServiceWithModel(root+"/silver", bronze, namedPeopleTestModel())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := service.snapshot().Revision; got != 0 {
+		t.Fatalf("queued processing changed authoritative data revision: %d", got)
+	}
+	if got := service.jobSnapshot().Revision; got == 0 {
+		t.Fatal("queued processing did not change job revision")
+	}
+	if !service.processNext(context.Background()) {
+		t.Fatal("Silver worker unexpectedly stopped")
+	}
+	if snapshot := service.snapshot(); snapshot.Revision != 1 || len(snapshot.Sources) != 1 {
+		t.Fatalf("published data did not advance authoritative revision: %+v", snapshot)
+	}
+}
+
+func TestSilverDataRevisionMigratesFromExistingState(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "silver")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := `{"schema_version":1,"revision":9,"published":{},"history":{},"entities":{}}`
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(legacy), 0600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := newSilverServiceWithModel(dir, newBronzeStore(filepath.Join(root, "bronze")), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := service.snapshot().Revision; got != 9 {
+		t.Fatalf("migrated data revision: got %d, want 9", got)
+	}
+	value, err := os.ReadFile(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(value), `"data_revision":9`) || !strings.Contains(string(value), `"revision_model":1`) {
+		t.Fatalf("revision migration was not persisted: %s", value)
+	}
+}
+
 func TestSilverQueueAndCheckpointsSurviveRestart(t *testing.T) {
 	root := t.TempDir()
 	bronze := newBronzeStore(root + "/bronze")

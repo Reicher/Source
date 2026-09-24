@@ -62,7 +62,14 @@ data class SilverProcessing(
     val state: String,
     val completedBatches: Int,
     val totalBatches: Int,
-)
+) {
+    companion object {
+        fun list(values: JSONArray): List<SilverProcessing> = values.objects().map { processing -> SilverProcessing(
+            processing.getString("bronze_source_id"), processing.getString("state"),
+            processing.getInt("completed_batches"), processing.getInt("total_batches"),
+        ) }
+    }
+}
 
 data class SourceJob(
     val id: String,
@@ -72,14 +79,32 @@ data class SourceJob(
     val state: String,
     val queuedAt: Long,
     val completedAt: Long?,
-)
+) {
+    companion object {
+        fun fromJson(value: JSONObject) = SourceJob(
+            value.getString("id"), value.getString("kind"), value.getString("title"),
+            value.optString("direction").takeIf(String::isNotEmpty), value.getString("state"),
+            value.getLong("queued_at"), value.optLong("completed_at").takeIf { value.has("completed_at") },
+        )
+    }
+}
 
 data class SourceJobs(
     val revision: Long,
     val queued: List<SourceJob>,
     val completed: List<SourceJob>,
+    val queuedCount: Int = queued.size,
+    val completedCount: Int = completed.size,
 ) {
-    companion object { val EMPTY = SourceJobs(0, emptyList(), emptyList()) }
+    companion object {
+        val EMPTY = SourceJobs(0, emptyList(), emptyList())
+        fun fromJson(value: JSONObject) = SourceJobs(
+            value.optLong("revision"), value.array("queued").objects().map(SourceJob::fromJson),
+            value.array("completed").objects().map(SourceJob::fromJson),
+            value.optInt("queued_count", value.array("queued").length()),
+            value.optInt("completed_count", value.array("completed").length()),
+        )
+    }
 }
 
 data class SilverKnowledge(
@@ -103,6 +128,17 @@ data class SilverSnapshot(
     val processing: List<SilverProcessing>,
     val jobs: SourceJobs = SourceJobs.EMPTY,
 ) {
+    fun needsSilverSnapshot(status: SourceStatus): Boolean =
+        status.silverRevision == null || revision != status.silverRevision
+
+    fun withStatus(status: SourceStatus): SilverSnapshot {
+        val nextJobs = status.jobs ?: return this
+        val nextProcessing = status.processing ?: return this
+        if (status.silverRevision != revision || status.jobsRevision != nextJobs.revision ||
+            nextJobs.revision < jobs.revision) return this
+        return copy(processing = nextProcessing, jobs = nextJobs)
+    }
+
     fun forBronze(id: String): SilverKnowledge {
         val source = sources.firstOrNull { it.bronzeSourceId == id }
         return SilverKnowledge(
@@ -188,22 +224,10 @@ data class SilverSnapshot(
                         producer.optString("model_revision").takeIf(String::isNotEmpty),
                     )
                 },
-                value.array("processing").objects().map { processing -> SilverProcessing(
-                    processing.getString("bronze_source_id"), processing.getString("state"),
-                    processing.getInt("completed_batches"), processing.getInt("total_batches"),
-                ) },
-                if (jobs == null) SourceJobs.EMPTY else SourceJobs(
-                    jobs.optLong("revision"), jobs.array("queued").objects().map(::sourceJob),
-                    jobs.array("completed").objects().map(::sourceJob),
-                ),
+                SilverProcessing.list(value.array("processing")),
+                if (jobs == null) SourceJobs.EMPTY else SourceJobs.fromJson(jobs),
             )
         }
-
-        private fun sourceJob(value: JSONObject) = SourceJob(
-            value.getString("id"), value.getString("kind"), value.getString("title"),
-            value.optString("direction").takeIf(String::isNotEmpty), value.getString("state"),
-            value.getLong("queued_at"), value.optLong("completed_at").takeIf { value.has("completed_at") },
-        )
     }
 }
 
@@ -218,6 +242,15 @@ class SilverStore(context: Context) {
     }
 
     @Synchronized fun snapshot(): SilverSnapshot = value
+
+    @Synchronized fun needsSilverSnapshot(status: SourceStatus): Boolean = value.needsSilverSnapshot(status)
+
+    @Synchronized fun updateStatus(status: SourceStatus): Boolean {
+        val next = value.withStatus(status)
+        if (next == value) return false
+        value = next
+        return true
+    }
 
     @Synchronized fun install(json: JSONObject): Boolean {
         val next = SilverSnapshot.fromJson(json)

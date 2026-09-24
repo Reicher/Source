@@ -1,9 +1,26 @@
 package com.source.self
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SilverStoreTest {
+    @Test fun statusRefreshesJobsWithoutRequestingUnchangedSilver() {
+        val snapshot = SilverSnapshot(
+            7, emptyList(), emptyList(), emptyList(), emptyList(), emptyList(), emptyList(),
+            SourceJobs(11, emptyList(), emptyList()),
+        )
+        val nextJob = SourceJob("job", "sync", "note.txt", "to_source", "queued", 1, null)
+        val jobs = SourceJobs(12, listOf(nextJob), emptyList())
+        val status = SourceStatus("person", 7, 12, jobs, emptyList())
+
+        assertFalse(snapshot.needsSilverSnapshot(status))
+        assertEquals(jobs, snapshot.withStatus(status).jobs)
+        assertTrue(snapshot.needsSilverSnapshot(SourceStatus("person", 8, 12, jobs, emptyList())))
+        assertTrue(snapshot.needsSilverSnapshot(SourceStatus("person")))
+    }
+
     @Test fun sourceKnowledgeAndEntityProvenanceRemainNavigable() {
         val entity = SilverEntity("entity-1")
         val evidence = listOf(
