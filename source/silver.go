@@ -735,18 +735,11 @@ func appendSilverClaim(dataset *silverDataset, subject, predicate string, value 
 func (s *silverService) resolveEntityLocked(label, normalized, entityType string) (silverEntity, bool) {
 	entityType = strings.ToLower(strings.TrimSpace(entityType))
 	var match *silverEntity
-	sameLabel := 0
 	for _, record := range s.state.Entities {
 		if record.Normalized != normalized {
 			continue
 		}
-		sameLabel++
-		if entityType == "" {
-			if sameLabel > 1 || record.Type != "" || record.TypeAmbiguous {
-				match = nil
-				continue
-			}
-		} else if record.Type != entityType {
+		if record.TypeAmbiguous || record.Type != entityType {
 			continue
 		}
 		if match != nil && match.ID != record.Entity.ID {
@@ -755,11 +748,8 @@ func (s *silverService) resolveEntityLocked(label, normalized, entityType string
 		value := record.Entity
 		match = &value
 	}
-	if match != nil && (entityType != "" || sameLabel == 1) {
+	if match != nil {
 		return *match, true
-	}
-	if entityType == "" && sameLabel > 0 {
-		return silverEntity{}, false
 	}
 	id, err := randomUUID()
 	if err != nil {
@@ -773,8 +763,16 @@ func (s *silverService) resolveEntityLocked(label, normalized, entityType string
 func (s *silverService) backfillEntityTypesLocked() {
 	types := map[string]map[string]bool{}
 	collect := func(dataset silverDataset) {
+		entityCandidates := map[string]bool{}
+		for _, observation := range dataset.Observations {
+			if observation.Kind == "entity-candidate" {
+				entityCandidates[observation.ID] = true
+			}
+		}
 		for _, claim := range dataset.Claims {
-			if claim.State != "active" || claim.Predicate != "type" || claim.ObjectEntityID != "" {
+			if claim.State != "active" || claim.Predicate != "type" || claim.ObjectEntityID != "" ||
+				claim.Producer.ProcessorID != silverResolverID || len(claim.SupportingObservationIDs) != 1 ||
+				!entityCandidates[claim.SupportingObservationIDs[0]] {
 				continue
 			}
 			var entityType string
