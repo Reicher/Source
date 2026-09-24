@@ -214,7 +214,11 @@ datasets are pruned.
 `GET /v1/silver` is authenticated by the paired Self certificate and returns one
 complete snapshot containing current Sources, Evidence, Observations, Entities,
 Claims, and separate processing progress. Processing metadata is not
-authoritative Silver content.
+authoritative Silver content. The authenticated `GET /v1/status` response
+includes the authoritative Silver data revision and the current lightweight
+job and processing status. Self requests the complete snapshot only when its
+installed data revision differs; job and processing changes do not transfer
+the complete Silver dataset.
 
 Self stores the snapshot atomically. Its Bronze detail links to the Silver source
 record and remains useful with the cached snapshot offline. Source-specific

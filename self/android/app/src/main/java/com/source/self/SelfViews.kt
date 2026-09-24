@@ -147,19 +147,20 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                     setTextColor(secondaryColor)
                 }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
             }
-            addView(label("Queue (${silver.jobs.queued.size})", 19f, true), sectionMargin())
+            addView(label("Queue (${silver.jobs.queuedCount})", 19f, true), sectionMargin())
             if (silver.jobs.queued.isEmpty()) {
                 addView(label("No jobs waiting", 14f).apply { setTextColor(secondaryColor) })
             } else {
                 silver.jobs.queued.forEach { addView(jobRow(it, false)) }
             }
-            addView(label("Completed (${silver.jobs.completed.size})", 19f, true), sectionMargin())
+            addView(label("Completed (${silver.jobs.completedCount})", 19f, true), sectionMargin())
             if (silver.jobs.completed.isEmpty()) {
                 addView(label("No completed jobs", 14f).apply { setTextColor(secondaryColor) })
             } else {
-                silver.jobs.completed.take(5).forEach { addView(jobRow(it, true)) }
-                if (silver.jobs.completed.size > 5) addView(label(
-                    "+ ${silver.jobs.completed.size - 5} earlier", 13f
+                val visibleCompleted = silver.jobs.completed.take(5)
+                visibleCompleted.forEach { addView(jobRow(it, true)) }
+                if (silver.jobs.completedCount > visibleCompleted.size) addView(label(
+                    "+ ${silver.jobs.completedCount - visibleCompleted.size} earlier", 13f
                 ).apply { setTextColor(secondaryColor) })
             }
             if (silver.entities.isNotEmpty()) {

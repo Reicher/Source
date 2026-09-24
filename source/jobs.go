@@ -28,9 +28,11 @@ type sourceJob struct {
 }
 
 type sourceJobSnapshot struct {
-	Revision  int64       `json:"revision"`
-	Queued    []sourceJob `json:"queued"`
-	Completed []sourceJob `json:"completed"`
+	Revision       int64       `json:"revision"`
+	QueuedCount    int         `json:"queued_count"`
+	CompletedCount int         `json:"completed_count"`
+	Queued         []sourceJob `json:"queued"`
+	Completed      []sourceJob `json:"completed"`
 }
 
 type syncJobPlanItem struct {
@@ -209,9 +211,16 @@ type sourceJobs struct {
 	silver *silverService
 }
 
+func (j *sourceJobs) refreshStatus() (int64, sourceJobSnapshot, []silverProcessing) {
+	silverRevision, silverJobs, processing := j.silver.refreshStatus()
+	return silverRevision, boundedJobSnapshot(mergeJobSnapshots(j.sync.snapshot(), silverJobs)), processing
+}
+
 func (j *sourceJobs) snapshot() sourceJobSnapshot {
-	snapshot := j.sync.snapshot()
-	silver := j.silver.jobSnapshot()
+	return mergeJobSnapshots(j.sync.snapshot(), j.silver.jobSnapshot())
+}
+
+func mergeJobSnapshots(snapshot, silver sourceJobSnapshot) sourceJobSnapshot {
 	snapshot.Revision += silver.Revision
 	snapshot.Queued = append(snapshot.Queued, silver.Queued...)
 	snapshot.Completed = append(snapshot.Completed, silver.Completed...)
@@ -227,5 +236,14 @@ func (j *sourceJobs) snapshot() sourceJobSnapshot {
 		}
 		return snapshot.Completed[a].CompletedAt > snapshot.Completed[b].CompletedAt
 	})
+	snapshot.QueuedCount = len(snapshot.Queued)
+	snapshot.CompletedCount = len(snapshot.Completed)
+	return snapshot
+}
+
+func boundedJobSnapshot(snapshot sourceJobSnapshot) sourceJobSnapshot {
+	if len(snapshot.Completed) > 5 {
+		snapshot.Completed = append([]sourceJob(nil), snapshot.Completed[:5]...)
+	}
 	return snapshot
 }

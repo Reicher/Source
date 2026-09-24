@@ -23,4 +23,6 @@ jobs:
           clean: true
           persist-credentials: false
       - name: Deploy Source
+        env:
+          SOURCE_LAN_ADDRESS: ${{ vars.SOURCE_LAN_ADDRESS }}
         run: ./scripts/deploy.sh

@@ -12,12 +12,12 @@ Go 1.25 or newer is required.
 cd source
 go test ./...
 go build ./...
-go run .
+go run . -listen 192.168.1.20:8080
 ```
 
 Without model environment variables, Source still publishes deterministic format extraction but does not pretend that it produced semantic understanding. For full semantic Silver, run the provisioned GGUF through a local OpenAI-compatible runtime and set `SOURCE_MODEL_URL`, `SOURCE_MODEL_ID`, and `SOURCE_MODEL_REVISION`. The Docker deployment below configures the pinned runtime and model automatically.
 
-On a clean installation, open `http://127.0.0.1:8081` in a browser **on the Source machine**. It shows a temporary QR code without text until pairing, then the Source job overview. The setup page is bound to loopback; the TLS pairing endpoint listens on port 8080 and is advertised as `_sourceself._tcp` via mDNS/DNS-SD. Both devices must be on a LAN that permits multicast DNS and direct connections to Source's port 8080. A local firewall may need to allow that port.
+On a clean installation, open `http://127.0.0.1:8081` in a browser **on the Source machine**. It shows a temporary QR code without text until pairing, then the Source job overview. The setup page is bound to loopback; the TLS pairing endpoint listens on the explicit private IPv4 address passed to `-listen` and is advertised as `_sourceself._tcp` via mDNS/DNS-SD only on that address's interface. Wildcard, loopback, public, IPv6, and unassigned LAN listen addresses are rejected. Both devices must be on a LAN that permits multicast DNS and direct connections to Source's port 8080. A local firewall may need to allow that port.
 
 Source keeps its private key, certificate, one-person/one-Self pairing record, Bronze, and authoritative Silver processing state in `source/data/pairing/` when started from `source/`. Keep this directory across restarts. `-data`, `-listen`, and `-setup` can override the defaults. First-time identity creation stages all three identity files and activates them together; losing only part of an active identity is treated as an error. For a fresh container installation, mount the **parent** of the `-data` directory: Source must be able to rename the staged directory into place. An empty `-data` mount point is rejected with a clear error; an existing complete identity there can still be loaded. The QR token is valid for two minutes and is never persisted. LAN discovery alone does not authenticate a peer: Self pins the certificate fingerprint from the QR code and Source pins Self's certificate at pairing.
 
@@ -25,7 +25,7 @@ Source keeps its private key, certificate, one-person/one-Self pairing record, B
 
 Every push to `main` starts the [Deploy workflow](.github/workflows/deploy.yml) on the repository's Linux runner labeled `source-node`. The runner needs Docker Compose and access to the Docker daemon. It builds the V1 Go server, starts it with host networking for mDNS, and checks both the loopback setup page and the TLS health endpoint. Self is an Android app and is built by CI rather than installed on the server.
 
-The deployment keeps Source's identity, pairing record, and local model under `$HOME/.local/share/source-v1/` on the runner host. Set `SOURCE_DATA_ROOT` and, if desired, `SOURCE_MODEL_ROOT` to other **absolute** directories before running `./scripts/deploy.sh`. Keep both across deployments and backups. The first deployment downloads and verifies the pinned Source model; later deployments verify and reuse it. The model runs in a pinned `llama-server` container bound only to host loopback, while the Go service owns prompts, validation, durable jobs, resolution, and published Silver.
+The deployment requires `SOURCE_LAN_ADDRESS` to be the private IPv4 address assigned to Source's intended LAN interface. Configure it as the `SOURCE_LAN_ADDRESS` variable in the `source-node` GitHub environment, or export it before running `./scripts/deploy.sh` directly. The deployment keeps Source's identity, pairing record, and local model under `$HOME/.local/share/source-v1/` on the runner host. Set `SOURCE_DATA_ROOT` and, if desired, `SOURCE_MODEL_ROOT` to other **absolute** directories before running `./scripts/deploy.sh`. Keep both across deployments and backups. The first deployment downloads and verifies the pinned Source model; later deployments verify and reuse it. The model runs in a pinned `llama-server` container bound only to host loopback, while the Go service owns prompts, validation, durable jobs, resolution, and published Silver.
 
 On the server, port 8443 serves the LAN TLS pairing API. Port 8081 is bound only to host loopback. To open setup from another computer, use an SSH tunnel, then visit `http://127.0.0.1:8081` locally:
 
@@ -46,7 +46,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb shell am start -n com.source.self/.MainActivity
 ```
 
-On a clean installation, Self opens its QR scanner. After scanning Source's code, it finds Source using mDNS/DNS-SD, pairs over pinned TLS, and stores its own identity in Android Keystore. On later launches it automatically rediscovers and authenticates the same Source. The debug APK builds without model files so CI and initial development stay fast.
+On a clean installation, Self opens its QR scanner. After scanning Source's code, it finds Source using mDNS/DNS-SD, pairs over pinned TLS, and stores its own identity in Android Keystore. On later launches it automatically rediscovers and authenticates the same Source. Pending local Bronze also schedules bounded WorkManager synchronization with network constraints and exponential backoff, so it can reach Source after the Activity closes without continuous polling. Each attempt discovers Source again and rebuilds its transfer plan from durable Bronze metadata. The debug APK builds without model files so CI and initial development stay fast.
 
 ## Bronze data
 
@@ -58,7 +58,7 @@ Source automatically queues every new Bronze item for Silver processing and reco
 
 After pairing, the loopback page and Self's Source tab show the same compact job overview. It includes every pending Bronze sync and Silver extraction job plus the five most recently completed jobs and their completion times. Sync job history is durable under `jobs/` in the same `-data` directory; Bronze state remains the authority used to reconcile interrupted transfers.
 
-V1 deterministically parses JSON, CSV, and Markdown where useful, with a generic UTF-8 fallback for arbitrary text-like Bronze. The Source-local model then emits generic entity, attribute, and relationship candidate Observations. Source validates every response and resolves only sufficiently confident candidates; uncertain interpretations remain traceable Observations instead of being forced into Entities or Claims. Source exposes the complete authoritative snapshot to its paired Self; Self stores it atomically for offline inspection. Bronze detail opens the knowledge derived from that source, and Entity detail navigates back to every supporting Bronze item. See [the Silver model](docs/SILVER.md).
+V1 deterministically parses JSON, CSV, and Markdown where useful, with a generic UTF-8 fallback for arbitrary text-like Bronze. The Source-local model then emits generic entity, attribute, and relationship candidate Observations. Source validates every response and resolves only sufficiently confident candidates; uncertain interpretations remain traceable Observations instead of being forced into Entities or Claims. Source exposes the complete authoritative snapshot to its paired Self; Self stores it atomically for offline inspection. The lightweight authenticated status response carries the authoritative Silver revision plus current job and processing status, so Self downloads the complete snapshot only when its data revision changes. Bronze detail opens the knowledge derived from that source, and Entity detail navigates back to every supporting Bronze item. See [the Silver model](docs/SILVER.md).
 
 To fetch the latest `main`, build its debug APK, and install it on one connected Android phone while preserving the app's pairing data, run:
 

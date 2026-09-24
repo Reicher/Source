@@ -50,6 +50,8 @@ data class BronzeItem(
     }
 }
 
+fun hasPendingBronze(items: List<BronzeItem>): Boolean = items.any { it.ackedRevision < it.revision }
+
 class BronzeStore(private val context: Context) {
     private val root = File(context.filesDir, "bronze")
     private val items = File(root, "items")
@@ -68,6 +70,8 @@ class BronzeStore(private val context: Context) {
     @Synchronized fun all(): List<BronzeItem> = items.listFiles()?.filter { it.name.endsWith(".json") }
         ?.map { BronzeItem.fromJson(JSONObject(AtomicFile(it).openRead().bufferedReader().use { reader -> reader.readText() })) }
         ?.sortedWith(compareByDescending<BronzeItem> { it.modified }.thenBy { it.id }) ?: emptyList()
+
+    @Synchronized fun hasPending(): Boolean = hasPendingBronze(all())
 
     @Synchronized fun get(id: String): BronzeItem? {
         val file = metadata(id)

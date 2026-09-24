@@ -306,12 +306,19 @@ func (i *identity) newLanHandler(ctx context.Context) (http.Handler, error) {
 			return
 		}
 		i.mu.Lock()
-		defer i.mu.Unlock()
 		if i.state.SelfPin == "" || i.state.SelfPin != fingerprint(r.TLS.PeerCertificates[0]) {
+			i.mu.Unlock()
 			http.Error(w, "not paired", http.StatusForbidden)
 			return
 		}
-		writeJSON(w, map[string]string{"id": i.id, "person_id": i.state.PersonID, "status": "connected"})
+		personID := i.state.PersonID
+		i.mu.Unlock()
+		silverRevision, jobSnapshot, processing := jobs.refreshStatus()
+		writeJSON(w, map[string]any{
+			"id": i.id, "person_id": personID, "status": "connected",
+			"silver_revision": silverRevision, "jobs_revision": jobSnapshot.Revision,
+			"jobs": jobSnapshot, "processing": processing,
+		})
 	})
 	mux.Handle("/v1/bronze", i.trusted(bronze))
 	mux.Handle("/v1/bronze/", i.trusted(bronze))
