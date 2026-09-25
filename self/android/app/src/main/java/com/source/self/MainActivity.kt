@@ -42,6 +42,7 @@ class MainActivity : Activity() {
         silver = SelfStores.silver(this)
         desktop = DesktopStore(this)
         desktop.reconcileBronze(bronze.all())
+        desktop.reconcileSilver(silver.snapshot().entities)
         views = SelfViews(this, bronze)
         detailId = savedInstanceState?.getString("detail")
         knowledgeSourceId = savedInstanceState?.getString("knowledge_source")
@@ -59,6 +60,7 @@ class MainActivity : Activity() {
             if (rescan) startScan()
         }, {
             desktop.reconcileBronze(bronze.all())
+            desktop.reconcileSilver(silver.snapshot().entities)
         })
         try {
             state.ensureSelfIdentity()
@@ -105,7 +107,7 @@ class MainActivity : Activity() {
                 val uri = data.data!!
                 write {
                     val item = bronze.import(uri)
-                    desktop.place(DESKTOP_OBJECT_BRONZE, item.id)
+                    desktop.pin(DESKTOP_OBJECT_BRONZE, item.id)
                 }
             }
             return
@@ -167,7 +169,7 @@ class MainActivity : Activity() {
                 val value = body.text.toString()
                 write {
                     val saved = bronze.createNote(value)
-                    desktop.place(DESKTOP_OBJECT_BRONZE, saved.id)
+                    desktop.pin(DESKTOP_OBJECT_BRONZE, saved.id)
                 }
             }.show()
     }
@@ -185,12 +187,21 @@ class MainActivity : Activity() {
         val knowledgeItem = knowledgeSourceId?.let(bronze::get)?.takeUnless { it.deleted }
         if (knowledgeSourceId != null && knowledgeItem == null) knowledgeSourceId = null
         val content = if (selectedEntity != null) {
-            views.entityDetail(selectedEntity, silverSnapshot) { sourceId ->
-                detailId = sourceId
-                knowledgeSourceId = null
-                entityId = null
-                render()
-            }
+            views.entityDetail(
+                selectedEntity,
+                silverSnapshot,
+                isPinned = desktop.isPinned(DESKTOP_OBJECT_SILVER, selectedEntity.id),
+                onPinToggle = {
+                    togglePin(DESKTOP_OBJECT_SILVER, selectedEntity.id)
+                    render()
+                },
+                onBronze = { sourceId ->
+                    detailId = sourceId
+                    knowledgeSourceId = null
+                    entityId = null
+                    render()
+                },
+            )
         } else if (knowledgeItem != null) {
             views.silverDetail(knowledgeItem, silverSnapshot.forBronze(knowledgeItem.id)) { id ->
                 entityId = id
@@ -205,9 +216,9 @@ class MainActivity : Activity() {
                     knowledgeSourceId = selected.id
                     render()
                 },
-                onArchive = {
-                    desktop.remove(DESKTOP_OBJECT_BRONZE, selected.id)
-                    detailId = null
+                isPinned = desktop.isPinned(DESKTOP_OBJECT_BRONZE, selected.id),
+                onPinToggle = {
+                    togglePin(DESKTOP_OBJECT_BRONZE, selected.id)
                     render()
                 },
                 onDelete = { confirmDelete(selected) },
@@ -215,6 +226,7 @@ class MainActivity : Activity() {
         } else when (section) {
             AppSection.DESKTOP -> views.desktop(
                 desktop.items(),
+                silverSnapshot,
                 onAdd = ::addMenu,
                 onOpen = ::openDesktopItem,
                 onItemMenu = ::desktopItemMenu,
@@ -263,15 +275,20 @@ class MainActivity : Activity() {
     }
 
     private fun desktopItemMenu(ref: DesktopObjectRef) {
-        val actions = arrayOf("Move earlier", "Move later", "Archive")
+        val actions = arrayOf("Move earlier", "Move later", "Unpin")
         AlertDialog.Builder(this).setItems(actions) { _, which ->
             when (which) {
                 0 -> desktop.move(ref.objectType, ref.objectId, -1)
                 1 -> desktop.move(ref.objectType, ref.objectId, 1)
-                2 -> desktop.remove(ref.objectType, ref.objectId)
+                2 -> desktop.unpin(ref.objectType, ref.objectId)
             }
             render()
         }.show()
+    }
+
+    private fun togglePin(objectType: String, objectId: String) {
+        if (desktop.isPinned(objectType, objectId)) desktop.unpin(objectType, objectId)
+        else desktop.pin(objectType, objectId)
     }
 
     private fun confirmDelete(item: BronzeItem) {

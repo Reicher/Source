@@ -57,6 +57,13 @@ data class SilverClaim(
     val modelRevision: String? = null,
 )
 
+data class SilverClaimGroup(
+    val predicate: String,
+    val value: String,
+    val claims: List<SilverClaim>,
+    val confidence: Double?,
+)
+
 data class SilverProcessing(
     val bronzeSourceId: String,
     val state: String,
@@ -200,6 +207,67 @@ data class SilverSnapshot(
 
     fun claimsFor(entityId: String): List<SilverClaim> = claims.filter {
         it.subjectEntityId == entityId || it.objectEntityId == entityId
+    }
+
+    /** The first supporting observation is the candidate that produced the claim. */
+    fun confidence(claim: SilverClaim): Double? = claim.supportingObservationIds.asSequence()
+        .mapNotNull { observationId -> observations.firstOrNull { it.id == observationId } }
+        .firstOrNull()
+        ?.confidence
+
+    fun claimGroupsFor(entityId: String): List<SilverClaimGroup> {
+        data class ClaimKey(
+            val subjectEntityId: String,
+            val predicate: String,
+            val value: String?,
+            val objectEntityId: String?,
+        )
+
+        return claimsFor(entityId)
+            .groupBy { claim ->
+                ClaimKey(
+                    claim.subjectEntityId,
+                    claim.predicate,
+                    claim.value?.let { "${it.javaClass.name}:$it" },
+                    claim.objectEntityId,
+                )
+            }
+            .values
+            .map { matchingClaims ->
+                val sortedClaims = matchingClaims.sortedWith(
+                    compareByDescending<SilverClaim> { confidence(it) != null }
+                        .thenByDescending { confidence(it) ?: 0.0 }
+                        .thenBy { it.id },
+                )
+                val claim = sortedClaims.first()
+                SilverClaimGroup(
+                    claim.predicate,
+                    claimValue(claim, entityId),
+                    sortedClaims,
+                    confidence(claim),
+                )
+            }
+            .sortedWith(
+                compareByDescending<SilverClaimGroup> { it.confidence != null }
+                    .thenByDescending { it.confidence ?: 0.0 }
+                    .thenBy { it.predicate }
+                    .thenBy { it.value },
+            )
+    }
+
+    private fun claimValue(claim: SilverClaim, viewedEntityId: String): String {
+        val objectId = claim.objectEntityId
+        if (objectId != null) {
+            val objectLabel = entities.firstOrNull { it.id == objectId }?.let(::label) ?: "Unknown"
+            if (claim.subjectEntityId == viewedEntityId) return objectLabel
+            val subjectLabel = entities.firstOrNull { it.id == claim.subjectEntityId }?.let(::label) ?: "Unknown"
+            return "$subjectLabel → $objectLabel"
+        }
+        return when (val value = claim.value) {
+            null -> "Unknown"
+            is String -> value
+            else -> value.toString()
+        }
     }
 
     fun describe(claim: SilverClaim): String {
