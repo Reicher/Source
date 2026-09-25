@@ -36,6 +36,11 @@ class DesktopStore(context: Context) {
 
     @Synchronized fun items(): List<DesktopObjectRef> = document.items.sortedBy { it.order }
 
+    @Synchronized fun isPinned(objectType: String, objectId: String): Boolean {
+        val key = "$objectType:$objectId"
+        return document.items.any { it.key == key }
+    }
+
     /**
      * Places Bronze that this installation has never seen. A removed shortcut stays in
      * knownObjects, so synchronization and restarts cannot silently put it back.
@@ -60,7 +65,18 @@ class DesktopStore(context: Context) {
         if (changed) replace(document.copy(items = normalized(present), knownObjects = known))
     }
 
-    @Synchronized fun place(objectType: String, objectId: String) {
+    /** Removes shortcuts to Silver entities that are no longer present in the snapshot. */
+    @Synchronized fun reconcileSilver(silverEntities: List<SilverEntity>) {
+        val visibleIds = silverEntities.map { it.id }.toSet()
+        val present = document.items.filterNot {
+            it.objectType == DESKTOP_OBJECT_SILVER && it.objectId !in visibleIds
+        }
+        if (present.size != document.items.size) {
+            replace(document.copy(items = normalized(present)))
+        }
+    }
+
+    @Synchronized fun pin(objectType: String, objectId: String) {
         val key = "$objectType:$objectId"
         val known = document.knownObjects + key
         if (document.items.any { it.key == key }) {
@@ -73,7 +89,7 @@ class DesktopStore(context: Context) {
         ))
     }
 
-    @Synchronized fun remove(objectType: String, objectId: String) {
+    @Synchronized fun unpin(objectType: String, objectId: String) {
         val key = "$objectType:$objectId"
         replace(document.copy(
             items = normalized(document.items.filterNot { it.key == key }),

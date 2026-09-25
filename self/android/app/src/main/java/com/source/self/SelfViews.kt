@@ -76,6 +76,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
 
     fun desktop(
         refs: List<DesktopObjectRef>,
+        silver: SilverSnapshot,
         onAdd: () -> Unit,
         onOpen: (DesktopObjectRef) -> Unit,
         onItemMenu: (DesktopObjectRef) -> Unit,
@@ -88,7 +89,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                 isVerticalScrollBarEnabled = false
                 clipToPadding = false
                 setPadding(0, dp(4), 0, dp(88))
-                adapter = DesktopAdapter(refs, onOpen, onItemMenu)
+                adapter = DesktopAdapter(refs, silver, onOpen, onItemMenu)
                 setSelectionFromTop(previousPosition, previousTop)
             }
             desktopList = list
@@ -198,7 +199,8 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         item: BronzeItem,
         knowledge: SilverKnowledge,
         onKnowledge: () -> Unit,
-        onArchive: () -> Unit,
+        isPinned: Boolean,
+        onPinToggle: () -> Unit,
         onDelete: () -> Unit,
     ): View {
         val root = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
@@ -221,7 +223,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             else -> "Knowledge · No extracted items"
         }
         root.addView(actionButton(knowledgeLabel, onKnowledge))
-        root.addView(actionButton("Archive", onArchive))
+        root.addView(actionButton(if (isPinned) "Unpin" else "Pin", onPinToggle))
         root.addView(actionButton("Delete", onDelete))
         return root
     }
@@ -281,16 +283,20 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         return root
     }
 
-    fun entityDetail(entity: SilverEntity, silver: SilverSnapshot, onBronze: (String) -> Unit): View {
+    fun entityDetail(
+        entity: SilverEntity,
+        silver: SilverSnapshot,
+        isPinned: Boolean,
+        onPinToggle: () -> Unit,
+        onBronze: (String) -> Unit,
+    ): View {
         val root = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
         root.addView(label(silver.label(entity), 25f, true), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(14) })
         val body = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
-        val claims = silver.claimsFor(entity.id)
-        if (claims.isNotEmpty()) {
-            body.addView(label("Knowledge", 18f, true))
-            claims.forEach { claim ->
-                body.addView(label(silver.describe(claim), 15f))
-            }
+        silver.claimGroupsFor(entity.id).forEach { group ->
+            body.addView(claimGroup(group, silver), LinearLayout.LayoutParams(-1, -2).apply {
+                bottomMargin = dp(6)
+            })
         }
         val sources = silver.supportingBronze(entity.id)
         if (sources.isNotEmpty()) {
@@ -301,7 +307,106 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             }
         }
         root.addView(ScrollView(activity).apply { addView(body) }, LinearLayout.LayoutParams(-1, 0, 1f))
+        root.addView(actionButton(if (isPinned) "Unpin" else "Pin", onPinToggle))
         return root
+    }
+
+    private fun claimGroup(group: SilverClaimGroup, silver: SilverSnapshot): View =
+        LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            val confidence = group.confidence?.let(::confidenceText) ?: "—"
+            background = GradientDrawable().apply {
+                setColor(surfaceColor)
+                cornerRadius = dp(10).toFloat()
+            }
+            val summary = LinearLayout(activity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(14), dp(10), dp(14), dp(10))
+                val statement = LinearLayout(activity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(label(group.predicate, 12f, true).apply { setTextColor(secondaryColor) })
+                    val valueRow = LinearLayout(activity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        addView(label(group.value, 15f))
+                        if (group.claims.size > 1) addView(label("×${group.claims.size}", 13f, true).apply {
+                            setTextColor(accentColor)
+                        }, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) })
+                    }
+                    addView(valueRow)
+                }
+                addView(statement, LinearLayout.LayoutParams(0, -2, 1f))
+                addView(label(confidence, 14f, true).apply {
+                    gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                }, LinearLayout.LayoutParams(dp(64), -1).apply { marginStart = dp(12) })
+            }
+            val details = LinearLayout(activity).apply {
+                orientation = LinearLayout.VERTICAL
+                visibility = View.GONE
+                setPadding(dp(10), 0, dp(10), dp(4))
+                group.claims.forEachIndexed { index, claim ->
+                    addView(claimDetail(claim, index, silver), LinearLayout.LayoutParams(-1, -2).apply {
+                        bottomMargin = dp(8)
+                    })
+                }
+            }
+            addView(summary)
+            addView(details)
+            isClickable = true
+            isFocusable = true
+            contentDescription = buildString {
+                append(group.predicate).append(", ").append(group.value).append(", ").append(confidence)
+                if (group.claims.size > 1) append(", ").append(group.claims.size).append(" claims")
+            }
+            setOnClickListener {
+                details.visibility = if (details.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+            }
+        }
+
+    private fun claimDetail(claim: SilverClaim, index: Int, silver: SilverSnapshot): View = card().apply {
+        addView(label("Claim ${index + 1}", 14f, true))
+        addView(label("ID: ${claim.id}\nState: ${claim.state}\nConfidence: ${silver.confidence(claim)?.let(::confidenceText) ?: "Unavailable"}", 12f).apply {
+            setTextColor(secondaryColor)
+        })
+        addView(label("Producer: ${producerText(claim.processorId, claim.processorVersion, claim.modelId, claim.modelRevision)}", 12f).apply {
+            setTextColor(secondaryColor)
+        })
+        claim.supportingObservationIds.forEach { observationId ->
+            val observation = silver.observations.firstOrNull { it.id == observationId }
+            if (observation == null) {
+                addView(label("Observation: $observationId", 13f, true))
+            } else {
+                addView(label("Observation: ${observationTitle(observation.kind)}", 13f, true), sectionMargin())
+                addView(label(observationText(observation), 13f))
+                val observationConfidence = observation.confidence?.let(::confidenceText) ?: "Unavailable"
+                addView(label("Confidence: $observationConfidence\nProducer: ${producerText(observation.processorId, observation.processorVersion, observation.modelId, observation.modelRevision)}", 12f).apply {
+                    setTextColor(secondaryColor)
+                })
+                observation.evidenceIds.forEach { evidenceId ->
+                    val evidence = silver.evidence.firstOrNull { it.id == evidenceId }
+                    val evidenceText = evidence?.excerpt?.takeIf(String::isNotBlank) ?: "No excerpt"
+                    val source = evidence?.bronzeSourceId?.let { sourceId ->
+                        silver.sources.firstOrNull { it.bronzeSourceId == sourceId }?.title ?: sourceId
+                    } ?: evidenceId
+                    addView(label("Evidence ($source): $evidenceText", 12f).apply {
+                        setTextColor(secondaryColor)
+                    })
+                }
+            }
+        }
+    }
+
+    private fun confidenceText(value: Double): String = String.format(Locale.US, "%.2f", value)
+
+    private fun producerText(
+        processorId: String?,
+        processorVersion: String?,
+        modelId: String?,
+        modelRevision: String?,
+    ): String {
+        val processor = processorId?.let { "$it v${processorVersion ?: "unknown"}" } ?: "Unknown"
+        return modelId?.let { "$processor · $it@${modelRevision ?: "unknown"}" } ?: processor
     }
 
     private fun sectionMargin() = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(18); bottomMargin = dp(6) }
@@ -392,6 +497,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
 
     private inner class DesktopAdapter(
         private val refs: List<DesktopObjectRef>,
+        private val silver: SilverSnapshot,
         private val onOpen: (DesktopObjectRef) -> Unit,
         private val onMenu: (DesktopObjectRef) -> Unit,
     ) : BaseAdapter() {
@@ -408,7 +514,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             row.removeAllViews()
             val first = position * columns
             refs.subList(first, minOf(first + columns, refs.size)).forEach { ref ->
-                row.addView(desktopTile(ref, onOpen, onMenu))
+                row.addView(desktopTile(ref, silver, onOpen, onMenu))
             }
             return row
         }
@@ -416,16 +522,21 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
 
     private fun desktopTile(
         ref: DesktopObjectRef,
+        silver: SilverSnapshot,
         onOpen: (DesktopObjectRef) -> Unit,
         onMenu: (DesktopObjectRef) -> Unit,
     ): View {
         val item = if (ref.objectType == DESKTOP_OBJECT_BRONZE) bronze.get(ref.objectId) else null
+        val entity = if (ref.objectType == DESKTOP_OBJECT_SILVER) {
+            silver.entities.firstOrNull { it.id == ref.objectId }
+        } else null
         return LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(10), dp(10), dp(10), dp(10))
             background = GradientDrawable().apply { setColor(surfaceColor); cornerRadius = dp(12).toFloat() }
-            contentDescription = item?.title ?: "Item"
+            contentDescription = item?.title ?: entity?.let(silver::label) ?: "Item"
             when {
+                entity != null -> addView(label(silver.label(entity), 16f, true))
                 item == null -> addView(label("Item", 16f, true))
                 item.mime.startsWith("image/") -> {
                     val image = ImageView(activity).apply { scaleType = ImageView.ScaleType.FIT_CENTER }

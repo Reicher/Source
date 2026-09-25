@@ -80,4 +80,53 @@ class SilverStoreTest {
         assertEquals(listOf(relationship), snapshot.claimsFor(josefin.id).filter { it.objectEntityId != null })
         assertEquals("Martin — sibling of → Josefin", snapshot.describe(relationship))
     }
+
+    @Test fun entityClaimsAreGroupedAndSortedByPrimaryObservationConfidence() {
+        val robin = SilverEntity("robin")
+        val observations = listOf(
+            SilverObservation("name-low", "entity-candidate", "Robin", emptyList(), "model", "1", 0.84),
+            SilverObservation("name-high", "entity-candidate", "Robin", emptyList(), "model", "1", 0.96),
+            SilverObservation("role", "attribute-candidate", "Engineer", emptyList(), "model", "1", null),
+            SilverObservation("secondary", "entity-candidate", "Robin", emptyList(), "model", "1", 0.99),
+        )
+        val claims = listOf(
+            SilverClaim("name-1", robin.id, "name", "Robin", null, listOf("name-low"), "active"),
+            SilverClaim("role", robin.id, "role", "Engineer", null, listOf("role", "secondary"), "active"),
+            SilverClaim("name-2", robin.id, "name", "Robin", null, listOf("name-high"), "active"),
+        )
+        val snapshot = SilverSnapshot(
+            1, emptyList(), emptyList(), observations, listOf(robin), claims, emptyList(),
+        )
+
+        val groups = snapshot.claimGroupsFor(robin.id)
+
+        assertEquals(listOf("name", "role"), groups.map { it.predicate })
+        assertEquals("Robin", groups.first().value)
+        assertEquals(0.96, groups.first().confidence)
+        assertEquals(listOf("name-2", "name-1"), groups.first().claims.map { it.id })
+        assertEquals(null, groups.last().confidence)
+    }
+
+    @Test fun incomingRelationshipClaimKeepsItsDirectionInTheValueColumn() {
+        val martin = SilverEntity("martin")
+        val josefin = SilverEntity("josefin")
+        val relationship = SilverClaim(
+            "relationship", martin.id, "sibling_of", null, josefin.id,
+            emptyList(), "active",
+        )
+        val snapshot = SilverSnapshot(
+            1, emptyList(), emptyList(), emptyList(), listOf(martin, josefin),
+            listOf(
+                SilverClaim("martin-name", martin.id, "name", "Martin", null, emptyList(), "active"),
+                SilverClaim("josefin-name", josefin.id, "name", "Josefin", null, emptyList(), "active"),
+                relationship,
+            ),
+            emptyList(),
+        )
+
+        assertEquals(
+            "Martin → Josefin",
+            snapshot.claimGroupsFor(josefin.id).first { it.predicate == "sibling_of" }.value,
+        )
+    }
 }
