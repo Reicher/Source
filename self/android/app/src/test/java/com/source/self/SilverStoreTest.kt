@@ -59,6 +59,15 @@ class SilverStoreTest {
         assertEquals(listOf("bronze-1", "bronze-2"), snapshot.supportingBronze(entity.id))
     }
 
+    @Test fun unlabeledEntitiesDoNotExposeTheirInternalId() {
+        val entity = SilverEntity("75231476-5e20-4a02-8b16-deadbeefcafe")
+        val snapshot = SilverSnapshot(
+            1, emptyList(), emptyList(), emptyList(), listOf(entity), emptyList(), emptyList(),
+        )
+
+        assertEquals("Unnamed entity", snapshot.label(entity))
+    }
+
     @Test fun relationshipDescriptionsPreserveDirectionFromEitherEntity() {
         val martin = SilverEntity("martin")
         val josefin = SilverEntity("josefin")
@@ -128,5 +137,28 @@ class SilverStoreTest {
             "Martin → Josefin",
             snapshot.claimGroupsFor(josefin.id).first { it.predicate == "sibling_of" }.value,
         )
+        assertEquals(
+            "Martin → Josefin",
+            snapshot.claimGroupsFor(martin.id).first { it.predicate == "sibling_of" }.value,
+        )
+        assertEquals(
+            josefin.id,
+            snapshot.claimGroupsFor(martin.id).first { it.predicate == "sibling_of" }.linkedEntityId,
+        )
+    }
+
+    @Test fun inactiveClaimsDoNotAppearAsCurrentKnowledge() {
+        val entity = SilverEntity("person")
+        val snapshot = SilverSnapshot(
+            1, emptyList(), emptyList(), emptyList(), listOf(entity),
+            listOf(
+                SilverClaim("active", entity.id, "name", "Robin", null, emptyList(), "active"),
+                SilverClaim("old", entity.id, "name", "Robert", null, emptyList(), "superseded"),
+            ),
+            emptyList(),
+        )
+
+        assertEquals(listOf("Robin"), snapshot.claimGroupsFor(entity.id).map { it.value })
+        assertEquals(1, snapshot.activeClaimCount(entity.id))
     }
 }

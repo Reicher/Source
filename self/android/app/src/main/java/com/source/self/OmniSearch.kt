@@ -25,11 +25,11 @@ fun buildSilverOmniCandidates(snapshot: SilverSnapshot): List<OmniSearchCandidat
         }
     }
     snapshot.entities.forEach { entity ->
-        labels.putIfAbsent(entity.id, "Entity ${entity.id.take(8)}")
+        labels.putIfAbsent(entity.id, "Unnamed entity")
     }
 
     val claimsByEntity = mutableMapOf<String, MutableList<SilverClaim>>()
-    snapshot.claims.forEach { claim ->
+    snapshot.claims.filter { it.state == "active" }.forEach { claim ->
         if (claim.subjectEntityId in entityIds) {
             claimsByEntity.getOrPut(claim.subjectEntityId, ::mutableListOf).add(claim)
         }
