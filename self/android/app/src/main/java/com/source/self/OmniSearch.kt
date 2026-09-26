@@ -16,6 +16,46 @@ data class OmniSearchCandidate(
     val searchTerms: List<String> = listOf(title),
 )
 
+fun buildSilverOmniCandidates(snapshot: SilverSnapshot): List<OmniSearchCandidate> {
+    val entityIds = snapshot.entities.mapTo(mutableSetOf(), SilverEntity::id)
+    val labels = mutableMapOf<String, String>()
+    snapshot.claims.forEach { claim ->
+        if (claim.subjectEntityId in entityIds && claim.state == "active" && claim.predicate == "name") {
+            (claim.value as? String)?.let { labels.putIfAbsent(claim.subjectEntityId, it) }
+        }
+    }
+    snapshot.entities.forEach { entity ->
+        labels.putIfAbsent(entity.id, "Entity ${entity.id.take(8)}")
+    }
+
+    val claimsByEntity = mutableMapOf<String, MutableList<SilverClaim>>()
+    snapshot.claims.forEach { claim ->
+        if (claim.subjectEntityId in entityIds) {
+            claimsByEntity.getOrPut(claim.subjectEntityId, ::mutableListOf).add(claim)
+        }
+        claim.objectEntityId?.takeIf { it != claim.subjectEntityId && it in entityIds }?.let { objectId ->
+            claimsByEntity.getOrPut(objectId, ::mutableListOf).add(claim)
+        }
+    }
+
+    return snapshot.entities.map { entity ->
+        val title = labels.getValue(entity.id)
+        val searchTerms = buildList {
+            add(title)
+            claimsByEntity[entity.id].orEmpty().forEach { claim ->
+                val predicate = claim.predicate.replace('_', ' ').replace('-', ' ')
+                val objectId = claim.objectEntityId
+                if (objectId == null) {
+                    add("$predicate ${claim.value ?: ""}".trim())
+                } else {
+                    add("${labels[claim.subjectEntityId].orEmpty()} $predicate ${labels[objectId].orEmpty()}".trim())
+                }
+            }
+        }.filter(String::isNotBlank).distinct()
+        OmniSearchCandidate(OmniResultTier.SILVER, entity.id, title, searchTerms)
+    }
+}
+
 private data class RankedOmniResult(
     val candidate: OmniSearchCandidate,
     val relevance: Int,

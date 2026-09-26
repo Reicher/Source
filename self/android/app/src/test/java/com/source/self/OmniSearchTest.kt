@@ -44,4 +44,30 @@ class OmniSearchTest {
         )).isEmpty())
         assertTrue(searchOmniBox("Josefin", emptyList()).isEmpty())
     }
+
+    @Test fun silverCandidatesIndexClaimsAndBothRelationshipEndpoints() {
+        val martin = SilverEntity("martin")
+        val josefin = SilverEntity("josefin")
+        val snapshot = SilverSnapshot(
+            1,
+            emptyList(),
+            emptyList(),
+            emptyList(),
+            listOf(martin, josefin),
+            listOf(
+                SilverClaim("martin-name", martin.id, "name", "Martin", null, emptyList(), "active"),
+                SilverClaim("josefin-name", josefin.id, "name", "Josefin", null, emptyList(), "active"),
+                SilverClaim("role", josefin.id, "role", "Designer", null, emptyList(), "active"),
+                SilverClaim("relation", martin.id, "works_with", null, josefin.id, emptyList(), "active"),
+            ),
+            emptyList(),
+        )
+        val candidates = buildSilverOmniCandidates(snapshot)
+
+        assertEquals("josefin", searchOmniBox("designer", candidates).single().id)
+        assertEquals(
+            setOf("martin", "josefin"),
+            searchOmniBox("Martin works with Josefin", candidates).map { it.id }.toSet(),
+        )
+    }
 }

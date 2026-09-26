@@ -52,6 +52,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         connected: Boolean,
         omniText: String,
         attachmentCount: Int,
+        omniEnabled: Boolean,
         omniCandidates: List<OmniSearchCandidate>,
         onOmniTextChanged: (String) -> Unit,
         onAttach: () -> Unit,
@@ -75,6 +76,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             addView(omniBox(
                 omniText,
                 attachmentCount,
+                omniEnabled,
                 omniCandidates,
                 onOmniTextChanged,
                 onAttach,
@@ -128,6 +130,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
     private fun omniBox(
         initialText: String,
         attachmentCount: Int,
+        enabled: Boolean,
         candidates: List<OmniSearchCandidate>,
         onTextChanged: (String) -> Unit,
         onAttach: () -> Unit,
@@ -146,6 +149,8 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                 cornerRadius = dp(10).toFloat()
             }
             contentDescription = "Add current input"
+            isEnabled = enabled
+            alpha = if (enabled) 1f else 0.55f
             setOnClickListener { onAdd() }
         }
         val editor = EditText(activity).apply {
@@ -159,11 +164,12 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             isSingleLine = true
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
             imeOptions = EditorInfo.IME_ACTION_DONE
+            isEnabled = enabled
             setPadding(dp(4), 0, dp(6), 0)
             setOnEditorActionListener { _, actionId, event ->
                 val enter = actionId == EditorInfo.IME_ACTION_DONE ||
                     (event?.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN)
-                if (enter) {
+                if (enter && enabled) {
                     onAdd()
                     true
                 } else false
@@ -171,6 +177,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         }
         fun showResults(query: String) {
             results.removeAllViews()
+            if (!enabled) return
             searchOmniBox(query, candidates).forEachIndexed { index, result ->
                 results.addView(omniResult(result, onOpenResult), LinearLayout.LayoutParams(-1, -2).apply {
                     if (index > 0) topMargin = dp(2)
@@ -194,7 +201,9 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                 gravity = Gravity.CENTER
                 contentDescription = "Attach files"
                 isClickable = true
-                isFocusable = true
+                isFocusable = enabled
+                isEnabled = enabled
+                alpha = if (enabled) 1f else 0.55f
                 setOnClickListener { onAttach() }
             }, LinearLayout.LayoutParams(dp(42), dp(42)))
             addView(editor, LinearLayout.LayoutParams(0, dp(46), 1f))
@@ -209,6 +218,8 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             setTextColor(accentColor)
             setPadding(dp(10), dp(7), dp(10), dp(5))
             contentDescription = "Clear attachments"
+            isEnabled = enabled
+            alpha = if (enabled) 1f else 0.55f
             setOnClickListener { onClearAttachments() }
         })
         addView(results, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })

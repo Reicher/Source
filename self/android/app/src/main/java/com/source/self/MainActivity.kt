@@ -33,6 +33,8 @@ class MainActivity : Activity() {
     private var omniText = ""
     private val omniAttachments = mutableListOf<Uri>()
     private var omniAddInProgress = false
+    private var indexedSilverRevision: Long? = null
+    private var cachedSilverCandidates = emptyList<OmniSearchCandidate>()
     private val systemBack = OnBackInvokedCallback { handleBack() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -100,6 +102,7 @@ class MainActivity : Activity() {
     }
 
     private fun pick() {
+        if (omniAddInProgress) return
         startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "*/*"
@@ -171,8 +174,12 @@ class MainActivity : Activity() {
                     connection.syncSoon()
                 }
             } catch (e: Exception) {
+                runCatching { desktop.reconcileBronze(bronze.all()) }
+                runCatching { BackgroundSyncScheduler.enqueueIfPending(this, state, bronze) }
                 runOnUiThread {
                     onFailure()
+                    render()
+                    connection.syncSoon()
                     AlertDialog.Builder(this).setMessage("Could not save: ${e.message}")
                         .setPositiveButton("Close", null).show()
                 }
@@ -243,15 +250,7 @@ class MainActivity : Activity() {
             }
         }
         val omniCandidates = buildList {
-            silverSnapshot.entities.forEach { entity ->
-                add(OmniSearchCandidate(
-                    OmniResultTier.SILVER,
-                    entity.id,
-                    silverSnapshot.label(entity),
-                    listOf(silverSnapshot.label(entity)) +
-                        silverSnapshot.claimsFor(entity.id).map(silverSnapshot::describe),
-                ))
-            }
+            addAll(silverOmniCandidates(silverSnapshot))
             bronze.all().filterNot(BronzeItem::deleted).forEach { item ->
                 add(OmniSearchCandidate(OmniResultTier.BRONZE, item.id, item.title))
             }
@@ -262,12 +261,15 @@ class MainActivity : Activity() {
             connected = connected,
             omniText = omniText,
             attachmentCount = omniAttachments.size,
+            omniEnabled = !omniAddInProgress,
             omniCandidates = omniCandidates,
-            onOmniTextChanged = { omniText = it },
+            onOmniTextChanged = { if (!omniAddInProgress) omniText = it },
             onAttach = ::pick,
             onClearAttachments = {
-                omniAttachments.clear()
-                render()
+                if (!omniAddInProgress) {
+                    clearOmniAttachments()
+                    render()
+                }
             },
             onAdd = ::addOmniInput,
             onOpenResult = ::openOmniResult,
@@ -303,39 +305,75 @@ class MainActivity : Activity() {
         val text = omniText
         val attachments = omniAttachments.toList()
         if (omniAddInProgress || (text.isEmpty() && attachments.isEmpty())) return
+        val progress = OmniAddProgress()
         omniAddInProgress = true
+        render()
         write(
             onSuccess = {
                 omniAddInProgress = false
                 clearOmniBox()
             },
-            onFailure = { omniAddInProgress = false },
+            onFailure = {
+                omniAddInProgress = false
+                omniText = progress.remainingText(text)
+                val addedAttachments = progress.addedAttachments(attachments)
+                omniAttachments.clear()
+                omniAttachments += progress.remainingAttachments(attachments)
+                releaseOmniAttachmentGrants(addedAttachments)
+            },
         ) {
             if (text.isNotEmpty()) {
                 val note = bronze.createNote(text)
+                progress.markNoteAdded()
                 desktop.pin(DESKTOP_OBJECT_BRONZE, note.id)
             }
-            attachments.forEach { uri ->
+            attachments.forEachIndexed { index, uri ->
                 val item = bronze.import(uri)
+                progress.markAttachmentAdded(index)
                 desktop.pin(DESKTOP_OBJECT_BRONZE, item.id)
             }
         }
     }
 
     private fun openOmniResult(result: OmniSearchCandidate) {
+        if (omniAddInProgress || result.tier == OmniResultTier.GOLD) return
+        detailId = null
+        knowledgeSourceId = null
+        entityId = null
         when (result.tier) {
-            OmniResultTier.GOLD -> return
+            OmniResultTier.GOLD -> Unit
             OmniResultTier.SILVER -> entityId = result.id
             OmniResultTier.BRONZE -> detailId = result.id
         }
-        knowledgeSourceId = null
         clearOmniBox()
         render()
     }
 
     private fun clearOmniBox() {
         omniText = ""
+        clearOmniAttachments()
+    }
+
+    private fun clearOmniAttachments() {
+        val removed = omniAttachments.toList()
         omniAttachments.clear()
+        releaseOmniAttachmentGrants(removed)
+    }
+
+    private fun releaseOmniAttachmentGrants(attachments: List<Uri>) {
+        attachments.forEach { uri ->
+            runCatching {
+                contentResolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+        }
+    }
+
+    private fun silverOmniCandidates(snapshot: SilverSnapshot): List<OmniSearchCandidate> {
+        if (indexedSilverRevision != snapshot.revision) {
+            cachedSilverCandidates = buildSilverOmniCandidates(snapshot)
+            indexedSilverRevision = snapshot.revision
+        }
+        return cachedSilverCandidates
     }
 
     private fun desktopItemMenu(ref: DesktopObjectRef) {
@@ -378,6 +416,7 @@ class MainActivity : Activity() {
         onBackInvokedDispatcher.unregisterOnBackInvokedCallback(systemBack)
         connection.stop()
         BackgroundSyncScheduler.enqueueIfPending(this, state, bronze)
+        if (isFinishing && !omniAddInProgress) clearOmniAttachments()
         views.close()
         io.shutdownNow()
         super.onDestroy()
