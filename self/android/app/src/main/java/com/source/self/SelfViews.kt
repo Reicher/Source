@@ -1,19 +1,26 @@
 package com.source.self
 
 import android.app.Activity
+import android.content.Context
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.ImageDecoder
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.text.Editable
 import android.text.InputType
+import android.text.TextUtils
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
+import android.view.accessibility.AccessibilityManager
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
@@ -29,12 +36,23 @@ import java.util.Date
 import java.util.Locale
 
 private const val MAX_TEXT_PREVIEW_CHARS = 64 * 1024
-private val backgroundColor = Color.rgb(14, 20, 21)
-private val surfaceColor = Color.rgb(29, 39, 39)
-private val elevatedColor = Color.rgb(37, 49, 48)
-private val accentColor = Color.rgb(116, 220, 167)
-private val disconnectedColor = Color.rgb(220, 108, 104)
-private val secondaryColor = Color.rgb(189, 201, 195)
+private val backgroundColor = Color.rgb(248, 244, 237)
+private val surfaceColor = Color.rgb(255, 251, 247)
+private val elevatedColor = Color.rgb(241, 237, 247)
+private val inputColor = Color.rgb(235, 243, 239)
+private val selectedColor = Color.rgb(228, 240, 233)
+private val borderColor = Color.rgb(218, 210, 201)
+private val primaryColor = Color.rgb(54, 49, 44)
+private val accentColor = Color.rgb(61, 124, 91)
+private val disconnectedColor = Color.rgb(169, 91, 91)
+private val secondaryColor = Color.rgb(112, 103, 94)
+private val rippleColor = Color.argb(36, 61, 124, 91)
+private val desktopPastels = intArrayOf(
+    Color.rgb(255, 240, 232),
+    Color.rgb(240, 236, 250),
+    Color.rgb(234, 244, 244),
+    Color.rgb(248, 241, 217),
+)
 
 enum class AppSection(val label: String) {
     DESKTOP("Desktop"), SELF("Self"), SOURCE("Source"),
@@ -42,9 +60,15 @@ enum class AppSection(val label: String) {
 
 class SelfViews(private val activity: Activity, private val bronze: BronzeStore) {
     private val thumbnails = ThumbnailLoader(bronze, dp(220), dp(300))
-    private var desktopList: ListView? = null
+    private val scrollPositions = mutableMapOf<String, Int>()
+    private var localStorageList: ListView? = null
+    private var localStorageListSort: LocalStorageSort? = null
 
-    fun close() = thumbnails.close()
+    fun close() {
+        localStorageList = null
+        scrollPositions.clear()
+        thumbnails.close()
+    }
 
     fun app(
         content: View,
@@ -53,6 +77,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         omniText: String,
         attachmentCount: Int,
         omniEnabled: Boolean,
+        restoreOmniFocus: Boolean,
         omniCandidates: List<OmniSearchCandidate>,
         onOmniTextChanged: (String) -> Unit,
         onAttach: () -> Unit,
@@ -63,27 +88,29 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
     ): View {
         activity.window.statusBarColor = backgroundColor
         activity.window.navigationBarColor = backgroundColor
-        activity.window.decorView.systemUiVisibility = 0
+        activity.window.decorView.systemUiVisibility =
+            View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
         return LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(backgroundColor)
-            setPadding(dp(16), dp(14), dp(16), dp(8))
+            setPadding(dp(12), dp(10), dp(12), dp(6))
             setOnApplyWindowInsetsListener { view, insets ->
                 val bars = insets.getInsets(WindowInsets.Type.systemBars())
-                view.setPadding(dp(16) + bars.left, dp(14) + bars.top, dp(16) + bars.right, dp(8) + bars.bottom)
+                view.setPadding(dp(12) + bars.left, dp(10) + bars.top, dp(12) + bars.right, dp(6) + bars.bottom)
                 insets
             }
             addView(omniBox(
                 omniText,
                 attachmentCount,
                 omniEnabled,
+                restoreOmniFocus,
                 omniCandidates,
                 onOmniTextChanged,
                 onAttach,
                 onClearAttachments,
                 onAdd,
                 onOpenResult,
-            ), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
+            ), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
             addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
             addView(bottomNavigation(selected, connected, onSection), LinearLayout.LayoutParams(-1, -2))
         }
@@ -105,24 +132,27 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         silver: SilverSnapshot,
         onOpen: (DesktopObjectRef) -> Unit,
         onItemMenu: (DesktopObjectRef) -> Unit,
+        onMove: (DesktopObjectRef, Int) -> Unit,
+        onUnpin: (DesktopObjectRef) -> Unit,
     ): View = FrameLayout(activity).apply {
         if (refs.isNotEmpty()) {
-            val previousPosition = desktopList?.firstVisiblePosition ?: 0
-            val previousTop = desktopList?.getChildAt(0)?.top ?: 0
-            val list = ListView(activity).apply {
-                divider = null
+            val flow = DesktopFlowLayout(activity).apply {
+                setPadding(0, dp(2), 0, dp(8))
+                setDragActions(onMove, onUnpin)
+                refs.forEach { ref ->
+                    addView(desktopTile(ref, silver, onOpen, onItemMenu, ::startItemDrag))
+                }
+            }
+            val scroll = ScrollView(activity).apply {
                 isVerticalScrollBarEnabled = false
                 clipToPadding = false
-                setPadding(0, dp(4), 0, dp(12))
-                adapter = DesktopAdapter(refs, silver, onOpen, onItemMenu)
-                setSelectionFromTop(previousPosition, previousTop)
+                addView(flow, FrameLayout.LayoutParams(-1, -2))
+                preserveScroll("desktop")
             }
-            desktopList = list
-            addView(list, FrameLayout.LayoutParams(-1, -1))
+            addView(scroll, FrameLayout.LayoutParams(-1, -1))
         } else {
-            desktopList = null
             addView(label("Desktop is empty", 17f).apply {
-                setTextColor(secondaryColor); gravity = Gravity.CENTER; setPadding(0, dp(64), 0, 0)
+                setTextColor(secondaryColor); gravity = Gravity.CENTER; setPadding(0, dp(40), 0, 0)
             }, FrameLayout.LayoutParams(-1, -2))
         }
     }
@@ -131,6 +161,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         initialText: String,
         attachmentCount: Int,
         enabled: Boolean,
+        restoreFocus: Boolean,
         candidates: List<OmniSearchCandidate>,
         onTextChanged: (String) -> Unit,
         onAttach: () -> Unit,
@@ -142,7 +173,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         val results = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
         val add = label("Add", 14f, true).apply {
             gravity = Gravity.CENTER
-            setTextColor(backgroundColor)
+            setTextColor(Color.WHITE)
             setPadding(dp(12), dp(7), dp(12), dp(7))
             background = GradientDrawable().apply {
                 setColor(accentColor)
@@ -158,7 +189,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             setSelection(text.length)
             hint = "Search or add something..."
             setHintTextColor(secondaryColor)
-            setTextColor(Color.WHITE)
+            setTextColor(primaryColor)
             textSize = 16f
             background = null
             isSingleLine = true
@@ -193,9 +224,9 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(6), dp(4), dp(6), dp(4))
             background = GradientDrawable().apply {
-                setColor(elevatedColor)
+                setColor(inputColor)
                 cornerRadius = dp(14).toFloat()
-                setStroke(dp(1), Color.rgb(65, 83, 80))
+                setStroke(dp(1), borderColor)
             }
             addView(label("📎", 20f).apply {
                 gravity = Gravity.CENTER
@@ -233,6 +264,13 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             override fun afterTextChanged(value: Editable?) = Unit
         })
         update(initialText)
+        if (restoreFocus && enabled) editor.post {
+            if (editor.requestFocus()) {
+                editor.setSelection(editor.text.length)
+                (activity.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+                    .showSoftInput(editor, InputMethodManager.SHOW_IMPLICIT)
+            }
+        }
     }
 
     private fun omniResult(
@@ -243,8 +281,9 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         gravity = Gravity.CENTER_VERTICAL
         setPadding(dp(14), dp(9), dp(12), dp(9))
         background = GradientDrawable().apply {
-            setColor(surfaceColor)
+            setColor(elevatedColor)
             cornerRadius = dp(9).toFloat()
+            setStroke(dp(1), borderColor)
         }
         addView(label(result.title, 15f), LinearLayout.LayoutParams(0, -2, 1f))
         addView(label(result.tier.displayName, 12f, true).apply { setTextColor(secondaryColor) })
@@ -254,13 +293,65 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         setOnClickListener { onOpen(result) }
     }
 
-    fun self(localCount: Int): View = screen("Self") { body ->
+    fun self(localCount: Int, onLocalStorage: () -> Unit): View = screen { body ->
         body.addView(card().apply {
-            addView(label("Local storage", 17f, true))
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = dp(56)
+            addView(label("Local storage", 17f, true), LinearLayout.LayoutParams(0, -2, 1f))
             addView(label("$localCount ${if (localCount == 1) "item" else "items"}", 14f).apply {
                 setTextColor(secondaryColor)
             })
+            contentDescription = "Local storage, $localCount ${if (localCount == 1) "item" else "items"}"
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { onLocalStorage() }
         })
+    }
+
+    fun localStorage(
+        items: List<BronzeItem>,
+        sort: LocalStorageSort,
+        onSort: (LocalStorageSort) -> Unit,
+    ): View = LinearLayout(activity).apply {
+        orientation = LinearLayout.VERTICAL
+        val previousPosition = if (localStorageListSort == sort) {
+            localStorageList?.firstVisiblePosition ?: 0
+        } else 0
+        val previousTop = if (localStorageListSort == sort) {
+            localStorageList?.getChildAt(0)?.top ?: 0
+        } else 0
+        val sorting = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+            LocalStorageSort.entries.forEach { option ->
+                addView(label(option.label, 14f, option == sort).apply {
+                    gravity = Gravity.CENTER
+                    minimumWidth = dp(88)
+                    minimumHeight = dp(48)
+                    setTextColor(if (option == sort) accentColor else secondaryColor)
+                    background = GradientDrawable().apply {
+                        setColor(if (option == sort) selectedColor else Color.TRANSPARENT)
+                        cornerRadius = dp(10).toFloat()
+                    }
+                    contentDescription = "Sort by ${option.label.lowercase(Locale.ROOT)}"
+                    isClickable = true
+                    isFocusable = true
+                    setOnClickListener { onSort(option) }
+                })
+            }
+        }
+        addView(sorting, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
+        val list = ListView(activity).apply {
+            divider = ColorDrawable(borderColor)
+            dividerHeight = dp(1)
+            isVerticalScrollBarEnabled = false
+            adapter = LocalStorageAdapter(sortLocalStorageItems(items, sort))
+            setSelectionFromTop(previousPosition, previousTop)
+        }
+        localStorageList = list
+        localStorageListSort = sort
+        addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
     }
 
     fun source(
@@ -269,14 +360,14 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         message: String?,
         silver: SilverSnapshot,
         onEntity: (String) -> Unit,
-    ): View = screen("Source") { body ->
+    ): View = screen { body ->
         val status = when {
             connected -> "Connected"
             disconnectedAt != null -> "Disconnected since ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(disconnectedAt))}"
             else -> "Disconnected"
         }
         body.addView(card().apply {
-            addView(label(status, 18f, true).apply { setTextColor(if (connected) accentColor else Color.WHITE) })
+            addView(label(status, 18f, true).apply { setTextColor(if (connected) accentColor else primaryColor) })
             message?.let { addView(label(it, 14f).apply { setTextColor(secondaryColor) }) }
         })
         val content = LinearLayout(activity).apply {
@@ -284,7 +375,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             if (silver.sources.any { it.stale }) {
                 addView(label("Some knowledge is being updated; previous results remain visible.", 14f).apply {
                     setTextColor(secondaryColor)
-                }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+                }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
             }
             addView(label("Queue (${silver.jobs.queuedCount})", 19f, true), sectionMargin())
             if (silver.jobs.queued.isEmpty()) {
@@ -309,15 +400,19 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                 }
             }
         }
-        body.addView(ScrollView(activity).apply { addView(content) }, LinearLayout.LayoutParams(-1, 0, 1f))
+        body.addView(ScrollView(activity).apply {
+            addView(content)
+            preserveScroll("source")
+        }, LinearLayout.LayoutParams(-1, 0, 1f))
     }
 
     private fun jobRow(job: SourceJob, completed: Boolean): View = LinearLayout(activity).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(12), dp(9), dp(12), dp(9))
+        setPadding(dp(10), dp(7), dp(10), dp(7))
         background = GradientDrawable().apply {
             setColor(surfaceColor)
             cornerRadius = dp(10).toFloat()
+            setStroke(dp(1), borderColor)
         }
         addView(label(job.title, 15f, true))
         val kind = if (job.kind == "silver_extraction") {
@@ -353,7 +448,10 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             "Size: ${item.size} bytes\nAdded: ${date.format(Date(item.created))}\nModified: ${date.format(Date(item.modified))}\nType: ${item.mime}",
             14f,
         ).apply { setTextColor(secondaryColor) }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(20) })
-        root.addView(ScrollView(activity).apply { addView(body) }, LinearLayout.LayoutParams(-1, 0, 1f))
+        root.addView(ScrollView(activity).apply {
+            addView(body)
+            preserveScroll("bronze:${item.id}")
+        }, LinearLayout.LayoutParams(-1, 0, 1f))
         val knowledgeLabel = when {
             knowledge.source?.stale == true -> "Knowledge · Updating · ${knowledge.itemCount} previous items"
             knowledge.source != null -> "Knowledge · ${knowledge.itemCount} extracted items"
@@ -417,7 +515,10 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                 }, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
             }
         }
-        root.addView(ScrollView(activity).apply { addView(body) }, LinearLayout.LayoutParams(-1, 0, 1f))
+        root.addView(ScrollView(activity).apply {
+            addView(body)
+            preserveScroll("knowledge:${item.id}")
+        }, LinearLayout.LayoutParams(-1, 0, 1f))
         return root
     }
 
@@ -444,7 +545,10 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                 body.addView(actionButton(title) { onBronze(sourceId) })
             }
         }
-        root.addView(ScrollView(activity).apply { addView(body) }, LinearLayout.LayoutParams(-1, 0, 1f))
+        root.addView(ScrollView(activity).apply {
+            addView(body)
+            preserveScroll("entity:${entity.id}")
+        }, LinearLayout.LayoutParams(-1, 0, 1f))
         root.addView(actionButton(if (isPinned) "Unpin" else "Pin", onPinToggle))
         return root
     }
@@ -456,6 +560,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             background = GradientDrawable().apply {
                 setColor(surfaceColor)
                 cornerRadius = dp(10).toFloat()
+                setStroke(dp(1), borderColor)
             }
             val summary = LinearLayout(activity).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -547,7 +652,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         return modelId?.let { "$processor · $it@${modelRevision ?: "unknown"}" } ?: processor
     }
 
-    private fun sectionMargin() = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(18); bottomMargin = dp(6) }
+    private fun sectionMargin() = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(14); bottomMargin = dp(4) }
 
     private fun observationTitle(kind: String) = kind.replace('-', ' ').replaceFirstChar(Char::uppercase)
 
@@ -569,39 +674,51 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
     }
 
     fun label(value: String, size: Float = 16f, bold: Boolean = false): TextView = TextView(activity).apply {
-        text = value; textSize = size; setTextColor(Color.WHITE)
+        text = value; textSize = size; setTextColor(primaryColor)
         if (bold) typeface = Typeface.DEFAULT_BOLD
     }
 
     fun actionButton(value: String, action: () -> Unit): Button = Button(activity).apply {
-        text = value; isAllCaps = false; setOnClickListener { action() }
+        text = value
+        isAllCaps = false
+        setTextColor(primaryColor)
+        minimumHeight = dp(48)
+        setPadding(dp(12), dp(4), dp(12), dp(4))
+        background = RippleDrawable(
+            ColorStateList.valueOf(rippleColor),
+            GradientDrawable().apply {
+                setColor(surfaceColor)
+                cornerRadius = dp(10).toFloat()
+                setStroke(dp(1), borderColor)
+            },
+            null,
+        )
+        layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) }
+        setOnClickListener { action() }
     }
 
     fun dp(value: Int) = (value * activity.resources.displayMetrics.density + 0.5f).toInt()
 
-    private fun screen(
-        title: String,
-        content: (LinearLayout) -> Unit,
-    ): View = LinearLayout(activity).apply {
+    private fun ScrollView.preserveScroll(key: String) {
+        setOnScrollChangeListener { _, _, scrollY, _, _ -> scrollPositions[key] = scrollY }
+        val saved = scrollPositions[key] ?: 0
+        post { scrollTo(0, saved) }
+    }
+
+    private fun screen(content: (LinearLayout) -> Unit): View = LinearLayout(activity).apply {
         orientation = LinearLayout.VERTICAL
-        val heading = LinearLayout(activity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            addView(label(title, 27f, true), LinearLayout.LayoutParams(0, -2, 1f))
-        }
-        addView(heading, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) })
         content(this)
     }
 
     private fun bottomNavigation(selected: AppSection, connected: Boolean, onSection: (AppSection) -> Unit) =
         LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(6), 0, 0)
+            setPadding(0, dp(4), 0, 0)
             AppSection.entries.forEach { section ->
                 val tab = FrameLayout(activity).apply {
                     background = GradientDrawable().apply {
-                        setColor(if (section == selected) elevatedColor else backgroundColor)
-                        cornerRadius = dp(12).toFloat()
+                        setColor(if (section == selected) selectedColor else backgroundColor)
+                        cornerRadius = dp(10).toFloat()
                     }
                     contentDescription = if (section == AppSection.SOURCE) {
                         "Source, ${if (connected) "connected" else "disconnected"}"
@@ -612,7 +729,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
                     addView(label(section.label, 14f, true).apply {
-                        setTextColor(if (section == selected) accentColor else Color.WHITE)
+                        setTextColor(if (section == selected) accentColor else secondaryColor)
                     })
                     if (section == AppSection.SOURCE) addView(View(activity).apply {
                         importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
@@ -627,34 +744,38 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                     })
                 }
                 tab.addView(contents, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
-                addView(tab, LinearLayout.LayoutParams(0, dp(58), 1f).apply {
+                addView(tab, LinearLayout.LayoutParams(0, dp(50), 1f).apply {
                     marginStart = dp(2); marginEnd = dp(2)
                 })
             }
         }
 
-    private inner class DesktopAdapter(
-        private val refs: List<DesktopObjectRef>,
-        private val silver: SilverSnapshot,
-        private val onOpen: (DesktopObjectRef) -> Unit,
-        private val onMenu: (DesktopObjectRef) -> Unit,
-    ) : BaseAdapter() {
-        private val columns = maxOf(2, activity.resources.configuration.smallestScreenWidthDp / 220)
+    private inner class LocalStorageAdapter(private val items: List<BronzeItem>) : BaseAdapter() {
+        private val date = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
 
-        override fun getCount(): Int = (refs.size + columns - 1) / columns
+        override fun getCount(): Int = items.size
 
-        override fun getItem(position: Int): Any = refs[position * columns]
+        override fun getItem(position: Int): BronzeItem = items[position]
 
         override fun getItemId(position: Int): Long = position.toLong()
 
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-            val row = (convertView as? DesktopFlowLayout) ?: DesktopFlowLayout(activity)
-            row.removeAllViews()
-            val first = position * columns
-            refs.subList(first, minOf(first + columns, refs.size)).forEach { ref ->
-                row.addView(desktopTile(ref, silver, onOpen, onMenu))
+            val item = getItem(position)
+            return LinearLayout(activity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                minimumHeight = dp(52)
+                setPadding(dp(10), dp(4), dp(10), dp(4))
+                addView(label(item.title, 15f).apply {
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                }, LinearLayout.LayoutParams(0, -2, 1f))
+                addView(label(date.format(Date(item.modified)), 12f).apply {
+                    setTextColor(secondaryColor)
+                    gravity = Gravity.END
+                    maxLines = 1
+                }, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(10) })
             }
-            return row
         }
     }
 
@@ -663,6 +784,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         silver: SilverSnapshot,
         onOpen: (DesktopObjectRef) -> Unit,
         onMenu: (DesktopObjectRef) -> Unit,
+        onStartDrag: (View, DesktopObjectRef) -> Boolean,
     ): View {
         val item = if (ref.objectType == DESKTOP_OBJECT_BRONZE) bronze.get(ref.objectId) else null
         val entity = if (ref.objectType == DESKTOP_OBJECT_SILVER) {
@@ -670,8 +792,12 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         } else null
         return LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(10), dp(10), dp(10), dp(10))
-            background = GradientDrawable().apply { setColor(surfaceColor); cornerRadius = dp(12).toFloat() }
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            background = GradientDrawable().apply {
+                setColor(desktopTileColor(ref))
+                cornerRadius = dp(12).toFloat()
+                setStroke(dp(1), borderColor)
+            }
             contentDescription = item?.title ?: entity?.let(silver::label) ?: "Item"
             when {
                 entity != null -> addView(label(silver.label(entity), 16f, true))
@@ -679,31 +805,52 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                 item.mime.startsWith("image/") -> {
                     val image = ImageView(activity).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
                     addView(image)
-                    thumbnails.bind(item, image)
+                    thumbnails.bind(item, image) { showCompactFilename(this, item.title) }
                 }
                 item.mime == "text/plain" -> {
                     val preview = runCatching { excerptWords(textPreview(item)) }.getOrDefault("")
-                    addView(label(if (preview.isBlank()) "Empty note" else preview, 15f).apply {
-                        maxWidth = dp(220)
-                    })
+                    if (preview.isBlank()) showCompactFilename(this, item.title)
+                    else addView(label(preview, 15f).apply { maxWidth = dp(190) })
                 }
-                else -> {
-                    addView(label(fileIcon(item.mime), 30f))
-                    addView(label(fileType(item.mime), 12f).apply { setTextColor(secondaryColor) })
-                }
+                else -> showCompactFilename(this, item.title)
             }
             if (item != null && item.ackedRevision != item.revision) {
                 addView(label("•", 16f).apply { setTextColor(secondaryColor); gravity = Gravity.END })
             }
             setOnClickListener { onOpen(ref) }
-            setOnLongClickListener { onMenu(ref); true }
+            setOnLongClickListener {
+                val accessibility = activity.getSystemService(Context.ACCESSIBILITY_SERVICE) as AccessibilityManager
+                if (accessibility.isTouchExplorationEnabled) {
+                    onMenu(ref)
+                    true
+                } else {
+                    onStartDrag(this, ref).also { started -> if (!started) onMenu(ref) }
+                }
+            }
+            setOnContextClickListener { onMenu(ref); true }
         }
     }
 
     private fun card() = LinearLayout(activity).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(16), dp(14), dp(16), dp(14))
-        background = GradientDrawable().apply { setColor(surfaceColor); cornerRadius = dp(12).toFloat() }
+        setPadding(dp(12), dp(10), dp(12), dp(10))
+        background = GradientDrawable().apply {
+            setColor(surfaceColor)
+            cornerRadius = dp(12).toFloat()
+            setStroke(dp(1), borderColor)
+        }
+    }
+
+    private fun desktopTileColor(ref: DesktopObjectRef): Int =
+        desktopPastels[(ref.key.hashCode() and Int.MAX_VALUE) % desktopPastels.size]
+
+    private fun showCompactFilename(container: LinearLayout, title: String) {
+        container.removeAllViews()
+        container.addView(label(title, 15f, true).apply {
+            maxWidth = dp(190)
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
+        })
     }
 
     private fun imageView(item: BronzeItem, maxDimension: Int): ImageView? {
@@ -730,13 +877,4 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             return if (count > MAX_TEXT_PREVIEW_CHARS) "$shown\n…" else shown
         }
     }
-
-    private fun fileIcon(mime: String) = when {
-        mime == "application/pdf" -> "▤"
-        mime.startsWith("audio/") -> "♪"
-        mime.startsWith("video/") -> "▶"
-        else -> "◇"
-    }
-
-    private fun fileType(mime: String) = mime.substringAfterLast('/').uppercase(Locale.getDefault()).take(12)
 }
