@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.ImageDecoder
+import android.graphics.Matrix
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
@@ -36,6 +37,7 @@ import java.text.DateFormat
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.roundToInt
 
 private const val MAX_TEXT_PREVIEW_CHARS = 64 * 1024
 private val backgroundColor = Color.rgb(248, 244, 237)
@@ -441,6 +443,8 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         onFullScreen: () -> Unit,
     ): View {
         val root = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
+        val metadata = overlayButton("Metadata") { showMetadata(item) }
+        var previewImage: ImageView? = null
         val content = FrameLayout(activity).apply {
             when {
                 item.mime.startsWith("image/") -> {
@@ -448,12 +452,13 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                     if (image == null) {
                         addView(unavailablePreview(), FrameLayout.LayoutParams(-1, -1))
                     } else {
-                        image.scaleType = ImageView.ScaleType.FIT_CENTER
+                        image.scaleType = ImageView.ScaleType.MATRIX
                         image.contentDescription = "Open image full screen"
                         image.isClickable = true
                         image.isFocusable = true
                         image.setOnClickListener { onFullScreen() }
                         addView(image, FrameLayout.LayoutParams(-1, -1))
+                        previewImage = image
                     }
                 }
                 item.mime == "text/plain" -> {
@@ -470,11 +475,13 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                 }
                 else -> addView(unavailablePreview(), FrameLayout.LayoutParams(-1, -1))
             }
-            addView(overlayButton("Metadata") { showMetadata(item) },
+            addView(metadata,
                 FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply {
-                    val topInset = if (item.mime.startsWith("image/")) dp(32) else dp(8)
-                    setMargins(0, topInset, dp(8), 0)
+                    setMargins(0, dp(8), dp(8), 0)
                 })
+        }
+        previewImage?.addOnLayoutChangeListener { image, _, _, _, _, _, _, _, _ ->
+            positionTopCenteredPreview(content, image as ImageView, metadata)
         }
         root.addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
         val knowledgeLabel = when {
@@ -495,8 +502,12 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         return root
     }
 
-    fun fullScreenImage(item: BronzeItem): View = FrameLayout(activity).apply {
+    fun fullScreenImage(item: BronzeItem, onExit: () -> Unit): View = FrameLayout(activity).apply {
         setBackgroundColor(Color.BLACK)
+        contentDescription = "Close full-screen image"
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { onExit() }
         activity.window.statusBarColor = Color.BLACK
         activity.window.navigationBarColor = Color.BLACK
         activity.window.decorView.systemUiVisibility = 0
@@ -757,6 +768,31 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         setColor(Color.argb(224, 255, 251, 247))
         cornerRadius = dp(10).toFloat()
         setStroke(dp(1), Color.argb(150, 218, 210, 201))
+    }
+
+    private fun positionTopCenteredPreview(container: FrameLayout, image: ImageView, overlay: View) {
+        val drawable = image.drawable ?: return
+        val viewportWidth = image.width - image.paddingLeft - image.paddingRight
+        val viewportHeight = image.height - image.paddingTop - image.paddingBottom
+        if (drawable.intrinsicWidth <= 0 || drawable.intrinsicHeight <= 0 ||
+            viewportWidth <= 0 || viewportHeight <= 0
+        ) return
+        val layout = topCenteredImageLayout(
+            drawable.intrinsicWidth,
+            drawable.intrinsicHeight,
+            viewportWidth,
+            viewportHeight,
+        )
+        image.imageMatrix = Matrix().apply {
+            setScale(layout.scale, layout.scale)
+            postTranslate(image.paddingLeft + layout.left, image.paddingTop + layout.top)
+        }
+        val actualRight = image.left + image.paddingLeft + layout.right
+        (overlay.layoutParams as? FrameLayout.LayoutParams)?.let { params ->
+            params.topMargin = image.top + image.paddingTop + layout.top.roundToInt() + dp(8)
+            params.marginEnd = (container.width - actualRight).roundToInt() + dp(8)
+            overlay.layoutParams = params
+        }
     }
 
     private fun showMetadata(item: BronzeItem) {
