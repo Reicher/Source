@@ -231,7 +231,10 @@ class MainActivity : Activity() {
             ?.takeUnless { it.deleted || !it.mime.startsWith("image/") }
         if (fullScreenImageId != null && fullScreenImage == null) fullScreenImageId = null
         if (fullScreenImage != null) {
-            setContentView(views.fullScreenImage(fullScreenImage))
+            setContentView(views.fullScreenImage(fullScreenImage) {
+                fullScreenImageId = null
+                render()
+            })
             return
         }
         val selectedEntity = entityId?.let { id -> silverSnapshot.entities.firstOrNull { it.id == id } }

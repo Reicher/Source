@@ -448,7 +448,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                     if (image == null) {
                         addView(unavailablePreview(), FrameLayout.LayoutParams(-1, -1))
                     } else {
-                        image.scaleType = ImageView.ScaleType.FIT_CENTER
+                        image.scaleType = ImageView.ScaleType.FIT_START
                         image.contentDescription = "Open image full screen"
                         image.isClickable = true
                         image.isFocusable = true
@@ -472,8 +472,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             }
             addView(overlayButton("Metadata") { showMetadata(item) },
                 FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply {
-                    val topInset = if (item.mime.startsWith("image/")) dp(32) else dp(8)
-                    setMargins(0, topInset, dp(8), 0)
+                    setMargins(0, dp(8), dp(8), 0)
                 })
         }
         root.addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -495,8 +494,12 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         return root
     }
 
-    fun fullScreenImage(item: BronzeItem): View = FrameLayout(activity).apply {
+    fun fullScreenImage(item: BronzeItem, onExit: () -> Unit): View = FrameLayout(activity).apply {
         setBackgroundColor(Color.BLACK)
+        contentDescription = "Close full-screen image"
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { onExit() }
         activity.window.statusBarColor = Color.BLACK
         activity.window.navigationBarColor = Color.BLACK
         activity.window.decorView.systemUiVisibility = 0
