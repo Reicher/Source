@@ -470,12 +470,10 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                 }
                 else -> addView(unavailablePreview(), FrameLayout.LayoutParams(-1, -1))
             }
-            addView(syncIndicator(item), FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START).apply {
-                setMargins(dp(8), dp(8), 0, 0)
-            })
             addView(overlayButton("Metadata") { showMetadata(item) },
                 FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply {
-                    setMargins(0, dp(8), dp(8), 0)
+                    val topInset = if (item.mime.startsWith("image/")) dp(32) else dp(8)
+                    setMargins(0, topInset, dp(8), 0)
                 })
         }
         root.addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -745,12 +743,6 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
     private fun unavailablePreview(): TextView = label("Preview unavailable", 15f).apply {
         setTextColor(secondaryColor)
         gravity = Gravity.CENTER
-    }
-
-    private fun syncIndicator(item: BronzeItem): TextView = label(syncStatus(item), 12f, true).apply {
-        setTextColor(secondaryColor)
-        setPadding(dp(9), dp(6), dp(9), dp(6))
-        background = overlayBackground()
     }
 
     private fun overlayButton(value: String, action: () -> Unit): TextView = label(value, 12f, true).apply {
