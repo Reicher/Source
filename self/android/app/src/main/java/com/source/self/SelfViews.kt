@@ -88,7 +88,6 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         onOpenResult: (OmniSearchCandidate) -> Unit,
         onSection: (AppSection) -> Unit,
     ): View {
-        activity.window.insetsController?.show(WindowInsets.Type.systemBars())
         activity.window.statusBarColor = backgroundColor
         activity.window.navigationBarColor = backgroundColor
         activity.window.decorView.systemUiVisibility =
@@ -116,6 +115,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             ), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
             addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
             addView(bottomNavigation(selected, connected, onSection), LinearLayout.LayoutParams(-1, -2))
+            post { windowInsetsController?.show(WindowInsets.Type.systemBars()) }
         }
     }
 
@@ -444,7 +444,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         val content = FrameLayout(activity).apply {
             when {
                 item.mime.startsWith("image/") -> {
-                    val image = imageView(item, 2400)
+                    val image = imageView(item, displayMaxDimension())
                     if (image == null) {
                         addView(unavailablePreview(), FrameLayout.LayoutParams(-1, -1))
                     } else {
@@ -502,11 +502,13 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         activity.window.statusBarColor = Color.BLACK
         activity.window.navigationBarColor = Color.BLACK
         activity.window.decorView.systemUiVisibility = 0
-        activity.window.insetsController?.apply {
-            systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            hide(WindowInsets.Type.systemBars())
+        post {
+            windowInsetsController?.apply {
+                systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                hide(WindowInsets.Type.systemBars())
+            }
         }
-        imageView(item, 4096)?.let { image ->
+        imageView(item, displayMaxDimension())?.let { image ->
             image.scaleType = ImageView.ScaleType.FIT_CENTER
             image.contentDescription = "Full-screen image"
             addView(image, FrameLayout.LayoutParams(-1, -1))
@@ -549,6 +551,15 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                 }
                 body.addView(entityRow(entity, silver, sourceClaimCount) { onEntity(entity.id) })
             }
+        }
+        val findings = knowledge.unresolvedFindings()
+        findings.forEach { finding ->
+            body.addView(findingRow(finding), LinearLayout.LayoutParams(-1, -2).apply {
+                bottomMargin = dp(3)
+            })
+        }
+        if (knowledge.source != null && knowledge.entities.isEmpty() && findings.isEmpty()) {
+            body.addView(label("No knowledge", 15f).apply { setTextColor(secondaryColor) })
         }
         root.addView(ScrollView(activity).apply {
             addView(body)
@@ -669,6 +680,51 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         isClickable = true
         isFocusable = true
         setOnClickListener { action() }
+    }
+
+    private fun findingRow(finding: SilverFinding): View = LinearLayout(activity).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(12), dp(8), dp(12), dp(8))
+        background = GradientDrawable().apply {
+            setColor(surfaceColor)
+            cornerRadius = dp(8).toFloat()
+        }
+        val summary = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            val statement = LinearLayout(activity).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(label(finding.predicate, 12f, true).apply { setTextColor(secondaryColor) })
+                addView(LinearLayout(activity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(label(finding.value, 15f))
+                    if (finding.count > 1) addView(label("×${finding.count}", 13f, true).apply {
+                        setTextColor(accentColor)
+                    }, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) })
+                })
+            }
+            addView(statement, LinearLayout.LayoutParams(0, -2, 1f))
+            finding.confidence?.let { confidence ->
+                addView(label(confidenceText(confidence), 14f, true).apply {
+                    gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                }, LinearLayout.LayoutParams(dp(64), -1).apply { marginStart = dp(12) })
+            }
+        }
+        addView(summary)
+        finding.sourceExcerpt?.let { excerpt ->
+            addView(label(excerpt, 13f).apply {
+                setTextColor(secondaryColor)
+                maxLines = 3
+                ellipsize = TextUtils.TruncateAt.END
+                setPadding(0, dp(4), 0, 0)
+            })
+        }
+        contentDescription = buildString {
+            append(finding.predicate).append(", ").append(finding.value)
+            finding.confidence?.let { append(", ").append(confidenceText(it)) }
+            if (finding.count > 1) append(", ").append(finding.count).append(" findings")
+        }
     }
 
     private fun sourceRow(title: String?, action: () -> Unit): View = label(
@@ -965,11 +1021,15 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         val file = bronze.content(item)
         val bitmap = runCatching {
             ImageDecoder.decodeBitmap(ImageDecoder.createSource(file)) { decoder, info, _ ->
-                val sample = maxOf(1, maxOf(info.size.width, info.size.height) / maxDimension)
+                val sample = imageSampleSize(info.size.width, info.size.height, maxDimension)
                 decoder.setTargetSampleSize(sample)
             }
         }.getOrNull() ?: return null
         return ImageView(activity).apply { setImageBitmap(bitmap); adjustViewBounds = true }
+    }
+
+    private fun displayMaxDimension(): Int = activity.resources.displayMetrics.run {
+        maxOf(widthPixels, heightPixels).coerceAtLeast(1)
     }
 
     private fun textPreview(item: BronzeItem): String {
