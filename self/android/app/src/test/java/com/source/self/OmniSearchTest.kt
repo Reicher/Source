@@ -70,4 +70,14 @@ class OmniSearchTest {
             searchOmniBox("Martin works with Josefin", candidates).map { it.id }.toSet(),
         )
     }
+
+    @Test fun unnamedSilverCandidateDoesNotExposeItsId() {
+        val snapshot = SilverSnapshot(
+            1, emptyList(), emptyList(), emptyList(),
+            listOf(SilverEntity("75231476-5e20-4a02-8b16-deadbeefcafe")),
+            emptyList(), emptyList(),
+        )
+
+        assertEquals("Unnamed entity", buildSilverOmniCandidates(snapshot).single().title)
+    }
 }

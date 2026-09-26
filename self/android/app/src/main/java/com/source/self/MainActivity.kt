@@ -38,6 +38,7 @@ class MainActivity : Activity() {
     private var detailId: String? = null
     private var knowledgeSourceId: String? = null
     private var entityId: String? = null
+    private var fullScreenImageId: String? = null
     private var section = AppSection.DESKTOP
     private var localStorageOpen = false
     private var localStorageSort = LocalStorageSort.NAME
@@ -62,6 +63,7 @@ class MainActivity : Activity() {
         detailId = savedInstanceState?.getString("detail")
         knowledgeSourceId = savedInstanceState?.getString("knowledge_source")
         entityId = savedInstanceState?.getString("entity")
+        fullScreenImageId = savedInstanceState?.getString("full_screen_image")
         section = savedInstanceState?.getString("section")?.let {
             runCatching { AppSection.valueOf(it) }.getOrNull()
         } ?: AppSection.DESKTOP
@@ -112,6 +114,7 @@ class MainActivity : Activity() {
         outState.putString("detail", detailId)
         outState.putString("knowledge_source", knowledgeSourceId)
         outState.putString("entity", entityId)
+        outState.putString("full_screen_image", fullScreenImageId)
         outState.putString("section", section.name)
         outState.putBoolean("local_storage_open", localStorageOpen)
         outState.putString("local_storage_sort", localStorageSort.name)
@@ -224,6 +227,13 @@ class MainActivity : Activity() {
         val selected = detailId?.let(bronze::get)?.takeUnless { it.deleted }
         if (detailId != null && selected == null) detailId = null
         val silverSnapshot = silver.snapshot()
+        val fullScreenImage = fullScreenImageId?.let(bronze::get)
+            ?.takeUnless { it.deleted || !it.mime.startsWith("image/") }
+        if (fullScreenImageId != null && fullScreenImage == null) fullScreenImageId = null
+        if (fullScreenImage != null) {
+            setContentView(views.fullScreenImage(fullScreenImage))
+            return
+        }
         val selectedEntity = entityId?.let { id -> silverSnapshot.entities.firstOrNull { it.id == id } }
         if (entityId != null && selectedEntity == null) entityId = null
         val knowledgeItem = knowledgeSourceId?.let(bronze::get)?.takeUnless { it.deleted }
@@ -243,9 +253,13 @@ class MainActivity : Activity() {
                     entityId = null
                     render()
                 },
+                onEntity = { id ->
+                    entityId = id
+                    render()
+                },
             )
         } else if (knowledgeItem != null) {
-            views.silverDetail(knowledgeItem, silverSnapshot.forBronze(knowledgeItem.id)) { id ->
+            views.silverDetail(knowledgeItem, silverSnapshot.forBronze(knowledgeItem.id), silverSnapshot) { id ->
                 entityId = id
                 render()
             }
@@ -264,6 +278,10 @@ class MainActivity : Activity() {
                     render()
                 },
                 onDelete = { confirmDelete(selected) },
+                onFullScreen = {
+                    fullScreenImageId = selected.id
+                    render()
+                },
             )
         } else when (section) {
             AppSection.DESKTOP -> views.desktop(
@@ -456,6 +474,7 @@ class MainActivity : Activity() {
 
     private fun handleBack() {
         when {
+            fullScreenImageId != null -> { fullScreenImageId = null; render() }
             entityId != null -> { entityId = null; render() }
             knowledgeSourceId != null -> { knowledgeSourceId = null; render() }
             detailId != null -> { detailId = null; render() }

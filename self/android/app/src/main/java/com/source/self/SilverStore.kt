@@ -62,6 +62,7 @@ data class SilverClaimGroup(
     val value: String,
     val claims: List<SilverClaim>,
     val confidence: Double?,
+    val linkedEntityId: String?,
 )
 
 data class SilverProcessing(
@@ -203,11 +204,13 @@ data class SilverSnapshot(
     fun label(entity: SilverEntity): String = claims.asSequence()
         .filter { it.subjectEntityId == entity.id && it.state == "active" && it.predicate == "name" }
         .mapNotNull { it.value as? String }
-        .firstOrNull() ?: "Entity ${entity.id.take(8)}"
+        .firstOrNull() ?: "Unnamed entity"
 
     fun claimsFor(entityId: String): List<SilverClaim> = claims.filter {
         it.subjectEntityId == entityId || it.objectEntityId == entityId
     }
+
+    fun activeClaimCount(entityId: String): Int = claimsFor(entityId).count { it.state == "active" }
 
     /** The first supporting observation is the candidate that produced the claim. */
     fun confidence(claim: SilverClaim): Double? = claim.supportingObservationIds.asSequence()
@@ -224,6 +227,7 @@ data class SilverSnapshot(
         )
 
         return claimsFor(entityId)
+            .filter { it.state == "active" }
             .groupBy { claim ->
                 ClaimKey(
                     claim.subjectEntityId,
@@ -242,9 +246,10 @@ data class SilverSnapshot(
                 val claim = sortedClaims.first()
                 SilverClaimGroup(
                     claim.predicate,
-                    claimValue(claim, entityId),
+                    claimValue(claim),
                     sortedClaims,
                     confidence(claim),
+                    linkedEntityId(claim, entityId),
                 )
             }
             .sortedWith(
@@ -255,11 +260,10 @@ data class SilverSnapshot(
             )
     }
 
-    private fun claimValue(claim: SilverClaim, viewedEntityId: String): String {
+    private fun claimValue(claim: SilverClaim): String {
         val objectId = claim.objectEntityId
         if (objectId != null) {
             val objectLabel = entities.firstOrNull { it.id == objectId }?.let(::label) ?: "Unknown"
-            if (claim.subjectEntityId == viewedEntityId) return objectLabel
             val subjectLabel = entities.firstOrNull { it.id == claim.subjectEntityId }?.let(::label) ?: "Unknown"
             return "$subjectLabel → $objectLabel"
         }
@@ -268,6 +272,15 @@ data class SilverSnapshot(
             is String -> value
             else -> value.toString()
         }
+    }
+
+    private fun linkedEntityId(claim: SilverClaim, viewedEntityId: String): String? {
+        val linkedId = when (viewedEntityId) {
+            claim.subjectEntityId -> claim.objectEntityId
+            claim.objectEntityId -> claim.subjectEntityId
+            else -> null
+        }
+        return linkedId?.takeIf { id -> entities.any { it.id == id } }
     }
 
     fun describe(claim: SilverClaim): String {
@@ -284,7 +297,10 @@ data class SilverSnapshot(
     }
 
     fun supportingBronze(entityId: String): List<String> {
-        val observationIds = claimsFor(entityId).flatMap { it.supportingObservationIds }.toSet()
+        val observationIds = claimsFor(entityId)
+            .filter { it.state == "active" }
+            .flatMap { it.supportingObservationIds }
+            .toSet()
         val evidenceIds = observations.filter { it.id in observationIds }.flatMap { it.evidenceIds }.toSet()
         return evidence.filter { it.id in evidenceIds }.map { it.bronzeSourceId }.distinct()
     }
