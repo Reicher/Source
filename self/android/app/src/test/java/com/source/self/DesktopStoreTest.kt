@@ -6,6 +6,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class DesktopStoreTest {
+    private fun ref(id: String, order: Int) = DesktopObjectRef(DESKTOP_OBJECT_BRONZE, id, order)
+
     @Test fun legacyGroupsAreDiscardedFromPersistedDesktopState() {
         val legacy = JSONObject(
             """{
@@ -33,5 +35,18 @@ class DesktopStoreTest {
             assertFalse(items.getJSONObject(0).has("group_id"))
             assertFalse(items.getJSONObject(1).has("group_id"))
         }
+    }
+
+    @Test fun draggedItemCanMoveToAnyDesktopPosition() {
+        val items = listOf(ref("first", 0), ref("second", 1), ref("third", 2), ref("fourth", 3))
+
+        assertEquals(
+            listOf("first", "third", "fourth", "second"),
+            reorderDesktopItems(items, "bronze:second", 3).map { it.objectId },
+        )
+        assertEquals(
+            listOf(0, 1, 2, 3),
+            reorderDesktopItems(items, "bronze:second", 3).map { it.order },
+        )
     }
 }

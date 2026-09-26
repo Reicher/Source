@@ -101,11 +101,12 @@ class DesktopStore(context: Context) {
         val items = document.items.sortedBy { it.order }.toMutableList()
         val from = items.indexOfFirst { it.objectType == objectType && it.objectId == objectId }
         if (from < 0) return
-        val to = (from + offset).coerceIn(0, items.lastIndex)
-        if (from == to) return
-        val moved = items.removeAt(from)
-        items.add(to, moved)
-        replace(document.copy(items = normalized(items)))
+        moveTo(objectType, objectId, from + offset)
+    }
+
+    @Synchronized fun moveTo(objectType: String, objectId: String, position: Int) {
+        val updated = reorderDesktopItems(document.items, "$objectType:$objectId", position)
+        if (updated != document.items.sortedBy { it.order }) replace(document.copy(items = updated))
     }
 
     private fun normalized(items: List<DesktopObjectRef>) =
@@ -136,6 +137,19 @@ class DesktopStore(context: Context) {
             throw e
         }
     }
+}
+
+internal fun reorderDesktopItems(
+    items: List<DesktopObjectRef>,
+    key: String,
+    position: Int,
+): List<DesktopObjectRef> {
+    val ordered = items.sortedBy { it.order }.toMutableList()
+    val from = ordered.indexOfFirst { it.key == key }
+    if (from < 0) return ordered.mapIndexed { index, item -> item.copy(order = index) }
+    val moved = ordered.removeAt(from)
+    ordered.add(position.coerceIn(0, ordered.size), moved)
+    return ordered.mapIndexed { index, item -> item.copy(order = index) }
 }
 
 internal fun desktopDocumentFromJson(json: JSONObject): DesktopDocument {

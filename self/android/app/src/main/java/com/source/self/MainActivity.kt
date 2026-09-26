@@ -5,6 +5,8 @@ import android.app.AlertDialog
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.view.WindowInsets
+import android.widget.EditText
 import android.window.OnBackInvokedCallback
 import android.window.OnBackInvokedDispatcher
 import com.google.zxing.integration.android.IntentIntegrator
@@ -12,6 +14,13 @@ import org.json.JSONObject
 import java.util.concurrent.Executors
 
 private const val PICK_FILE = 1001
+
+internal fun sourcePresentationChanged(
+    connected: Boolean,
+    error: String?,
+    nextConnected: Boolean,
+    nextError: String?,
+): Boolean = connected != nextConnected || error != nextError
 
 class MainActivity : Activity() {
     private lateinit var state: PairingState
@@ -30,9 +39,12 @@ class MainActivity : Activity() {
     private var knowledgeSourceId: String? = null
     private var entityId: String? = null
     private var section = AppSection.DESKTOP
+    private var localStorageOpen = false
+    private var localStorageSort = LocalStorageSort.NAME
     private var omniText = ""
     private val omniAttachments = mutableListOf<Uri>()
     private var omniAddInProgress = false
+    private var pendingSourceDataRefresh = false
     private var indexedSilverRevision: Long? = null
     private var cachedSilverCandidates = emptyList<OmniSearchCandidate>()
     private val systemBack = OnBackInvokedCallback { handleBack() }
@@ -53,20 +65,33 @@ class MainActivity : Activity() {
         section = savedInstanceState?.getString("section")?.let {
             runCatching { AppSection.valueOf(it) }.getOrNull()
         } ?: AppSection.DESKTOP
+        localStorageOpen = savedInstanceState?.getBoolean("local_storage_open") ?: false
+        localStorageSort = savedInstanceState?.getString("local_storage_sort")?.let {
+            runCatching { LocalStorageSort.valueOf(it) }.getOrNull()
+        } ?: LocalStorageSort.NAME
         omniText = savedInstanceState?.getString("omni_text").orEmpty()
         savedInstanceState?.getStringArrayList("omni_attachments")
             ?.mapTo(omniAttachments, Uri::parse)
         disconnectedAt = savedInstanceState?.getLong("disconnected_at")?.takeIf { it > 0 }
         connection = SourceConnection(this, state, bronze, silver, { isConnected, message, rescan ->
+            val presentationChanged = sourcePresentationChanged(
+                connected,
+                error,
+                isConnected,
+                message,
+            )
             if (connected && !isConnected && disconnectedAt == null) disconnectedAt = System.currentTimeMillis()
             if (isConnected) disconnectedAt = null
             connected = isConnected
             error = message
-            render()
+            val dataChanged = pendingSourceDataRefresh
+            pendingSourceDataRefresh = false
+            if (presentationChanged || dataChanged || rescan) render(preserveInteraction = true)
             if (rescan) startScan()
         }, {
             desktop.reconcileBronze(bronze.all())
             desktop.reconcileSilver(silver.snapshot().entities)
+            pendingSourceDataRefresh = true
         })
         try {
             state.ensureSelfIdentity()
@@ -88,6 +113,8 @@ class MainActivity : Activity() {
         outState.putString("knowledge_source", knowledgeSourceId)
         outState.putString("entity", entityId)
         outState.putString("section", section.name)
+        outState.putBoolean("local_storage_open", localStorageOpen)
+        outState.putString("local_storage_sort", localStorageSort.name)
         outState.putString("omni_text", omniText)
         outState.putStringArrayList("omni_attachments", ArrayList(omniAttachments.map(Uri::toString)))
         disconnectedAt?.let { outState.putLong("disconnected_at", it) }
@@ -187,11 +214,13 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun render() {
+    private fun render(preserveInteraction: Boolean = false) {
         if (!identityReady || !state.isPaired()) {
             renderPairing()
             return
         }
+        val restoreOmniFocus = preserveInteraction && currentFocus is EditText &&
+            window.decorView.rootWindowInsets?.isVisible(WindowInsets.Type.ime()) == true
         val selected = detailId?.let(bronze::get)?.takeUnless { it.deleted }
         if (detailId != null && selected == null) detailId = null
         val silverSnapshot = silver.snapshot()
@@ -242,8 +271,27 @@ class MainActivity : Activity() {
                 silverSnapshot,
                 onOpen = ::openDesktopItem,
                 onItemMenu = ::desktopItemMenu,
+                onMove = { ref, position ->
+                    desktop.moveTo(ref.objectType, ref.objectId, position)
+                    render()
+                },
+                onUnpin = { ref ->
+                    desktop.unpin(ref.objectType, ref.objectId)
+                    render()
+                },
             )
-            AppSection.SELF -> views.self(bronze.all().count { !it.deleted })
+            AppSection.SELF -> {
+                val localItems = bronze.all().filterNot(BronzeItem::deleted)
+                if (localStorageOpen) views.localStorage(localItems, localStorageSort) { sort ->
+                    if (sort != localStorageSort) {
+                        localStorageSort = sort
+                        render()
+                    }
+                } else views.self(localItems.size) {
+                    localStorageOpen = true
+                    render()
+                }
+            }
             AppSection.SOURCE -> views.source(connected, disconnectedAt, error, silverSnapshot) { id ->
                 entityId = id
                 render()
@@ -262,6 +310,7 @@ class MainActivity : Activity() {
             omniText = omniText,
             attachmentCount = omniAttachments.size,
             omniEnabled = !omniAddInProgress,
+            restoreOmniFocus = restoreOmniFocus,
             omniCandidates = omniCandidates,
             onOmniTextChanged = { if (!omniAddInProgress) omniText = it },
             onAttach = ::pick,
@@ -278,6 +327,7 @@ class MainActivity : Activity() {
                 detailId = null
                 knowledgeSourceId = null
                 entityId = null
+                localStorageOpen = false
                 render()
             },
         ))
@@ -293,6 +343,7 @@ class MainActivity : Activity() {
     }
 
     private fun openDesktopItem(ref: DesktopObjectRef) {
+        localStorageOpen = false
         when (ref.objectType) {
             DESKTOP_OBJECT_BRONZE -> detailId = ref.objectId
             DESKTOP_OBJECT_SILVER -> entityId = ref.objectId
@@ -340,6 +391,7 @@ class MainActivity : Activity() {
         detailId = null
         knowledgeSourceId = null
         entityId = null
+        localStorageOpen = false
         when (result.tier) {
             OmniResultTier.GOLD -> Unit
             OmniResultTier.SILVER -> entityId = result.id
@@ -407,6 +459,7 @@ class MainActivity : Activity() {
             entityId != null -> { entityId = null; render() }
             knowledgeSourceId != null -> { knowledgeSourceId = null; render() }
             detailId != null -> { detailId = null; render() }
+            localStorageOpen -> { localStorageOpen = false; render() }
             section != AppSection.DESKTOP -> { section = AppSection.DESKTOP; render() }
             else -> finish()
         }
