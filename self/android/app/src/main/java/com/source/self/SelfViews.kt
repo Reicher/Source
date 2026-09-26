@@ -5,12 +5,18 @@ import android.graphics.Color
 import android.graphics.ImageDecoder
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.text.Editable
+import android.text.InputType
+import android.text.TextWatcher
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
+import android.view.inputmethod.EditorInfo
 import android.widget.BaseAdapter
 import android.widget.Button
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -44,6 +50,14 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         content: View,
         selected: AppSection,
         connected: Boolean,
+        omniText: String,
+        attachmentCount: Int,
+        omniCandidates: List<OmniSearchCandidate>,
+        onOmniTextChanged: (String) -> Unit,
+        onAttach: () -> Unit,
+        onClearAttachments: () -> Unit,
+        onAdd: () -> Unit,
+        onOpenResult: (OmniSearchCandidate) -> Unit,
         onSection: (AppSection) -> Unit,
     ): View {
         activity.window.statusBarColor = backgroundColor
@@ -58,6 +72,16 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                 view.setPadding(dp(16) + bars.left, dp(14) + bars.top, dp(16) + bars.right, dp(8) + bars.bottom)
                 insets
             }
+            addView(omniBox(
+                omniText,
+                attachmentCount,
+                omniCandidates,
+                onOmniTextChanged,
+                onAttach,
+                onClearAttachments,
+                onAdd,
+                onOpenResult,
+            ), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
             addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
             addView(bottomNavigation(selected, connected, onSection), LinearLayout.LayoutParams(-1, -2))
         }
@@ -77,7 +101,6 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
     fun desktop(
         refs: List<DesktopObjectRef>,
         silver: SilverSnapshot,
-        onAdd: () -> Unit,
         onOpen: (DesktopObjectRef) -> Unit,
         onItemMenu: (DesktopObjectRef) -> Unit,
     ): View = FrameLayout(activity).apply {
@@ -88,7 +111,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                 divider = null
                 isVerticalScrollBarEnabled = false
                 clipToPadding = false
-                setPadding(0, dp(4), 0, dp(88))
+                setPadding(0, dp(4), 0, dp(12))
                 adapter = DesktopAdapter(refs, silver, onOpen, onItemMenu)
                 setSelectionFromTop(previousPosition, previousTop)
             }
@@ -100,20 +123,124 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                 setTextColor(secondaryColor); gravity = Gravity.CENTER; setPadding(0, dp(64), 0, 0)
             }, FrameLayout.LayoutParams(-1, -2))
         }
-        addView(label("+", 36f).apply {
+    }
+
+    private fun omniBox(
+        initialText: String,
+        attachmentCount: Int,
+        candidates: List<OmniSearchCandidate>,
+        onTextChanged: (String) -> Unit,
+        onAttach: () -> Unit,
+        onClearAttachments: () -> Unit,
+        onAdd: () -> Unit,
+        onOpenResult: (OmniSearchCandidate) -> Unit,
+    ): View = LinearLayout(activity).apply {
+        orientation = LinearLayout.VERTICAL
+        val results = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
+        val add = label("Add", 14f, true).apply {
             gravity = Gravity.CENTER
             setTextColor(backgroundColor)
-            contentDescription = "Add"
+            setPadding(dp(12), dp(7), dp(12), dp(7))
             background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
                 setColor(accentColor)
+                cornerRadius = dp(10).toFloat()
             }
-            elevation = dp(6).toFloat()
+            contentDescription = "Add current input"
             setOnClickListener { onAdd() }
-        }, FrameLayout.LayoutParams(dp(64), dp(64), Gravity.END or Gravity.BOTTOM).apply {
-            marginEnd = dp(12)
-            bottomMargin = dp(16)
+        }
+        val editor = EditText(activity).apply {
+            setText(initialText)
+            setSelection(text.length)
+            hint = "Search or add something..."
+            setHintTextColor(secondaryColor)
+            setTextColor(Color.WHITE)
+            textSize = 16f
+            background = null
+            isSingleLine = true
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            imeOptions = EditorInfo.IME_ACTION_DONE
+            setPadding(dp(4), 0, dp(6), 0)
+            setOnEditorActionListener { _, actionId, event ->
+                val enter = actionId == EditorInfo.IME_ACTION_DONE ||
+                    (event?.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN)
+                if (enter) {
+                    onAdd()
+                    true
+                } else false
+            }
+        }
+        fun showResults(query: String) {
+            results.removeAllViews()
+            searchOmniBox(query, candidates).forEachIndexed { index, result ->
+                results.addView(omniResult(result, onOpenResult), LinearLayout.LayoutParams(-1, -2).apply {
+                    if (index > 0) topMargin = dp(2)
+                })
+            }
+        }
+        fun update(value: String) {
+            add.visibility = if (value.isNotEmpty() || attachmentCount > 0) View.VISIBLE else View.GONE
+            showResults(value)
+        }
+        val input = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(6), dp(4), dp(6), dp(4))
+            background = GradientDrawable().apply {
+                setColor(elevatedColor)
+                cornerRadius = dp(14).toFloat()
+                setStroke(dp(1), Color.rgb(65, 83, 80))
+            }
+            addView(label("📎", 20f).apply {
+                gravity = Gravity.CENTER
+                contentDescription = "Attach files"
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { onAttach() }
+            }, LinearLayout.LayoutParams(dp(42), dp(42)))
+            addView(editor, LinearLayout.LayoutParams(0, dp(46), 1f))
+            addView(add, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(2) })
+        }
+        addView(input, LinearLayout.LayoutParams(-1, -2))
+        if (attachmentCount > 0) addView(label(
+            "$attachmentCount ${if (attachmentCount == 1) "attachment" else "attachments"}  ×",
+            13f,
+            true,
+        ).apply {
+            setTextColor(accentColor)
+            setPadding(dp(10), dp(7), dp(10), dp(5))
+            contentDescription = "Clear attachments"
+            setOnClickListener { onClearAttachments() }
         })
+        addView(results, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+        editor.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(value: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(value: CharSequence?, start: Int, before: Int, count: Int) {
+                val next = value?.toString().orEmpty()
+                onTextChanged(next)
+                update(next)
+            }
+            override fun afterTextChanged(value: Editable?) = Unit
+        })
+        update(initialText)
+    }
+
+    private fun omniResult(
+        result: OmniSearchCandidate,
+        onOpen: (OmniSearchCandidate) -> Unit,
+    ): View = LinearLayout(activity).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(14), dp(9), dp(12), dp(9))
+        background = GradientDrawable().apply {
+            setColor(surfaceColor)
+            cornerRadius = dp(9).toFloat()
+        }
+        addView(label(result.title, 15f), LinearLayout.LayoutParams(0, -2, 1f))
+        addView(label(result.tier.displayName, 12f, true).apply { setTextColor(secondaryColor) })
+        contentDescription = "${result.title}, ${result.tier.displayName}"
+        isClickable = true
+        isFocusable = false
+        setOnClickListener { onOpen(result) }
     }
 
     fun self(localCount: Int): View = screen("Self") { body ->

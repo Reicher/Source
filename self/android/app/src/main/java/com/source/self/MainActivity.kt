@@ -3,10 +3,8 @@ package com.source.self
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
-import android.text.InputType
-import android.view.Gravity
-import android.widget.EditText
 import android.window.OnBackInvokedCallback
 import android.window.OnBackInvokedDispatcher
 import com.google.zxing.integration.android.IntentIntegrator
@@ -32,6 +30,9 @@ class MainActivity : Activity() {
     private var knowledgeSourceId: String? = null
     private var entityId: String? = null
     private var section = AppSection.DESKTOP
+    private var omniText = ""
+    private val omniAttachments = mutableListOf<Uri>()
+    private var omniAddInProgress = false
     private val systemBack = OnBackInvokedCallback { handleBack() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -50,6 +51,9 @@ class MainActivity : Activity() {
         section = savedInstanceState?.getString("section")?.let {
             runCatching { AppSection.valueOf(it) }.getOrNull()
         } ?: AppSection.DESKTOP
+        omniText = savedInstanceState?.getString("omni_text").orEmpty()
+        savedInstanceState?.getStringArrayList("omni_attachments")
+            ?.mapTo(omniAttachments, Uri::parse)
         disconnectedAt = savedInstanceState?.getLong("disconnected_at")?.takeIf { it > 0 }
         connection = SourceConnection(this, state, bronze, silver, { isConnected, message, rescan ->
             if (connected && !isConnected && disconnectedAt == null) disconnectedAt = System.currentTimeMillis()
@@ -82,6 +86,8 @@ class MainActivity : Activity() {
         outState.putString("knowledge_source", knowledgeSourceId)
         outState.putString("entity", entityId)
         outState.putString("section", section.name)
+        outState.putString("omni_text", omniText)
+        outState.putStringArrayList("omni_attachments", ArrayList(omniAttachments.map(Uri::toString)))
         disconnectedAt?.let { outState.putLong("disconnected_at", it) }
         super.onSaveInstanceState(outState)
     }
@@ -97,18 +103,29 @@ class MainActivity : Activity() {
         startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "*/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
         }, PICK_FILE)
     }
 
     @Deprecated("Used by the QR scanner and document picker")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         if (requestCode == PICK_FILE) {
-            if (resultCode == RESULT_OK && data?.data != null) {
-                val uri = data.data!!
-                write {
-                    val item = bronze.import(uri)
-                    desktop.pin(DESKTOP_OBJECT_BRONZE, item.id)
+            if (resultCode == RESULT_OK && data != null) {
+                val selected = buildList {
+                    data.clipData?.let { clip ->
+                        repeat(clip.itemCount) { add(clip.getItemAt(it).uri) }
+                    }
+                    data.data?.let(::add)
+                }.distinct()
+                val canPersistRead = data.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0
+                selected.forEach { uri ->
+                    if (canPersistRead) runCatching {
+                        contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    if (uri !in omniAttachments) omniAttachments += uri
                 }
+                render()
             }
             return
         }
@@ -138,40 +155,29 @@ class MainActivity : Activity() {
         render()
     }
 
-    private fun write(action: () -> Unit) {
+    private fun write(
+        onSuccess: () -> Unit = {},
+        onFailure: () -> Unit = {},
+        action: () -> Unit,
+    ) {
         io.execute {
             try {
                 action()
                 desktop.reconcileBronze(bronze.all())
                 BackgroundSyncScheduler.enqueueIfPending(this, state, bronze)
                 runOnUiThread {
+                    onSuccess()
                     render()
                     connection.syncSoon()
                 }
             } catch (e: Exception) {
                 runOnUiThread {
+                    onFailure()
                     AlertDialog.Builder(this).setMessage("Could not save: ${e.message}")
                         .setPositiveButton("Close", null).show()
                 }
             }
         }
-    }
-
-    private fun noteDialog() {
-        val body = EditText(this).apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-            minLines = 6
-            gravity = Gravity.TOP
-            setPadding(views.dp(20), views.dp(16), views.dp(20), views.dp(16))
-        }
-        AlertDialog.Builder(this).setView(body).setNegativeButton("Cancel", null)
-            .setPositiveButton("Save") { _, _ ->
-                val value = body.text.toString()
-                write {
-                    val saved = bronze.createNote(value)
-                    desktop.pin(DESKTOP_OBJECT_BRONZE, saved.id)
-                }
-            }.show()
     }
 
     private fun render() {
@@ -227,7 +233,6 @@ class MainActivity : Activity() {
             AppSection.DESKTOP -> views.desktop(
                 desktop.items(),
                 silverSnapshot,
-                onAdd = ::addMenu,
                 onOpen = ::openDesktopItem,
                 onItemMenu = ::desktopItemMenu,
             )
@@ -237,13 +242,43 @@ class MainActivity : Activity() {
                 render()
             }
         }
-        setContentView(views.app(content, section, connected) { destination ->
-            section = destination
-            detailId = null
-            knowledgeSourceId = null
-            entityId = null
-            render()
-        })
+        val omniCandidates = buildList {
+            silverSnapshot.entities.forEach { entity ->
+                add(OmniSearchCandidate(
+                    OmniResultTier.SILVER,
+                    entity.id,
+                    silverSnapshot.label(entity),
+                    listOf(silverSnapshot.label(entity)) +
+                        silverSnapshot.claimsFor(entity.id).map(silverSnapshot::describe),
+                ))
+            }
+            bronze.all().filterNot(BronzeItem::deleted).forEach { item ->
+                add(OmniSearchCandidate(OmniResultTier.BRONZE, item.id, item.title))
+            }
+        }
+        setContentView(views.app(
+            content = content,
+            selected = section,
+            connected = connected,
+            omniText = omniText,
+            attachmentCount = omniAttachments.size,
+            omniCandidates = omniCandidates,
+            onOmniTextChanged = { omniText = it },
+            onAttach = ::pick,
+            onClearAttachments = {
+                omniAttachments.clear()
+                render()
+            },
+            onAdd = ::addOmniInput,
+            onOpenResult = ::openOmniResult,
+            onSection = { destination ->
+                section = destination
+                detailId = null
+                knowledgeSourceId = null
+                entityId = null
+                render()
+            },
+        ))
     }
 
     private fun renderPairing() {
@@ -264,14 +299,43 @@ class MainActivity : Activity() {
         render()
     }
 
-    private fun addMenu() {
-        val actions = arrayOf("Note", "File")
-        AlertDialog.Builder(this).setTitle("Add").setItems(actions) { _, which ->
-            when (which) {
-                0 -> noteDialog()
-                1 -> pick()
+    private fun addOmniInput() {
+        val text = omniText
+        val attachments = omniAttachments.toList()
+        if (omniAddInProgress || (text.isEmpty() && attachments.isEmpty())) return
+        omniAddInProgress = true
+        write(
+            onSuccess = {
+                omniAddInProgress = false
+                clearOmniBox()
+            },
+            onFailure = { omniAddInProgress = false },
+        ) {
+            if (text.isNotEmpty()) {
+                val note = bronze.createNote(text)
+                desktop.pin(DESKTOP_OBJECT_BRONZE, note.id)
             }
-        }.show()
+            attachments.forEach { uri ->
+                val item = bronze.import(uri)
+                desktop.pin(DESKTOP_OBJECT_BRONZE, item.id)
+            }
+        }
+    }
+
+    private fun openOmniResult(result: OmniSearchCandidate) {
+        when (result.tier) {
+            OmniResultTier.GOLD -> return
+            OmniResultTier.SILVER -> entityId = result.id
+            OmniResultTier.BRONZE -> detailId = result.id
+        }
+        knowledgeSourceId = null
+        clearOmniBox()
+        render()
+    }
+
+    private fun clearOmniBox() {
+        omniText = ""
+        omniAttachments.clear()
     }
 
     private fun desktopItemMenu(ref: DesktopObjectRef) {
