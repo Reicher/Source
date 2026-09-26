@@ -3,6 +3,7 @@ __pycache__/
 .models/
 .tools/
 data/
+/clients/
 /source/source
 *.gguf
 *.gguf.part
