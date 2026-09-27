@@ -430,7 +430,6 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         }
         addView(label(kind, 13f).apply { setTextColor(secondaryColor) })
         sourceId?.let { id ->
-            addView(label("Open Bronze ›", 13f, true).apply { setTextColor(accentColor) })
             background = RippleDrawable(ColorStateList.valueOf(rippleColor), cardBackground, null)
             contentDescription = "${job.title}, $kind, open Bronze file"
             isClickable = true
