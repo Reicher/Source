@@ -593,6 +593,14 @@ func (s *silverService) enqueue(item bronzeItem) (bool, error) {
 
 func (s *silverService) processNext(ctx context.Context) bool {
 	s.mu.Lock()
+	if s.pendingPersistence {
+		if err := s.persistCurrentLocked(); err != nil {
+			s.statusError = "Silver pending job state storage failed: " + err.Error()
+			s.mu.Unlock()
+			return false
+		}
+		s.pendingPersistence = false
+	}
 	index := -1
 	for i := range s.state.Jobs {
 		if s.state.Jobs[i].State == "queued" {

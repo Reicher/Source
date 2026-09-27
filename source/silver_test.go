@@ -533,6 +533,56 @@ func TestSilverFailedFailureStatePersistenceRemainsObservable(t *testing.T) {
 	}
 }
 
+func TestSilverPendingFailurePersistenceBlocksLaterJobs(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	putSilverBronze(t, bronze, "20202020-2020-4202-8202-202020202020", "first.txt", "text/plain", 1, "First note")
+	putSilverBronze(t, bronze, "21212121-2121-4212-8212-212121212121", "second.txt", "text/plain", 1, "Second note")
+	blocker := filepath.Join(root, "blocker")
+	if err := os.WriteFile(blocker, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var service *silverService
+	calls := 0
+	model := testSemanticModel{id: "failure-then-success", revision: "1", run: func(input semanticInput) (semanticResult, error) {
+		calls++
+		if calls == 1 {
+			service.path = filepath.Join(blocker, "state.json")
+			return semanticResult{}, nil
+		}
+		return emptySemanticResult(input), nil
+	}}
+	var err error
+	service, err = newSilverServiceWithModel(root+"/silver", bronze, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalPath := service.path
+	if !service.processNext(context.Background()) {
+		t.Fatal("first job was not processed")
+	}
+	if service.state.Jobs[0].State != "failed" || !service.pendingPersistence {
+		t.Fatalf("first failure was not retained pending persistence: %+v", service.state.Jobs)
+	}
+	if service.processNext(context.Background()) {
+		t.Fatal("worker selected later work while failed state was not durable")
+	}
+	if service.state.Jobs[1].State != "queued" || calls != 1 {
+		t.Fatalf("later job advanced before storage recovered: jobs=%+v calls=%d", service.state.Jobs, calls)
+	}
+
+	service.path = originalPath
+	if err := service.reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if !service.processNext(context.Background()) {
+		t.Fatal("later job did not run after storage recovered")
+	}
+	if service.state.Jobs[1].State != "completed" || calls != 2 {
+		t.Fatalf("later job did not complete after recovery: jobs=%+v calls=%d", service.state.Jobs, calls)
+	}
+}
+
 func TestSilverReconciliationFailureIsObservable(t *testing.T) {
 	root := t.TempDir()
 	bronze := newBronzeStore(root + "/bronze")
