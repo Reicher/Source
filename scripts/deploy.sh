@@ -21,8 +21,8 @@ command -v python3 >/dev/null 2>&1 || {
     exit 1
 }
 
-SOURCE_LAN_ADDRESS=${SOURCE_LAN_ADDRESS:-}
-python3 scripts/validate_lan_address.py "$SOURCE_LAN_ADDRESS"
+SOURCE_LAN_ADDRESS=$(python3 scripts/resolve_lan_address.py "${SOURCE_LAN_ADDRESS:-}")
+printf 'Using Source LAN address %s.\n' "$SOURCE_LAN_ADDRESS"
 SOURCE_DATA_ROOT=${SOURCE_DATA_ROOT:-"$HOME/.local/share/source-v1"}
 case "$SOURCE_DATA_ROOT" in
     /*) ;;
