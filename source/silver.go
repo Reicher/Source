@@ -1457,7 +1457,16 @@ func extractSilverBatch(ctx context.Context, job silverJob, fragment parsedSilve
 	if modelID != job.ModelID || modelRevision != job.ModelRevision {
 		return silverCheckpoint{}, errors.New("Source model identity changed during Silver processing")
 	}
-	result, err := model.extract(ctx, semanticInput{Title: job.Title, Mime: job.Mime, Text: fragment.Text})
+	result, err := model.extract(ctx, semanticInput{
+		Title: job.Title,
+		Mime:  job.Mime,
+		Fragment: semanticFragmentInput{
+			Kind:     fragment.Kind,
+			Selector: fragment.Selector,
+			Payload:  payload,
+		},
+		Text: fragment.Text,
+	})
 	if err != nil {
 		return silverCheckpoint{}, err
 	}
