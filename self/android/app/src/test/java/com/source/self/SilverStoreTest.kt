@@ -63,8 +63,25 @@ class SilverStoreTest {
         assertTrue(snapshot.needsSilverSnapshot(SourceStatus("person")))
     }
 
+    @Test fun sourceJobKeepsItsBronzeNavigationTarget() {
+        val sourceId = "11111111-1111-4111-8111-111111111111"
+        val job = SourceJob.fromJson(JSONObject()
+            .put("id", "job")
+            .put("kind", "silver_extraction")
+            .put("title", "note.txt")
+            .put("state", "completed")
+            .put("queued_at", 1)
+            .put("completed_at", 2)
+            .put("bronze_source_id", sourceId))
+
+        assertEquals(sourceId, job.bronzeSourceId)
+    }
+
     @Test fun lightweightStatusRoundTripsForRestartPersistence() {
-        val queued = SourceJob("queued", "sync", "note.txt", "to_source", "queued", 1, null)
+        val queued = SourceJob(
+            "queued", "sync", "note.txt", "to_source", "queued", 1, null,
+            "11111111-1111-4111-8111-111111111111",
+        )
         val completed = SourceJob("done", "silver_extraction", "photo.jpg", null, "completed", 2, 3)
         val status = SourceStatus(
             "person", 7, 12, SourceJobs(12, listOf(queued), listOf(completed), 1, 9),
@@ -98,6 +115,7 @@ class SilverStoreTest {
         val snapshot = SilverSnapshot(1, sources, evidence, observations, listOf(entity), claims, emptyList())
 
         assertEquals(listOf("observation-1"), snapshot.forBronze("bronze-1").observations.map { it.id })
+        assertEquals(listOf("claim-1"), snapshot.forBronze("bronze-1").activeClaims.map { it.id })
         assertEquals("Ada Lovelace", snapshot.label(entity))
         assertEquals(listOf("bronze-1", "bronze-2"), snapshot.supportingBronze(entity.id))
     }

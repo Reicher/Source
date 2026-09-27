@@ -311,20 +311,32 @@ class MainActivity : Activity() {
             )
             AppSection.SELF -> {
                 val localItems = bronze.all().filterNot(BronzeItem::deleted)
-                if (localStorageOpen) views.localStorage(localItems, localStorageSort) { sort ->
-                    if (sort != localStorageSort) {
-                        localStorageSort = sort
-                        render()
-                    }
-                } else views.self(localItems.size) {
+                if (localStorageOpen) views.localStorage(
+                    localItems,
+                    localStorageSort,
+                    onSort = { sort ->
+                        if (sort != localStorageSort) {
+                            localStorageSort = sort
+                            render()
+                        }
+                    },
+                    onOpen = ::openBronze,
+                ) else views.self(localItems.size) {
                     localStorageOpen = true
                     render()
                 }
             }
-            AppSection.SOURCE -> views.source(connected, disconnectedAt, error, silverSnapshot) { id ->
-                entityId = id
-                render()
-            }
+            AppSection.SOURCE -> views.source(
+                connected,
+                disconnectedAt,
+                error,
+                silverSnapshot,
+                onBronze = ::openBronze,
+                onEntity = { id ->
+                    entityId = id
+                    render()
+                },
+            )
         }
         val omniCandidates = buildList {
             addAll(silverOmniCandidates(silverSnapshot))
@@ -378,6 +390,14 @@ class MainActivity : Activity() {
             DESKTOP_OBJECT_SILVER -> entityId = ref.objectId
             else -> return
         }
+        render()
+    }
+
+    private fun openBronze(id: String) {
+        val item = bronze.get(id)?.takeUnless { it.deleted } ?: return
+        detailId = item.id
+        knowledgeSourceId = null
+        entityId = null
         render()
     }
 

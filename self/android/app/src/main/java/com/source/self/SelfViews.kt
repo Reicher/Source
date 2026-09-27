@@ -318,6 +318,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         items: List<BronzeItem>,
         sort: LocalStorageSort,
         onSort: (LocalStorageSort) -> Unit,
+        onOpen: (String) -> Unit,
     ): View = LinearLayout(activity).apply {
         orientation = LinearLayout.VERTICAL
         val previousPosition = if (localStorageListSort == sort) {
@@ -352,6 +353,9 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             dividerHeight = dp(1)
             isVerticalScrollBarEnabled = false
             adapter = LocalStorageAdapter(sortLocalStorageItems(items, sort))
+            setOnItemClickListener { adapter, _, position, _ ->
+                onOpen((adapter.getItemAtPosition(position) as BronzeItem).id)
+            }
             setSelectionFromTop(previousPosition, previousTop)
         }
         localStorageList = list
@@ -364,6 +368,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         disconnectedAt: Long?,
         message: String?,
         silver: SilverSnapshot,
+        onBronze: (String) -> Unit,
         onEntity: (String) -> Unit,
     ): View = screen { body ->
         val status = when {
@@ -390,14 +395,14 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             if (silver.jobs.queued.isEmpty()) {
                 addView(label("No jobs waiting", 14f).apply { setTextColor(secondaryColor) })
             } else {
-                silver.jobs.queued.forEach { addView(jobRow(it, false)) }
+                silver.jobs.queued.forEach { addView(jobRow(it, false, onBronze)) }
             }
             addView(label("Completed (${silver.jobs.completedCount})", 19f, true), sectionMargin())
             if (silver.jobs.completed.isEmpty()) {
                 addView(label("No completed jobs", 14f).apply { setTextColor(secondaryColor) })
             } else {
                 val visibleCompleted = silver.jobs.completed.take(5)
-                visibleCompleted.forEach { addView(jobRow(it, true)) }
+                visibleCompleted.forEach { addView(jobRow(it, true, onBronze)) }
                 if (silver.jobs.completedCount > visibleCompleted.size) addView(label(
                     "+ ${silver.jobs.completedCount - visibleCompleted.size} earlier", 13f
                 ).apply { setTextColor(secondaryColor) })
@@ -415,14 +420,15 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         }, LinearLayout.LayoutParams(-1, 0, 1f))
     }
 
-    private fun jobRow(job: SourceJob, completed: Boolean): View = LinearLayout(activity).apply {
+    private fun jobRow(job: SourceJob, completed: Boolean, onBronze: (String) -> Unit): View = LinearLayout(activity).apply {
         orientation = LinearLayout.VERTICAL
         setPadding(dp(10), dp(7), dp(10), dp(7))
-        background = GradientDrawable().apply {
+        val cardBackground = GradientDrawable().apply {
             setColor(surfaceColor)
             cornerRadius = dp(10).toFloat()
             setStroke(dp(1), borderColor)
         }
+        background = cardBackground
         addView(label(job.title, 15f, true))
         val kind = if (job.kind == "silver_extraction") {
             "Silver extraction · ${job.state.replace('_', ' ')}"
@@ -433,6 +439,13 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             " · ${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(job.completedAt))}"
         } else ""
         addView(label(kind + time, 13f).apply { setTextColor(secondaryColor) })
+        job.bronzeSourceId?.takeIf { id -> bronze.get(id)?.deleted == false }?.let { sourceId ->
+            background = RippleDrawable(ColorStateList.valueOf(rippleColor), cardBackground, null)
+            contentDescription = "${job.title}, $kind, open Bronze file"
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { onBronze(sourceId) }
+        }
     }.also { view ->
         view.layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) }
     }
@@ -489,9 +502,9 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         }
         root.addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
         val knowledgeLabel = when {
-            knowledge.source != null -> "Knowledge · ${knowledge.itemCount}"
-            knowledge.processing != null -> "Knowledge · …"
-            else -> "Knowledge · 0"
+            knowledge.source != null -> "Claims · ${knowledge.activeClaimCount}"
+            knowledge.processing != null -> "Claims · …"
+            else -> "Claims · 0"
         }
         root.addView(LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -535,8 +548,8 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         onEntity: (String) -> Unit,
     ): View {
         val root = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
-        root.addView(label("Knowledge", 23f, true))
-        root.addView(label("Source: ${item.title}", 13f).apply {
+        root.addView(label("Claims", 23f, true))
+        root.addView(label("From ${item.title}", 13f).apply {
             setTextColor(secondaryColor)
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
@@ -555,28 +568,72 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         knowledge.source?.coveragePresentation()?.let { coverage ->
             body.addView(label(coverage, 13f).apply { setTextColor(secondaryColor) })
         }
-        if (knowledge.entities.isNotEmpty()) {
-            knowledge.entities.sortedBy(silver::label).forEach { entity ->
-                val sourceClaimCount = knowledge.claims.count {
-                    it.state == "active" && (it.subjectEntityId == entity.id || it.objectEntityId == entity.id)
-                }
-                body.addView(entityRow(entity, silver, sourceClaimCount) { onEntity(entity.id) })
+        val activeClaims = knowledge.activeClaims.sortedWith(
+            compareBy<SilverClaim> { silver.describe(it) }.thenBy { it.id },
+        )
+        if (activeClaims.isNotEmpty()) {
+            body.addView(label(
+                "${activeClaims.size} current ${if (activeClaims.size == 1) "claim" else "claims"}",
+                13f,
+            ).apply { setTextColor(secondaryColor) })
+            activeClaims.forEach { claim ->
+                body.addView(sourceClaimRow(claim, silver, onEntity), LinearLayout.LayoutParams(-1, -2).apply {
+                    bottomMargin = dp(3)
+                })
             }
+        } else if (knowledge.source != null) {
+            body.addView(label("No current claims", 15f).apply { setTextColor(secondaryColor) })
         }
         val findings = knowledge.unresolvedFindings()
+        if (findings.isNotEmpty()) {
+            body.addView(label("Possible findings", 17f, true), sectionMargin())
+        }
         findings.forEach { finding ->
             body.addView(findingRow(finding), LinearLayout.LayoutParams(-1, -2).apply {
                 bottomMargin = dp(3)
             })
-        }
-        if (knowledge.source != null && knowledge.entities.isEmpty() && findings.isEmpty()) {
-            body.addView(label("No knowledge", 15f).apply { setTextColor(secondaryColor) })
         }
         root.addView(ScrollView(activity).apply {
             addView(body)
             preserveScroll("knowledge:${item.id}")
         }, LinearLayout.LayoutParams(-1, 0, 1f))
         return root
+    }
+
+    private fun sourceClaimRow(
+        claim: SilverClaim,
+        silver: SilverSnapshot,
+        onEntity: (String) -> Unit,
+    ): View = LinearLayout(activity).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(12), dp(8), dp(12), dp(8))
+        background = RippleDrawable(
+            ColorStateList.valueOf(rippleColor),
+            GradientDrawable().apply {
+                setColor(surfaceColor)
+                cornerRadius = dp(8).toFloat()
+            },
+            null,
+        )
+        val subject = silver.entities.firstOrNull { it.id == claim.subjectEntityId }
+        val description = if (claim.objectEntityId == null && subject != null) {
+            "${silver.label(subject)} — ${silver.describe(claim)}"
+        } else {
+            silver.describe(claim)
+        }
+        addView(label(description, 15f), LinearLayout.LayoutParams(0, -2, 1f))
+        silver.confidence(claim)?.let { confidence ->
+            addView(label(confidenceText(confidence), 14f, true).apply {
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            }, LinearLayout.LayoutParams(dp(64), -1).apply { marginStart = dp(12) })
+        }
+        contentDescription = description
+        if (subject != null) {
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { onEntity(subject.id) }
+        }
     }
 
     fun entityDetail(
@@ -960,6 +1017,8 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                 gravity = Gravity.CENTER_VERTICAL
                 minimumHeight = dp(52)
                 setPadding(dp(10), dp(4), dp(10), dp(4))
+                background = RippleDrawable(ColorStateList.valueOf(rippleColor), null, null)
+                contentDescription = "Open ${item.title}"
                 addView(label(item.title, 15f).apply {
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END

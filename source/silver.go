@@ -1200,7 +1200,7 @@ func (s *silverService) jobSnapshotLocked() sourceJobSnapshot {
 	snapshot := sourceJobSnapshot{Revision: s.state.Revision}
 	for _, job := range s.state.Jobs {
 		visible := sourceJob{
-			ID: job.ID, Kind: "silver_extraction", Title: job.Title,
+			ID: job.ID, Kind: "silver_extraction", Title: job.Title, BronzeSourceID: job.BronzeSourceID,
 			State: job.State, QueuedAt: job.AcceptedAt,
 		}
 		switch job.State {

@@ -17,14 +17,15 @@ const syncJobSchemaVersion = 1
 var errInvalidSyncJobPlan = errors.New("invalid sync job plan")
 
 type sourceJob struct {
-	ID          string `json:"id"`
-	Key         string `json:"key,omitempty"`
-	Kind        string `json:"kind"`
-	Title       string `json:"title"`
-	Direction   string `json:"direction,omitempty"`
-	State       string `json:"state"`
-	QueuedAt    int64  `json:"queued_at"`
-	CompletedAt int64  `json:"completed_at,omitempty"`
+	ID             string `json:"id"`
+	Key            string `json:"key,omitempty"`
+	Kind           string `json:"kind"`
+	Title          string `json:"title"`
+	BronzeSourceID string `json:"bronze_source_id,omitempty"`
+	Direction      string `json:"direction,omitempty"`
+	State          string `json:"state"`
+	QueuedAt       int64  `json:"queued_at"`
+	CompletedAt    int64  `json:"completed_at,omitempty"`
 }
 
 type sourceJobSnapshot struct {
@@ -178,6 +179,7 @@ func (s *syncJobStore) snapshot() sourceJobSnapshot {
 	defer s.mu.Unlock()
 	snapshot := sourceJobSnapshot{Revision: s.state.Revision, Queued: []sourceJob{}, Completed: []sourceJob{}}
 	for _, job := range s.state.Jobs {
+		job.BronzeSourceID = syncJobBronzeSourceID(job.Key)
 		job.Key = ""
 		if job.State == "completed" {
 			snapshot.Completed = append(snapshot.Completed, job)
@@ -186,6 +188,14 @@ func (s *syncJobStore) snapshot() sourceJobSnapshot {
 		}
 	}
 	return snapshot
+}
+
+func syncJobBronzeSourceID(key string) string {
+	id, _, found := strings.Cut(key, ":")
+	if !found || !bronzeID.MatchString(id) {
+		return ""
+	}
+	return id
 }
 
 func (s *syncJobStore) saveLocked() error {
