@@ -200,6 +200,7 @@ type silverService struct {
 	mu              sync.Mutex
 	path            string
 	bronze          *bronzeStore
+	configuration   silverConfiguration
 	state           silverDiskState
 	persisted       []byte
 	wake            chan struct{}
@@ -208,15 +209,32 @@ type silverService struct {
 }
 
 func newSilverService(dir string, bronze *bronzeStore) (*silverService, error) {
-	model, err := semanticModelFromEnvironment()
+	configuration, err := sourceConfigurationFromEnvironment()
 	if err != nil {
 		return nil, err
 	}
-	return newSilverServiceWithModel(dir, bronze, model)
+	model, err := semanticModelFromEnvironment(configuration.Model)
+	if err != nil {
+		return nil, err
+	}
+	return newSilverServiceWithConfiguration(dir, bronze, model, configuration.Silver)
 }
 
 func newSilverServiceWithModel(dir string, bronze *bronzeStore, model semanticModel) (*silverService, error) {
-	s := &silverService{path: filepath.Join(dir, "state.json"), bronze: bronze, wake: make(chan struct{}, 1), semantic: model}
+	return newSilverServiceWithConfiguration(dir, bronze, model, defaultSourceConfiguration().Silver)
+}
+
+func newSilverServiceWithConfiguration(dir string, bronze *bronzeStore, model semanticModel, configuration silverConfiguration) (*silverService, error) {
+	if configuration.SemanticBatchTargetBytes <= 0 {
+		return nil, errors.New("Silver semantic batch target must be positive")
+	}
+	if model != nil && model.maximumInputBytes() <= 0 {
+		return nil, errors.New("Source model semantic input limit must be positive")
+	}
+	s := &silverService{
+		path: filepath.Join(dir, "state.json"), bronze: bronze, configuration: configuration,
+		wake: make(chan struct{}, 1), semantic: model,
+	}
 	value, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
 		s.state = silverDiskState{SchemaVersion: silverSchemaVersion, RevisionModel: 1, Published: map[string]silverDataset{}, History: map[string][]silverDataset{}, Entities: map[string]silverEntityRecord{}}
@@ -589,7 +607,13 @@ func (s *silverService) processJob(ctx context.Context, jobID string) error {
 		s.mu.Unlock()
 		return context.Canceled
 	}
-	job.TotalBatches = len(fragments)
+	batches, err := buildSilverBatches(copy, fragments, s.configuration.SemanticBatchTargetBytes, s.semantic)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	job.TotalBatches = len(batches)
+	job.Checkpoints = checkpointsMatchingBatches(job.Checkpoints, batches)
 	job.UpdatedAt = time.Now().UnixMilli()
 	s.state.Revision++
 	if err := s.saveLocked(); err != nil {
@@ -598,24 +622,23 @@ func (s *silverService) processJob(ctx context.Context, jobID string) error {
 	}
 	s.mu.Unlock()
 
-	for batchIndex, fragment := range fragments {
+	for batchIndex, batch := range batches {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		batchHash := hashBytes([]byte(fragment.identity()))
 		s.mu.Lock()
 		job = s.jobLocked(jobID)
 		if job == nil || job.State != "running" {
 			s.mu.Unlock()
 			return context.Canceled
 		}
-		if checkpointFor(job, batchIndex, batchHash) != nil {
+		if checkpointFor(job, batchIndex, batch.Hash) != nil {
 			s.mu.Unlock()
 			continue
 		}
 		s.mu.Unlock()
 
-		checkpoint, err := extractSilverBatch(ctx, copy, fragment, batchIndex, batchHash, s.semantic)
+		checkpoint, err := extractSilverBatch(ctx, copy, batch.Fragments, batchIndex, batch.Hash, s.semantic)
 		if err != nil {
 			return err
 		}
@@ -1050,6 +1073,11 @@ type parsedSilverFragment struct {
 	Text     string
 }
 
+type silverSemanticBatch struct {
+	Fragments []parsedSilverFragment
+	Hash      string
+}
+
 func (f parsedSilverFragment) identity() string {
 	value, _ := json.Marshal(struct {
 		Kind     string         `json:"kind"`
@@ -1057,6 +1085,84 @@ func (f parsedSilverFragment) identity() string {
 		Payload  any            `json:"payload"`
 	}{f.Kind, f.Selector, f.Payload})
 	return string(value)
+}
+
+func buildSilverBatches(job silverJob, fragments []parsedSilverFragment, targetBytes int, model semanticModel) ([]silverSemanticBatch, error) {
+	if len(fragments) == 0 {
+		return nil, nil
+	}
+	if targetBytes <= 0 {
+		return nil, errors.New("Silver semantic batch target must be positive")
+	}
+	maximumBytes := targetBytes
+	if model != nil {
+		maximumBytes = model.maximumInputBytes()
+		if maximumBytes <= 0 {
+			return nil, errors.New("Source model semantic input limit must be positive")
+		}
+		targetBytes = min(targetBytes, maximumBytes)
+	}
+
+	var batches []silverSemanticBatch
+	var current []parsedSilverFragment
+	flush := func() {
+		if len(current) == 0 {
+			return
+		}
+		fragmentsCopy := append([]parsedSilverFragment(nil), current...)
+		identities := make([]string, 0, len(fragmentsCopy))
+		for _, fragment := range fragmentsCopy {
+			identities = append(identities, fragment.identity())
+		}
+		encoded, _ := json.Marshal(identities)
+		batches = append(batches, silverSemanticBatch{Fragments: fragmentsCopy, Hash: hashBytes(encoded)})
+		current = nil
+	}
+
+	for _, fragment := range fragments {
+		candidate := append(append([]parsedSilverFragment(nil), current...), fragment)
+		input, err := semanticInputForFragments(job, candidate)
+		if err != nil {
+			return nil, err
+		}
+		encoded, err := json.Marshal(input)
+		if err != nil {
+			return nil, err
+		}
+		semanticFragment := strings.TrimSpace(fragment.Text) != ""
+		if len(current) > 0 && semanticFragment && len(encoded) > targetBytes {
+			flush()
+			candidate = []parsedSilverFragment{fragment}
+			input, err = semanticInputForFragments(job, candidate)
+			if err != nil {
+				return nil, err
+			}
+			encoded, err = json.Marshal(input)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if model != nil && semanticFragment && len(encoded) > maximumBytes {
+			return nil, fmt.Errorf("semantic fragment input is %d bytes; model limit is %d bytes", len(encoded), maximumBytes)
+		}
+		current = candidate
+	}
+	flush()
+	return batches, nil
+}
+
+func checkpointsMatchingBatches(checkpoints []silverCheckpoint, batches []silverSemanticBatch) []silverCheckpoint {
+	matching := make([]silverCheckpoint, 0, min(len(checkpoints), len(batches)))
+	seen := map[int]bool{}
+	for _, checkpoint := range checkpoints {
+		if checkpoint.BatchIndex < 0 || checkpoint.BatchIndex >= len(batches) ||
+			checkpoint.BatchSHA256 != batches[checkpoint.BatchIndex].Hash || seen[checkpoint.BatchIndex] {
+			continue
+		}
+		seen[checkpoint.BatchIndex] = true
+		matching = append(matching, checkpoint)
+	}
+	return matching
 }
 
 func parseSilverReader(item bronzeItem, reader io.Reader) ([]parsedSilverFragment, bool, error) {
@@ -1436,81 +1542,123 @@ func fragmentWithTextRange(kind string, start, end int, text string, payload any
 	return parsedSilverFragment{Kind: kind, Selector: map[string]any{"kind": "utf8-byte-range", "start_byte": start, "end_byte": end}, Excerpt: truncate(text, 240), Payload: payload, Text: text}
 }
 
-func extractSilverBatch(ctx context.Context, job silverJob, fragment parsedSilverFragment, index int, batchHash string, model semanticModel) (silverCheckpoint, error) {
-	producer := silverProducer{ProcessorID: silverExtractionID, ProcessorVersion: silverExtractionVersion}
-	evidence := silverEvidence{BronzeSourceID: job.BronzeSourceID, BronzeContentSHA256: job.BronzeContentSHA256, Selector: fragment.Selector, Excerpt: fragment.Excerpt}
+func silverEvidenceForFragment(job silverJob, fragment parsedSilverFragment) silverEvidence {
+	evidence := silverEvidence{
+		BronzeSourceID: job.BronzeSourceID, BronzeContentSHA256: job.BronzeContentSHA256,
+		Selector: fragment.Selector, Excerpt: fragment.Excerpt,
+	}
 	evidence.ID = stableID("source-silver-evidence", struct {
 		Source, Hash string
 		Selector     map[string]any
 	}{job.BronzeSourceID, job.BronzeContentSHA256, fragment.Selector})
-	payload, err := json.Marshal(fragment.Payload)
-	if err != nil {
-		return silverCheckpoint{}, err
+	return evidence
+}
+
+func semanticInputForFragments(job silverJob, fragments []parsedSilverFragment) (semanticInput, error) {
+	input := semanticInput{Title: job.Title, Mime: job.Mime, Fragments: []semanticFragmentInput{}}
+	for _, fragment := range fragments {
+		if strings.TrimSpace(fragment.Text) == "" {
+			continue
+		}
+		payload, err := json.Marshal(fragment.Payload)
+		if err != nil {
+			return semanticInput{}, err
+		}
+		payload, err = compactSemanticPayload(fragment, payload)
+		if err != nil {
+			return semanticInput{}, err
+		}
+		input.Fragments = append(input.Fragments, semanticFragmentInput{
+			ID: silverEvidenceForFragment(job, fragment).ID, Kind: fragment.Kind,
+			Selector: fragment.Selector, Payload: payload,
+		})
 	}
-	observation := silverObservation{Kind: fragment.Kind, Payload: payload, EvidenceIDs: []string{evidence.ID}, Producer: producer}
-	observation.ID = observationID(observation)
-	checkpoint := silverCheckpoint{BatchIndex: index, BatchSHA256: batchHash, Evidence: []silverEvidence{evidence}, Observations: []silverObservation{observation}}
-	if model == nil || strings.TrimSpace(fragment.Text) == "" {
+	return input, nil
+}
+
+func extractSilverBatch(ctx context.Context, job silverJob, fragments []parsedSilverFragment, index int, batchHash string, model semanticModel) (silverCheckpoint, error) {
+	producer := silverProducer{ProcessorID: silverExtractionID, ProcessorVersion: silverExtractionVersion}
+	checkpoint := silverCheckpoint{BatchIndex: index, BatchSHA256: batchHash}
+	evidenceByID := make(map[string]silverEvidence, len(fragments))
+	for _, fragment := range fragments {
+		evidence := silverEvidenceForFragment(job, fragment)
+		payload, err := json.Marshal(fragment.Payload)
+		if err != nil {
+			return silverCheckpoint{}, err
+		}
+		observation := silverObservation{Kind: fragment.Kind, Payload: payload, EvidenceIDs: []string{evidence.ID}, Producer: producer}
+		observation.ID = observationID(observation)
+		checkpoint.Evidence = append(checkpoint.Evidence, evidence)
+		checkpoint.Observations = append(checkpoint.Observations, observation)
+		evidenceByID[evidence.ID] = evidence
+	}
+	if model == nil {
 		return checkpoint, nil
 	}
 	modelID, modelRevision := model.identity()
 	if modelID != job.ModelID || modelRevision != job.ModelRevision {
 		return silverCheckpoint{}, errors.New("Source model identity changed during Silver processing")
 	}
-	semanticPayload, err := compactSemanticPayload(fragment, payload)
+	input, err := semanticInputForFragments(job, fragments)
 	if err != nil {
 		return silverCheckpoint{}, err
 	}
-	result, err := model.extract(ctx, semanticInput{
-		Title: job.Title,
-		Mime:  job.Mime,
-		Fragment: semanticFragmentInput{
-			Kind:     fragment.Kind,
-			Selector: fragment.Selector,
-			Payload:  semanticPayload,
-		},
-	})
+	if len(input.Fragments) == 0 {
+		return checkpoint, nil
+	}
+	result, err := model.extract(ctx, input)
 	if err != nil {
 		return silverCheckpoint{}, err
+	}
+	if err := validateSemanticResult(result); err != nil {
+		return silverCheckpoint{}, fmt.Errorf("invalid Source model semantic result: %w", err)
+	}
+	if err := validateSemanticResultMapping(input, result); err != nil {
+		return silverCheckpoint{}, fmt.Errorf("invalid Source model semantic result: %w", err)
 	}
 	semanticProducer := silverProducer{ProcessorID: semanticProcessorID, ProcessorVersion: semanticProcessorVersion, ModelID: modelID, ModelRevision: modelRevision}
-	for _, candidate := range result.Entities {
-		label := strings.TrimSpace(candidate.Label)
-		entityType := strings.TrimSpace(candidate.Type)
-		candidate.Label = label
-		candidate.Type = entityType
-		payload, _ := json.Marshal(map[string]any{"ref": candidate.Ref, "label": label, "type": entityType})
-		semantic := silverObservation{Kind: "entity-candidate", Payload: payload, EvidenceIDs: []string{evidence.ID}, Confidence: candidate.Confidence, Producer: semanticProducer}
-		semantic.ID = observationID(semantic)
-		checkpoint.Observations = append(checkpoint.Observations, semantic)
-		checkpoint.Entities = append(checkpoint.Entities, silverEntityCandidate{
-			ObservationID: semantic.ID, Ref: candidate.Ref, Label: label, Type: entityType,
-			Normalized: strings.ToLower(strings.Join(strings.Fields(label), " ")), Confidence: *candidate.Confidence,
-		})
-	}
-	for _, candidate := range result.Attributes {
-		payload, _ := json.Marshal(struct {
-			SubjectRef string          `json:"subject_ref"`
-			Predicate  string          `json:"predicate"`
-			Value      json.RawMessage `json:"value"`
-		}{candidate.SubjectRef, candidate.Predicate, candidate.Value})
-		semantic := silverObservation{Kind: "attribute-candidate", Payload: payload, EvidenceIDs: []string{evidence.ID}, Confidence: candidate.Confidence, Producer: semanticProducer}
-		semantic.ID = observationID(semantic)
-		checkpoint.Observations = append(checkpoint.Observations, semantic)
-		checkpoint.Attributes = append(checkpoint.Attributes, silverAttributeCandidate{
-			ObservationID: semantic.ID, SubjectRef: candidate.SubjectRef, Predicate: candidate.Predicate,
-			Value: candidate.Value, Confidence: *candidate.Confidence,
-		})
-	}
-	for _, candidate := range result.Relationships {
-		payload, _ := json.Marshal(map[string]any{"subject_ref": candidate.SubjectRef, "predicate": candidate.Predicate, "object_ref": candidate.ObjectRef})
-		semantic := silverObservation{Kind: "relationship-candidate", Payload: payload, EvidenceIDs: []string{evidence.ID}, Confidence: candidate.Confidence, Producer: semanticProducer}
-		semantic.ID = observationID(semantic)
-		checkpoint.Observations = append(checkpoint.Observations, semantic)
-		checkpoint.Relationships = append(checkpoint.Relationships, silverRelationshipCandidate{
-			ObservationID: semantic.ID, SubjectRef: candidate.SubjectRef, Predicate: candidate.Predicate,
-			ObjectRef: candidate.ObjectRef, Confidence: *candidate.Confidence,
-		})
+	for _, fragmentResult := range result.Fragments {
+		evidence, ok := evidenceByID[fragmentResult.FragmentID]
+		if !ok {
+			return silverCheckpoint{}, errors.New("semantic result refers to missing Silver evidence")
+		}
+		semanticRef := func(ref string) string { return fragmentResult.FragmentID + ":" + ref }
+		for _, candidate := range fragmentResult.Entities {
+			label := strings.TrimSpace(candidate.Label)
+			entityType := strings.TrimSpace(candidate.Type)
+			payload, _ := json.Marshal(map[string]any{"ref": candidate.Ref, "label": label, "type": entityType})
+			semantic := silverObservation{Kind: "entity-candidate", Payload: payload, EvidenceIDs: []string{evidence.ID}, Confidence: candidate.Confidence, Producer: semanticProducer}
+			semantic.ID = observationID(semantic)
+			checkpoint.Observations = append(checkpoint.Observations, semantic)
+			checkpoint.Entities = append(checkpoint.Entities, silverEntityCandidate{
+				ObservationID: semantic.ID, Ref: semanticRef(candidate.Ref), Label: label, Type: entityType,
+				Normalized: strings.ToLower(strings.Join(strings.Fields(label), " ")), Confidence: *candidate.Confidence,
+			})
+		}
+		for _, candidate := range fragmentResult.Attributes {
+			payload, _ := json.Marshal(struct {
+				SubjectRef string          `json:"subject_ref"`
+				Predicate  string          `json:"predicate"`
+				Value      json.RawMessage `json:"value"`
+			}{candidate.SubjectRef, candidate.Predicate, candidate.Value})
+			semantic := silverObservation{Kind: "attribute-candidate", Payload: payload, EvidenceIDs: []string{evidence.ID}, Confidence: candidate.Confidence, Producer: semanticProducer}
+			semantic.ID = observationID(semantic)
+			checkpoint.Observations = append(checkpoint.Observations, semantic)
+			checkpoint.Attributes = append(checkpoint.Attributes, silverAttributeCandidate{
+				ObservationID: semantic.ID, SubjectRef: semanticRef(candidate.SubjectRef), Predicate: candidate.Predicate,
+				Value: candidate.Value, Confidence: *candidate.Confidence,
+			})
+		}
+		for _, candidate := range fragmentResult.Relationships {
+			payload, _ := json.Marshal(map[string]any{"subject_ref": candidate.SubjectRef, "predicate": candidate.Predicate, "object_ref": candidate.ObjectRef})
+			semantic := silverObservation{Kind: "relationship-candidate", Payload: payload, EvidenceIDs: []string{evidence.ID}, Confidence: candidate.Confidence, Producer: semanticProducer}
+			semantic.ID = observationID(semantic)
+			checkpoint.Observations = append(checkpoint.Observations, semantic)
+			checkpoint.Relationships = append(checkpoint.Relationships, silverRelationshipCandidate{
+				ObservationID: semantic.ID, SubjectRef: semanticRef(candidate.SubjectRef), Predicate: candidate.Predicate,
+				ObjectRef: semanticRef(candidate.ObjectRef), Confidence: *candidate.Confidence,
+			})
+		}
 	}
 	return checkpoint, nil
 }
