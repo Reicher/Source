@@ -135,11 +135,14 @@ They will authenticate, pair, and reconnect automatically when Source is discove
 For the full Linux deployment with the pinned local model, install Docker Compose and Python 3, then run from the repository root:
 
 ```sh
-export SOURCE_LAN_ADDRESS=192.168.1.20
 ./scripts/deploy.sh
 ```
 
-The script verifies or downloads the model, builds the containers, starts them, and performs health checks.
+The script detects the private IPv4 address selected by the host's default route, verifies or downloads the model, builds the containers, starts them, and performs health checks. On a multi-homed host, or to override detection, set `SOURCE_LAN_ADDRESS` to an assigned private address before running it:
+
+```sh
+export SOURCE_LAN_ADDRESS=192.168.1.20
+```
 
 Persistent data defaults to `~/.local/share/source-v1/`; back it up. Set `SOURCE_DATA_ROOT` or `SOURCE_MODEL_ROOT` to other absolute paths when needed.
 
