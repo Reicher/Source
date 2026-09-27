@@ -54,9 +54,15 @@ func testConfidence(value float64) *float64 { return &value }
 
 func namedPeopleTestModel() semanticModel {
 	return testSemanticModel{id: "test-people", revision: "1", run: func(input semanticInput) (semanticResult, error) {
+		var payload struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(input.Fragment.Payload, &payload); err != nil {
+			return semanticResult{}, err
+		}
 		var entities []semanticEntityCandidate
 		for index, label := range []string{"Ada Lovelace", "Grace Hopper"} {
-			if strings.Contains(input.Text, label) {
+			if strings.Contains(payload.Text, label) {
 				entities = append(entities, semanticEntityCandidate{Ref: fmt.Sprintf("e%d", index+1), Label: label, Confidence: testConfidence(0.99)})
 			}
 		}

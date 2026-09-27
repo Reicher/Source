@@ -1457,15 +1457,18 @@ func extractSilverBatch(ctx context.Context, job silverJob, fragment parsedSilve
 	if modelID != job.ModelID || modelRevision != job.ModelRevision {
 		return silverCheckpoint{}, errors.New("Source model identity changed during Silver processing")
 	}
+	semanticPayload, err := compactSemanticPayload(fragment, payload)
+	if err != nil {
+		return silverCheckpoint{}, err
+	}
 	result, err := model.extract(ctx, semanticInput{
 		Title: job.Title,
 		Mime:  job.Mime,
 		Fragment: semanticFragmentInput{
 			Kind:     fragment.Kind,
 			Selector: fragment.Selector,
-			Payload:  payload,
+			Payload:  semanticPayload,
 		},
-		Text: fragment.Text,
 	})
 	if err != nil {
 		return silverCheckpoint{}, err
@@ -1510,6 +1513,17 @@ func extractSilverBatch(ctx context.Context, job silverJob, fragment parsedSilve
 		})
 	}
 	return checkpoint, nil
+}
+
+func compactSemanticPayload(fragment parsedSilverFragment, encoded json.RawMessage) (json.RawMessage, error) {
+	payload, ok := fragment.Payload.(map[string]any)
+	if !ok || fragment.Kind != "parsed-table-row" || payload["columns"] == nil {
+		return encoded, nil
+	}
+	return json.Marshal(map[string]any{
+		"row":     payload["row"],
+		"columns": payload["columns"],
+	})
 }
 
 func observationID(observation silverObservation) string {

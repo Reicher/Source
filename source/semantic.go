@@ -32,7 +32,6 @@ type semanticInput struct {
 	Title    string                `json:"title"`
 	Mime     string                `json:"mime"`
 	Fragment semanticFragmentInput `json:"fragment"`
-	Text     string                `json:"text"`
 }
 
 type semanticFragmentInput struct {
