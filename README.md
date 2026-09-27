@@ -132,7 +132,7 @@ Self opens the scanner on first launch. Scan the Source QR code while both devic
 
 They will authenticate, pair, and reconnect automatically when Source is discoverable.
 
-For the full Linux deployment with the pinned local model, install Docker Compose and Python 3, then run from the repository root:
+For the full Linux deployment with the pinned local model, install Docker Compose, Python 3, and `iproute2`, then run from the repository root:
 
 ```sh
 ./scripts/deploy.sh

@@ -1,30 +1,74 @@
 #!/usr/bin/env python3
 """Resolve and preflight the private IPv4 address used by Source deployment."""
 
+import json
 import socket
+import subprocess
 import sys
 
 from validate_lan_address import valid_lan_address
-
-
-DISCOVERY_TARGET = ("192.0.2.1", 9)
 
 
 class LANAddressError(ValueError):
     pass
 
 
-def discover_lan_address() -> str:
-    """Ask the routing table which source address reaches the default route."""
+def discover_lan_address(run=subprocess.run) -> str:
+    """Return the preferred source address on the best IPv4 default route."""
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as connection:
-            connection.connect(DISCOVERY_TARGET)
-            return connection.getsockname()[0]
-    except OSError as error:
+        result = run(
+            ["ip", "-j", "-4", "route", "show", "default"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        routes = json.loads(result.stdout)
+    except (
+        FileNotFoundError,
+        OSError,
+        subprocess.CalledProcessError,
+        json.JSONDecodeError,
+    ) as error:
         raise LANAddressError(
-            "SOURCE_LAN_ADDRESS is unset and no default-route IPv4 address could be detected; "
-            "set it to an assigned private IPv4 address"
+            "SOURCE_LAN_ADDRESS is unset and the IPv4 default route could not be inspected; "
+            "install iproute2 or set it to an assigned private IPv4 address"
         ) from error
+
+    default_routes = (
+        [route for route in routes if isinstance(route, dict) and route.get("dst") == "default"]
+        if isinstance(routes, list)
+        else []
+    )
+    if not default_routes:
+        raise LANAddressError(
+            "SOURCE_LAN_ADDRESS is unset and no IPv4 default route was found; "
+            "set it to an assigned private IPv4 address"
+        )
+
+    try:
+        best_metric = min(int(route.get("metric", 0)) for route in default_routes)
+    except (TypeError, ValueError) as error:
+        raise LANAddressError("The IPv4 default route returned an invalid metric") from error
+
+    preferred_sources = set()
+    for route in default_routes:
+        if int(route.get("metric", 0)) != best_metric:
+            continue
+        source = route.get("prefsrc") or route.get("src")
+        if isinstance(source, str) and source.strip():
+            preferred_sources.add(source.strip())
+
+    if len(preferred_sources) != 1:
+        detail = (
+            "no preferred source address"
+            if not preferred_sources
+            else "multiple preferred source addresses"
+        )
+        raise LANAddressError(
+            f"The best IPv4 default route has {detail}; "
+            "set SOURCE_LAN_ADDRESS to an assigned private IPv4 address"
+        )
+    return preferred_sources.pop()
 
 
 def address_is_assigned(value: str) -> bool:

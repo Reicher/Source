@@ -1,9 +1,63 @@
+import json
 import unittest
+from types import SimpleNamespace
 
-from resolve_lan_address import LANAddressError, resolve_lan_address
+from resolve_lan_address import LANAddressError, discover_lan_address, resolve_lan_address
 
 
 class ResolveLANAddressTests(unittest.TestCase):
+    def test_discovers_source_from_lowest_metric_default_route(self):
+        def run(command, **options):
+            self.assertEqual(command, ["ip", "-j", "-4", "route", "show", "default"])
+            self.assertEqual(
+                options,
+                {"check": True, "capture_output": True, "text": True},
+            )
+            return SimpleNamespace(
+                stdout=json.dumps(
+                    [
+                        {
+                            "dst": "default",
+                            "dev": "vpn0",
+                            "prefsrc": "10.8.0.2",
+                            "metric": 600,
+                        },
+                        {
+                            "dst": "default",
+                            "dev": "eth0",
+                            "prefsrc": "192.168.1.20",
+                            "metric": 100,
+                        },
+                    ]
+                )
+            )
+
+        self.assertEqual(discover_lan_address(run), "192.168.1.20")
+
+    def test_rejects_ambiguous_equal_metric_default_routes(self):
+        def run(*_args, **_options):
+            return SimpleNamespace(
+                stdout=json.dumps(
+                    [
+                        {
+                            "dst": "default",
+                            "dev": "eth0",
+                            "prefsrc": "192.168.1.20",
+                            "metric": 100,
+                        },
+                        {
+                            "dst": "default",
+                            "dev": "wlan0",
+                            "prefsrc": "192.168.2.20",
+                            "metric": 100,
+                        },
+                    ]
+                )
+            )
+
+        with self.assertRaisesRegex(LANAddressError, "multiple preferred source addresses"):
+            discover_lan_address(run)
+
     def test_uses_assigned_configured_private_address(self):
         self.assertEqual(
             resolve_lan_address(
