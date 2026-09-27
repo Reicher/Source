@@ -19,3 +19,11 @@ internal fun sortLocalStorageItems(items: List<BronzeItem>, sort: LocalStorageSo
                 .thenBy { it.id },
         )
     }
+
+internal fun resolveJobBronzeSourceId(job: SourceJob, items: List<BronzeItem>): String? {
+    val available = items.filterNot(BronzeItem::deleted)
+    job.bronzeSourceId?.let { sourceId ->
+        if (available.any { it.id == sourceId }) return sourceId
+    }
+    return available.filter { it.title == job.title }.singleOrNull()?.id
+}

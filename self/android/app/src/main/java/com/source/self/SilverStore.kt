@@ -98,12 +98,14 @@ data class SourceJob(
     val state: String,
     val queuedAt: Long,
     val completedAt: Long?,
+    val bronzeSourceId: String? = null,
 ) {
     companion object {
         fun fromJson(value: JSONObject) = SourceJob(
             value.getString("id"), value.getString("kind"), value.getString("title"),
             value.optString("direction").takeIf(String::isNotEmpty), value.getString("state"),
             value.getLong("queued_at"), value.optLong("completed_at").takeIf { value.has("completed_at") },
+            value.optString("bronze_source_id").takeIf(String::isNotEmpty),
         )
     }
 }
@@ -134,6 +136,7 @@ private fun SourceJob.persistenceJson(): JSONObject = JSONObject()
     .put("queued_at", queuedAt)
     .also { value -> direction?.let { value.put("direction", it) } }
     .also { value -> completedAt?.let { value.put("completed_at", it) } }
+    .also { value -> bronzeSourceId?.let { value.put("bronze_source_id", it) } }
 
 private fun SourceJobs.persistenceJson(): JSONObject = JSONObject()
     .put("revision", revision)
@@ -180,7 +183,8 @@ data class SilverKnowledge(
     val claims: List<SilverClaim>,
     val processing: SilverProcessing?,
 ) {
-    val itemCount: Int get() = observations.size + entities.size + claims.size
+    val activeClaims: List<SilverClaim> get() = claims.filter { it.state == "active" }
+    val activeClaimCount: Int get() = activeClaims.size
 }
 
 data class SilverSnapshot(

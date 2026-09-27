@@ -1,6 +1,11 @@
 package com.source.self
 
-data class SyncJobPlan(val key: String, val title: String, val direction: String)
+data class SyncJobPlan(
+    val key: String,
+    val bronzeSourceId: String,
+    val title: String,
+    val direction: String,
+)
 
 class BronzeSync(private val store: BronzeStore, private val transport: PairingTransport) {
     // The transfer plan is visible and durable on Source. Bronze revisions and tombstones
@@ -23,19 +28,19 @@ class BronzeSync(private val store: BronzeStore, private val transport: PairingT
             val there = remote[id]
             when {
                 here == null && there != null -> {
-                    pending += Pending(SyncJobPlan("$id:${there.revision}:to_self", there.title, "to_self")) {
+                    pending += Pending(SyncJobPlan("$id:${there.revision}:to_self", id, there.title, "to_self")) {
                         transport.download(source, address, port, there, store)
                     }
                 }
                 here != null && there == null -> {
-                    pending += Pending(SyncJobPlan("$id:${here.revision}:to_source", here.title, "to_source")) {
+                    pending += Pending(SyncJobPlan("$id:${here.revision}:to_source", id, here.title, "to_source")) {
                         transport.upload(source, address, port, here, if (here.deleted) null else store.content(here))
                         store.acknowledge(here)
                     }
                 }
                 here != null && there != null && here.revision > there.revision -> {
                     check(here.isDeletionOf(there)) { "Immutable local Bronze conflict" }
-                    pending += Pending(SyncJobPlan("$id:${here.revision}:to_source", here.title, "to_source")) {
+                    pending += Pending(SyncJobPlan("$id:${here.revision}:to_source", id, here.title, "to_source")) {
                         transport.upload(source, address, port, here, if (here.deleted) null else store.content(here))
                         store.acknowledge(here)
                     }
@@ -43,7 +48,7 @@ class BronzeSync(private val store: BronzeStore, private val transport: PairingT
                 here != null && there != null && there.revision > here.revision -> {
                     check(here.ackedRevision == here.revision) { "Unsynchronized local Bronze must not be overwritten" }
                     check(there.isDeletionOf(here)) { "Immutable Source Bronze conflict" }
-                    pending += Pending(SyncJobPlan("$id:${there.revision}:to_self", there.title, "to_self")) {
+                    pending += Pending(SyncJobPlan("$id:${there.revision}:to_self", id, there.title, "to_self")) {
                         transport.download(source, address, port, there, store)
                     }
                 }

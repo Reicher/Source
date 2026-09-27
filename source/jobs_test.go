@@ -60,6 +60,30 @@ func TestSyncJobPlanValidation(t *testing.T) {
 	}
 }
 
+func TestSyncJobSnapshotLinksToItsBronzeSource(t *testing.T) {
+	store, err := newSyncJobStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sourceID = "11111111-1111-4111-8111-111111111111"
+	if _, err := store.plan([]syncJobPlanItem{{
+		Key: sourceID + ":1:to_source", BronzeSourceID: sourceID,
+		Title: "note.txt", Direction: "to_source",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.snapshot().Queued[0].BronzeSourceID; got != sourceID {
+		t.Fatalf("Bronze source link = %q, want %q", got, sourceID)
+	}
+	restarted, err := newSyncJobStore(filepath.Dir(store.path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := restarted.snapshot().Queued[0].BronzeSourceID; got != sourceID {
+		t.Fatalf("persisted Bronze source link = %q, want %q", got, sourceID)
+	}
+}
+
 func TestJobSnapshotsKeepExistingClientsCompatibleAndStatusBounded(t *testing.T) {
 	store, err := newSyncJobStore(t.TempDir())
 	if err != nil {
