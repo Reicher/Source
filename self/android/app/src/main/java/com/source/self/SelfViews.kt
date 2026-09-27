@@ -380,6 +380,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             addView(label(status, 18f, true).apply { setTextColor(if (connected) accentColor else primaryColor) })
             message?.let { addView(label(it, 14f).apply { setTextColor(secondaryColor) }) }
         })
+        val localBronze = bronze.all()
         val content = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             silver.statusError?.let { problem ->
@@ -395,17 +396,9 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             if (silver.jobs.queued.isEmpty()) {
                 addView(label("No jobs waiting", 14f).apply { setTextColor(secondaryColor) })
             } else {
-                silver.jobs.queued.forEach { addView(jobRow(it, false, onBronze)) }
-            }
-            addView(label("Completed (${silver.jobs.completedCount})", 19f, true), sectionMargin())
-            if (silver.jobs.completed.isEmpty()) {
-                addView(label("No completed jobs", 14f).apply { setTextColor(secondaryColor) })
-            } else {
-                val visibleCompleted = silver.jobs.completed.take(5)
-                visibleCompleted.forEach { addView(jobRow(it, true, onBronze)) }
-                if (silver.jobs.completedCount > visibleCompleted.size) addView(label(
-                    "+ ${silver.jobs.completedCount - visibleCompleted.size} earlier", 13f
-                ).apply { setTextColor(secondaryColor) })
+                silver.jobs.queued.forEach { job ->
+                    addView(jobRow(job, resolveJobBronzeSourceId(job, localBronze), onBronze))
+                }
             }
             if (silver.entities.isNotEmpty()) {
                 addView(label("Entities", 19f, true), sectionMargin())
@@ -420,7 +413,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         }, LinearLayout.LayoutParams(-1, 0, 1f))
     }
 
-    private fun jobRow(job: SourceJob, completed: Boolean, onBronze: (String) -> Unit): View = LinearLayout(activity).apply {
+    private fun jobRow(job: SourceJob, sourceId: String?, onBronze: (String) -> Unit): View = LinearLayout(activity).apply {
         orientation = LinearLayout.VERTICAL
         setPadding(dp(10), dp(7), dp(10), dp(7))
         val cardBackground = GradientDrawable().apply {
@@ -435,16 +428,14 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         } else {
             "Sync · ${if (job.direction == "to_source") "to Source" else "to Self"}"
         }
-        val time = if (completed && job.completedAt != null) {
-            " · ${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(job.completedAt))}"
-        } else ""
-        addView(label(kind + time, 13f).apply { setTextColor(secondaryColor) })
-        job.bronzeSourceId?.takeIf { id -> bronze.get(id)?.deleted == false }?.let { sourceId ->
+        addView(label(kind, 13f).apply { setTextColor(secondaryColor) })
+        sourceId?.let { id ->
+            addView(label("Open Bronze ›", 13f, true).apply { setTextColor(accentColor) })
             background = RippleDrawable(ColorStateList.valueOf(rippleColor), cardBackground, null)
             contentDescription = "${job.title}, $kind, open Bronze file"
             isClickable = true
             isFocusable = true
-            setOnClickListener { onBronze(sourceId) }
+            setOnClickListener { onBronze(id) }
         }
     }.also { view ->
         view.layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) }

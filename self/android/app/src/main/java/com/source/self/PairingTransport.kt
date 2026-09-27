@@ -99,7 +99,8 @@ class PairingTransport(private val state: PairingState) {
     fun planSync(source: SourceRef, address: String, port: Int, jobs: List<SyncJobPlan>): Map<String, String> {
         val values = JSONArray()
         jobs.forEach { job -> values.put(JSONObject()
-            .put("key", job.key).put("title", job.title).put("direction", job.direction)) }
+            .put("key", job.key).put("bronze_source_id", job.bronzeSourceId)
+            .put("title", job.title).put("direction", job.direction)) }
         val response = call(base(address, port), "/v1/jobs/sync", source.pin, "POST",
             JSONObject().put("jobs", values).toString())
         val planned = response.getJSONArray("jobs")

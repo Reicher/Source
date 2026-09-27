@@ -33,4 +33,31 @@ class LocalStorageSortTest {
             sortLocalStorageItems(items, LocalStorageSort.MODIFIED).map { it.title },
         )
     }
+
+    @Test fun queueNavigationUsesIdAndFallsBackToAnUnambiguousTitle() {
+        val first = item("first", "note.txt", 20)
+        val second = item("second", "photo.jpg", 10)
+
+        assertEquals(
+            second.id,
+            resolveJobBronzeSourceId(
+                SourceJob("job", "sync", first.title, "to_source", "queued", 1, null, second.id),
+                listOf(first, second),
+            ),
+        )
+        assertEquals(
+            first.id,
+            resolveJobBronzeSourceId(
+                SourceJob("old-job", "sync", first.title, "to_source", "queued", 1, null),
+                listOf(first, second),
+            ),
+        )
+        assertEquals(
+            null,
+            resolveJobBronzeSourceId(
+                SourceJob("ambiguous", "sync", first.title, "to_source", "queued", 1, null),
+                listOf(first, first.copy(id = "duplicate")),
+            ),
+        )
+    }
 }
