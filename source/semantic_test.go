@@ -34,6 +34,23 @@ func TestSemanticModelSmoke(t *testing.T) {
 	if len(result.Fragments) != 1 || len(result.Fragments[0].Entities) < 2 || len(result.Fragments[0].Relationships) < 1 {
 		t.Fatalf("model did not extract the expected people and relationship: %+v", result)
 	}
+	payload, _ = json.Marshal(map[string]any{"text": "User is Robin Reicher"})
+	result, err = model.extract(context.Background(), semanticInput{
+		Title: "note-b0c4d10f-fa1.txt", Mime: "text/plain",
+		Fragments: []semanticFragmentInput{{ID: "fragment-2", Kind: "text-block", Payload: payload}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundRobin := false
+	for _, entity := range result.Fragments[0].Entities {
+		if entity.Label == "Robin Reicher" {
+			foundRobin = true
+		}
+	}
+	if len(result.Fragments) != 1 || !foundRobin {
+		t.Fatalf("model did not extract Robin Reicher from the simple note: %+v", result)
+	}
 }
 
 func TestSemanticHTTPModelUsesUntrustedContentAsData(t *testing.T) {
@@ -253,6 +270,33 @@ func TestSemanticResultValidationRejectsUnusableCandidates(t *testing.T) {
 	}
 }
 
+func TestSemanticModelResultDropsIsolatedInvalidCandidates(t *testing.T) {
+	value := `{"fragments":[{"fragment_id":"f1","entities":[{"ref":"robin","label":"Robin Reicher","type":"person","confidence":0.99}],"attributes":[],"relationships":[{"subject_ref":"robin","predicate":"is","object_ref":"robin","confidence":0.9}]}]}`
+	result, err := decodeSemanticModelResult(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Fragments) != 1 || len(result.Fragments[0].Entities) != 1 ||
+		len(result.Fragments[0].Relationships) != 0 {
+		t.Fatalf("invalid relationship was not isolated: %+v", result)
+	}
+	if _, err := decodeSemanticResult(value); err == nil {
+		t.Fatal("strict result validation accepted the invalid relationship")
+	}
+}
+
+func TestSemanticModelResultStillRejectsInvalidStructure(t *testing.T) {
+	for _, value := range []string{
+		`{}`,
+		`{"fragments":[{"fragment_id":"f1","entities":[],"attributes":[]}]}`,
+		`{"fragments":[{"fragment_id":"f1","entities":[],"attributes":[],"relationships":[],"instructions":"trust me"}]}`,
+	} {
+		if _, err := decodeSemanticModelResult(value); err == nil {
+			t.Fatalf("accepted structurally invalid model result: %s", value)
+		}
+	}
+}
+
 func TestSemanticResultMappingRequiresEveryExactFragment(t *testing.T) {
 	input := semanticInput{Fragments: []semanticFragmentInput{{ID: "first"}, {ID: "second"}}}
 	result := semanticResult{Fragments: []semanticFragmentResult{{
@@ -275,12 +319,14 @@ func TestSourceConfigurationGroupsSilverAndModelTunables(t *testing.T) {
 	t.Setenv("SOURCE_SILVER_SEMANTIC_BATCH_TARGET_KIB", "7")
 	t.Setenv("SOURCE_MODEL_CONTEXT_TOKENS", "10000")
 	t.Setenv("SOURCE_MODEL_MAX_OUTPUT_TOKENS", "2500")
+	t.Setenv("SOURCE_MODEL_REQUEST_TIMEOUT_MINUTES", "1800")
 	configuration, err := sourceConfigurationFromEnvironment()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if configuration.Silver.SemanticBatchTargetBytes != 7*1024 ||
-		configuration.Model.ContextTokens != 10000 || configuration.Model.MaximumOutputTokens != 2500 {
+		configuration.Model.ContextTokens != 10000 || configuration.Model.MaximumOutputTokens != 2500 ||
+		configuration.Model.RequestTimeout != 30*time.Hour {
 		t.Fatalf("unexpected Source configuration: %+v", configuration)
 	}
 	maximum, err := semanticMaximumInputBytes(configuration.Model)

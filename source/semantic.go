@@ -19,13 +19,14 @@ import (
 
 const (
 	semanticProcessorID                  = "source.silver.semantic-model"
-	semanticProcessorVersion             = "3"
+	semanticProcessorVersion             = "4"
 	semanticMaximumResponse              = 1024 * 1024
 	semanticMaximumCandidates            = 128
 	semanticMaximumFragments             = 512
 	semanticDefaultBatchTargetBytes      = 4 * 1024
 	semanticDefaultContextTokens         = 8192
 	semanticDefaultMaximumOutputTokens   = 2048
+	semanticDefaultRequestTimeout        = 24 * time.Hour
 	semanticChatTemplateTokenReserve     = 256
 	semanticMinimumModelInputBudgetBytes = 1024
 )
@@ -88,6 +89,7 @@ type silverConfiguration struct {
 type semanticModelConfiguration struct {
 	ContextTokens       int
 	MaximumOutputTokens int
+	RequestTimeout      time.Duration
 }
 
 type sourceConfiguration struct {
@@ -109,6 +111,7 @@ func defaultSourceConfiguration() sourceConfiguration {
 		Silver: silverConfiguration{SemanticBatchTargetBytes: semanticDefaultBatchTargetBytes},
 		Model: semanticModelConfiguration{
 			ContextTokens: semanticDefaultContextTokens, MaximumOutputTokens: semanticDefaultMaximumOutputTokens,
+			RequestTimeout: semanticDefaultRequestTimeout,
 		},
 	}
 }
@@ -131,6 +134,13 @@ func sourceConfigurationFromEnvironment() (sourceConfiguration, error) {
 	if err != nil {
 		return sourceConfiguration{}, err
 	}
+	timeoutMinutes, err := positiveEnvironmentInt(
+		"SOURCE_MODEL_REQUEST_TIMEOUT_MINUTES", int(configuration.Model.RequestTimeout/time.Minute),
+	)
+	if err != nil {
+		return sourceConfiguration{}, err
+	}
+	configuration.Model.RequestTimeout = time.Duration(timeoutMinutes) * time.Minute
 	if _, err := semanticMaximumInputBytes(configuration.Model); err != nil {
 		return sourceConfiguration{}, err
 	}
@@ -199,10 +209,13 @@ func newHTTPSemanticModelWithConfiguration(endpoint, modelID, revision string, c
 	if err != nil {
 		return nil, err
 	}
+	if configuration.RequestTimeout <= 0 {
+		return nil, errors.New("Source model request timeout must be positive")
+	}
 	return &httpSemanticModel{
 		endpoint: strings.TrimRight(endpoint, "/"), modelID: modelID, revision: revision,
 		maximumInput: maximumInput, maximumOutput: configuration.MaximumOutputTokens,
-		client: &http.Client{Timeout: 2 * time.Minute},
+		client: &http.Client{Timeout: configuration.RequestTimeout},
 	}, nil
 }
 
@@ -272,7 +285,7 @@ func (m *httpSemanticModel) extract(ctx context.Context, input semanticInput) (s
 	if err := json.Unmarshal(body, &completion); err != nil || len(completion.Choices) != 1 {
 		return semanticResult{}, permanentSilverProcessError(errors.New("invalid Source model completion response"))
 	}
-	result, err := decodeSemanticResult(completion.Choices[0].Message.Content)
+	result, err := decodeSemanticModelResult(completion.Choices[0].Message.Content)
 	if err != nil {
 		return semanticResult{}, permanentSilverProcessError(fmt.Errorf("invalid Source model semantic result: %w", err))
 	}
@@ -300,6 +313,63 @@ var (
 )
 
 func decodeSemanticResult(content string) (semanticResult, error) {
+	result, err := decodeSemanticResultStructure(content)
+	if err != nil {
+		return semanticResult{}, err
+	}
+	if err := validateSemanticCandidates(result); err != nil {
+		return semanticResult{}, err
+	}
+	return result, nil
+}
+
+// decodeSemanticModelResult keeps a structurally sound model response useful
+// when the model emits an isolated invalid candidate. Model candidates are
+// proposals rather than source data, so dropping an unusable candidate is
+// safer than failing and repeatedly re-running the complete batch.
+func decodeSemanticModelResult(content string) (semanticResult, error) {
+	result, err := decodeSemanticResultStructure(content)
+	if err != nil {
+		return semanticResult{}, err
+	}
+	for index := range result.Fragments {
+		fragment := &result.Fragments[index]
+		entities := make([]semanticEntityCandidate, 0, len(fragment.Entities))
+		refs := map[string]bool{}
+		for _, entity := range fragment.Entities {
+			if !validSemanticEntityCandidate(entity) || refs[entity.Ref] {
+				continue
+			}
+			refs[entity.Ref] = true
+			entities = append(entities, entity)
+		}
+		attributes := make([]semanticAttributeCandidate, 0, len(fragment.Attributes))
+		for _, attribute := range fragment.Attributes {
+			if refs[attribute.SubjectRef] && semanticPredicatePattern.MatchString(attribute.Predicate) &&
+				validSemanticConfidence(attribute.Confidence) && validClaimValue(attribute.Value) {
+				attributes = append(attributes, attribute)
+			}
+		}
+		relationships := make([]semanticRelationshipCandidate, 0, len(fragment.Relationships))
+		for _, relationship := range fragment.Relationships {
+			if refs[relationship.SubjectRef] && refs[relationship.ObjectRef] &&
+				relationship.SubjectRef != relationship.ObjectRef &&
+				semanticPredicatePattern.MatchString(relationship.Predicate) &&
+				validSemanticConfidence(relationship.Confidence) {
+				relationships = append(relationships, relationship)
+			}
+		}
+		fragment.Entities = entities
+		fragment.Attributes = attributes
+		fragment.Relationships = relationships
+	}
+	if err := validateSemanticCandidates(result); err != nil {
+		return semanticResult{}, err
+	}
+	return result, nil
+}
+
+func decodeSemanticResultStructure(content string) (semanticResult, error) {
 	decoder := json.NewDecoder(strings.NewReader(strings.TrimSpace(content)))
 	decoder.DisallowUnknownFields()
 	var result semanticResult
@@ -323,41 +393,45 @@ func decodeSemanticResult(content string) (semanticResult, error) {
 			return semanticResult{}, errors.New("semantic fragment result must contain all candidate arrays")
 		}
 		candidateCount += len(fragment.Entities) + len(fragment.Attributes) + len(fragment.Relationships)
-		refs := map[string]bool{}
-		for _, entity := range fragment.Entities {
-			if !semanticRefPattern.MatchString(entity.Ref) || refs[entity.Ref] {
-				return semanticResult{}, errors.New("invalid or duplicate entity ref")
-			}
-			if strings.TrimSpace(entity.Label) == "" || len([]rune(entity.Label)) > 200 {
-				return semanticResult{}, errors.New("invalid entity label")
-			}
-			if entity.Type != "" && !semanticPredicatePattern.MatchString(entity.Type) {
-				return semanticResult{}, errors.New("invalid entity type")
-			}
-			if !validSemanticConfidence(entity.Confidence) {
-				return semanticResult{}, errors.New("invalid entity confidence")
-			}
-			refs[entity.Ref] = true
-		}
-		for _, attribute := range fragment.Attributes {
-			if !refs[attribute.SubjectRef] || !semanticPredicatePattern.MatchString(attribute.Predicate) || !validSemanticConfidence(attribute.Confidence) {
-				return semanticResult{}, errors.New("invalid attribute candidate")
-			}
-			if !validClaimValue(attribute.Value) {
-				return semanticResult{}, errors.New("invalid attribute value")
-			}
-		}
-		for _, relationship := range fragment.Relationships {
-			if !refs[relationship.SubjectRef] || !refs[relationship.ObjectRef] || relationship.SubjectRef == relationship.ObjectRef ||
-				!semanticPredicatePattern.MatchString(relationship.Predicate) || !validSemanticConfidence(relationship.Confidence) {
-				return semanticResult{}, errors.New("invalid relationship candidate")
-			}
-		}
 	}
 	if candidateCount > semanticMaximumCandidates {
 		return semanticResult{}, errors.New("too many semantic candidates")
 	}
 	return result, nil
+}
+
+func validateSemanticCandidates(result semanticResult) error {
+	for _, fragment := range result.Fragments {
+		refs := map[string]bool{}
+		for _, entity := range fragment.Entities {
+			if !validSemanticEntityCandidate(entity) || refs[entity.Ref] {
+				return errors.New("invalid or duplicate entity candidate")
+			}
+			refs[entity.Ref] = true
+		}
+		for _, attribute := range fragment.Attributes {
+			if !refs[attribute.SubjectRef] || !semanticPredicatePattern.MatchString(attribute.Predicate) ||
+				!validSemanticConfidence(attribute.Confidence) || !validClaimValue(attribute.Value) {
+				return errors.New("invalid attribute candidate")
+			}
+		}
+		for _, relationship := range fragment.Relationships {
+			if !refs[relationship.SubjectRef] || !refs[relationship.ObjectRef] ||
+				relationship.SubjectRef == relationship.ObjectRef ||
+				!semanticPredicatePattern.MatchString(relationship.Predicate) ||
+				!validSemanticConfidence(relationship.Confidence) {
+				return errors.New("invalid relationship candidate")
+			}
+		}
+	}
+	return nil
+}
+
+func validSemanticEntityCandidate(entity semanticEntityCandidate) bool {
+	return semanticRefPattern.MatchString(entity.Ref) && strings.TrimSpace(entity.Label) != "" &&
+		len([]rune(entity.Label)) <= 200 &&
+		(entity.Type == "" || semanticPredicatePattern.MatchString(entity.Type)) &&
+		validSemanticConfidence(entity.Confidence)
 }
 
 func validateSemanticResult(result semanticResult) error {
