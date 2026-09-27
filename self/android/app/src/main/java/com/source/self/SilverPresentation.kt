@@ -10,20 +10,57 @@ internal data class SilverFinding(
     val sourceExcerpt: String?,
 )
 
+internal fun SilverProcessing.presentation(defaultState: String = "Processing"): String {
+    val progress = if (totalBatches > 0) " · $completedBatches/$totalBatches" else ""
+    if (state != "failed") return "$defaultState$progress"
+    val detail = error?.trim()?.takeIf(String::isNotEmpty) ?: "Unknown processing error"
+    return if (retryable) "Processing failed; retry scheduled · $detail"
+    else "Processing stopped · $detail"
+}
+
+internal fun SilverSource.coveragePresentation(): String? {
+    val current = coverage ?: return null
+    if (current.extractionState == "completed" && current.semanticState == "completed") return null
+    val reason = when (current.semanticSkipReason) {
+        "unsupported_content" -> "This content type is not supported for knowledge extraction."
+        "source_too_large" -> "This source is too large for the current extractor."
+        "model_unavailable" -> "The semantic model was unavailable."
+        "fragment_exceeds_model_limit" -> "Some content exceeds the semantic model's current input limit."
+        else -> "Some semantic work was not completed."
+    }
+    return when (current.semanticState) {
+        "partial" -> "Semantic processing is partial. $reason"
+        "skipped" -> if (current.extractionState == "skipped") {
+            "Deterministic extraction and semantic processing were skipped. $reason"
+        } else {
+            "Semantic processing was skipped. $reason"
+        }
+        else -> if (current.extractionState == "skipped") "Deterministic extraction was skipped. $reason" else null
+    }
+}
+
 internal fun SilverKnowledge.unresolvedFindings(): List<SilverFinding> {
     val supportedObservationIds = claims.asSequence()
         .filter { it.state == "active" }
         .flatMap { it.supportingObservationIds.asSequence() }
         .toSet()
+    data class EvidenceScopedRef(val evidenceId: String, val ref: String)
+
     val candidateLabels = observations.asSequence()
         .filter { it.kind == "entity-candidate" }
-        .mapNotNull { observation ->
-            val payload = observation.payload as? JSONObject ?: return@mapNotNull null
+        .flatMap { observation ->
+            val payload = observation.payload as? JSONObject ?: return@flatMap emptySequence()
             val ref = payload.optString("ref").trim()
             val label = payload.optString("label").trim()
-            if (ref.isEmpty() || label.isEmpty()) null else ref to label
+            if (ref.isEmpty() || label.isEmpty()) emptySequence()
+            else observation.evidenceIds.asSequence().map { EvidenceScopedRef(it, ref) to label }
         }
         .toMap()
+
+    fun candidateLabel(observation: SilverObservation, ref: String): String? = observation.evidenceIds
+        .mapNotNull { evidenceId -> candidateLabels[EvidenceScopedRef(evidenceId, ref)] }
+        .distinct()
+        .singleOrNull()
 
     data class Candidate(
         val predicate: String,
@@ -47,14 +84,16 @@ internal fun SilverKnowledge.unresolvedFindings(): List<SilverFinding> {
                     val predicate = payload.optString("predicate").trim().takeIf(String::isNotEmpty)
                         ?: return@mapNotNull null
                     val value = humanSilverValue(payload.opt("value")) ?: return@mapNotNull null
-                    val subject = candidateLabels[payload.optString("subject_ref")]
+                    val subject = candidateLabel(observation, payload.optString("subject_ref"))
                     humanizeSilverValue(predicate) to listOfNotNull(subject, value).joinToString(" → ")
                 }
                 "relationship-candidate" -> {
                     val predicate = payload.optString("predicate").trim().takeIf(String::isNotEmpty)
                         ?: return@mapNotNull null
-                    val subject = candidateLabels[payload.optString("subject_ref")] ?: return@mapNotNull null
-                    val objectLabel = candidateLabels[payload.optString("object_ref")] ?: return@mapNotNull null
+                    val subject = candidateLabel(observation, payload.optString("subject_ref"))
+                        ?: return@mapNotNull null
+                    val objectLabel = candidateLabel(observation, payload.optString("object_ref"))
+                        ?: return@mapNotNull null
                     humanizeSilverValue(predicate) to "$subject → $objectLabel"
                 }
                 else -> return@mapNotNull null

@@ -1,11 +1,53 @@
 package com.source.self
 
+import org.json.JSONArray
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SilverStoreTest {
+    @Test fun sourceCoverageAndProcessingErrorsParseFromSnapshot() {
+        val empty = JSONArray()
+        val source = JSONObject()
+            .put("bronze_source_id", "bronze")
+            .put("bronze_content_sha256", "hash")
+            .put("title", "note.txt")
+            .put("mime", "text/plain")
+            .put("evidence_ids", empty)
+            .put("observation_ids", empty)
+            .put("entity_ids", empty)
+            .put("claim_ids", empty)
+            .put("coverage", JSONObject()
+                .put("extraction_state", "completed")
+                .put("semantic_state", "partial")
+                .put("semantic_skip_reason", "fragment_exceeds_model_limit"))
+        val processing = JSONObject()
+            .put("bronze_source_id", "bronze")
+            .put("state", "failed")
+            .put("completed_batches", 1)
+            .put("total_batches", 2)
+            .put("error", "Model loading")
+            .put("retryable", true)
+        val snapshot = SilverSnapshot.fromJson(JSONObject()
+            .put("schema_version", 1)
+            .put("revision", 3)
+            .put("sources", JSONArray().put(source))
+            .put("evidence", JSONArray())
+            .put("observations", JSONArray())
+            .put("entities", JSONArray())
+            .put("claims", JSONArray())
+            .put("processing", JSONArray().put(processing))
+            .put("error", "Silver reconciliation failed"))
+
+        assertEquals("partial", snapshot.sources.single().coverage?.semanticState)
+        assertEquals("fragment_exceeds_model_limit", snapshot.sources.single().coverage?.semanticSkipReason)
+        assertEquals("Model loading", snapshot.processing.single().error)
+        assertTrue(snapshot.processing.single().retryable)
+        assertEquals("Silver reconciliation failed", snapshot.statusError)
+    }
+
     @Test fun statusRefreshesJobsWithoutRequestingUnchangedSilver() {
         val snapshot = SilverSnapshot(
             7, emptyList(), emptyList(), emptyList(), emptyList(), emptyList(), emptyList(),
@@ -26,7 +68,8 @@ class SilverStoreTest {
         val completed = SourceJob("done", "silver_extraction", "photo.jpg", null, "completed", 2, 3)
         val status = SourceStatus(
             "person", 7, 12, SourceJobs(12, listOf(queued), listOf(completed), 1, 9),
-            listOf(SilverProcessing("bronze", "processing", 2, 4)),
+            listOf(SilverProcessing("bronze", "failed", 2, 4, "Model unavailable", true)),
+            "Silver reconciliation failed: storage unavailable",
         )
 
         val restored = sourceStatusFromPersistenceJson(status.persistenceJson())

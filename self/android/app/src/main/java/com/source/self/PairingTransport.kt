@@ -27,6 +27,7 @@ data class SourceStatus(
     val jobsRevision: Long? = null,
     val jobs: SourceJobs? = null,
     val processing: List<SilverProcessing>? = null,
+    val silverError: String? = null,
 )
 
 class PairingTransport(private val state: PairingState) {
@@ -62,6 +63,7 @@ class PairingTransport(private val state: PairingState) {
             response.optLong("jobs_revision").takeIf { response.has("jobs_revision") },
             response.optJSONObject("jobs")?.let(SourceJobs::fromJson),
             response.optJSONArray("processing")?.let(SilverProcessing::list),
+            response.optString("silver_error").takeIf(String::isNotEmpty),
         )
     }
 

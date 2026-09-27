@@ -352,6 +352,72 @@ func TestSilverOversizedSemanticFragmentKeepsDeterministicExtraction(t *testing.
 	if len(snapshot.Sources) != 1 || len(snapshot.Evidence) != 2 || len(snapshot.Observations) != 2 {
 		t.Fatalf("deterministic Silver was not published for every fragment: %+v", snapshot)
 	}
+	coverage := snapshot.Sources[0].Coverage
+	if coverage.ExtractionState != silverExtractionCompleted || coverage.SemanticState != silverSemanticPartial ||
+		coverage.SemanticSkipReason != silverSkipFragmentTooLarge {
+		t.Fatalf("oversized fragment coverage was reported as complete: %+v", coverage)
+	}
+}
+
+func TestSilverOversizedTextPublishesExplicitSkippedCoverage(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	content := strings.Repeat("x", silverMaximumInputBytes+1)
+	putSilverBronze(t, bronze, "16161616-1616-4161-8161-161616161616", "oversized.txt", "text/plain", 1, content)
+	modelCalls := 0
+	model := testSemanticModel{id: "model", revision: "1", run: func(input semanticInput) (semanticResult, error) {
+		modelCalls++
+		return emptySemanticResult(input), nil
+	}}
+	service, err := newSilverServiceWithModel(root+"/silver", bronze, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !service.processNext(context.Background()) {
+		t.Fatal("Silver oversized-source job did not run")
+	}
+	snapshot := service.snapshot()
+	if len(snapshot.Sources) != 1 || modelCalls != 0 {
+		t.Fatalf("oversized source was not published without semantic inference: sources=%+v calls=%d", snapshot.Sources, modelCalls)
+	}
+	coverage := snapshot.Sources[0].Coverage
+	if coverage.ExtractionState != silverExtractionSkipped || coverage.SemanticState != silverSemanticSkipped ||
+		coverage.SemanticSkipReason != silverSkipSourceTooLarge {
+		t.Fatalf("oversized source coverage: %+v", coverage)
+	}
+}
+
+func TestSilverInputLimitChangeRequeuesPartialSemanticCoverage(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	content := fmt.Sprintf(`{"long":%q,"short":"Ada"}`, strings.Repeat("x", 2048))
+	putSilverBronze(t, bronze, "17171717-1717-4171-8171-171717171717", "values.json", "application/json", 1, content)
+	result := func(input semanticInput) (semanticResult, error) { return emptySemanticResult(input), nil }
+	limited, err := newSilverServiceWithModel(root+"/silver", bronze,
+		testSemanticModel{id: "same-model", revision: "1", maximum: 512, run: result})
+	if err != nil {
+		t.Fatal(err)
+	}
+	limited.processNext(context.Background())
+	if got := limited.snapshot().Sources[0].Coverage.SemanticState; got != silverSemanticPartial {
+		t.Fatalf("limited model coverage = %q, want partial", got)
+	}
+
+	expanded, err := newSilverServiceWithModel(root+"/silver", bronze,
+		testSemanticModel{id: "same-model", revision: "1", maximum: 8192, run: result})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := expanded.snapshot()
+	if len(before.Sources) != 1 || !before.Sources[0].Stale || len(before.Processing) != 1 {
+		t.Fatalf("input-limit change did not queue replacement work: %+v", before)
+	}
+	expanded.processNext(context.Background())
+	after := expanded.snapshot()
+	if len(after.Sources) != 1 || after.Sources[0].Stale ||
+		after.Sources[0].Coverage.SemanticState != silverSemanticCompleted {
+		t.Fatalf("expanded model did not complete semantic coverage: %+v", after.Sources)
+	}
 }
 
 func TestSilverSemanticBatchRetryKeepsCompletedCheckpoints(t *testing.T) {
@@ -398,6 +464,154 @@ func TestSilverSemanticBatchRetryKeepsCompletedCheckpoints(t *testing.T) {
 	}
 	if len(service.snapshot().Sources) != 1 {
 		t.Fatal("successful retry was not published")
+	}
+}
+
+func TestSilverPermanentSemanticFailureDoesNotRetry(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	putSilverBronze(t, bronze, "18181818-1818-4181-8181-181818181818", "invalid.txt", "text/plain", 1, "A note")
+	model := testSemanticModel{id: "invalid-model", revision: "1", run: func(semanticInput) (semanticResult, error) {
+		return semanticResult{}, nil
+	}}
+	service, err := newSilverServiceWithModel(root+"/silver", bronze, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.processNext(context.Background())
+	job := service.state.Jobs[0]
+	if job.State != "failed" || job.Retryable || job.RetryAt != 0 || job.Error == "" {
+		t.Fatalf("permanent model failure was scheduled for retry: %+v", job)
+	}
+	if err := service.reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if service.state.Jobs[0].State != "failed" {
+		t.Fatalf("permanent failure was requeued: %+v", service.state.Jobs[0])
+	}
+	processing := service.snapshot().Processing
+	if len(processing) != 1 || processing[0].Error == "" || processing[0].Retryable {
+		t.Fatalf("permanent failure was not exposed: %+v", processing)
+	}
+}
+
+func TestSilverFailedFailureStatePersistenceRemainsObservable(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	putSilverBronze(t, bronze, "19191919-1919-4191-8191-191919191919", "failure.txt", "text/plain", 1, "A note")
+	blocker := filepath.Join(root, "blocker")
+	if err := os.WriteFile(blocker, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var service *silverService
+	model := testSemanticModel{id: "failing-model", revision: "1", run: func(semanticInput) (semanticResult, error) {
+		service.path = filepath.Join(blocker, "state.json")
+		return semanticResult{}, errors.New("model unavailable")
+	}}
+	var err error
+	service, err = newSilverServiceWithModel(root+"/silver", bronze, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalPath := service.path
+	service.processNext(context.Background())
+	job := service.state.Jobs[0]
+	if job.State != "failed" || !service.pendingPersistence || service.snapshot().Error == "" {
+		t.Fatalf("failed-state storage error was hidden or left running: job=%+v error=%q", job, service.snapshot().Error)
+	}
+	service.state.Jobs[0].RetryAt = time.Now().Add(time.Hour).UnixMilli()
+	service.path = originalPath
+	if err := service.reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := newSilverServiceWithModel(root+"/silver", bronze, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restarted.state.Jobs[0].State != "failed" || !restarted.state.Jobs[0].Retryable {
+		t.Fatalf("failed state was not durably recovered: %+v", restarted.state.Jobs[0])
+	}
+}
+
+func TestSilverPendingFailurePersistenceBlocksLaterJobs(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	putSilverBronze(t, bronze, "20202020-2020-4202-8202-202020202020", "first.txt", "text/plain", 1, "First note")
+	putSilverBronze(t, bronze, "21212121-2121-4212-8212-212121212121", "second.txt", "text/plain", 1, "Second note")
+	blocker := filepath.Join(root, "blocker")
+	if err := os.WriteFile(blocker, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var service *silverService
+	calls := 0
+	model := testSemanticModel{id: "failure-then-success", revision: "1", run: func(input semanticInput) (semanticResult, error) {
+		calls++
+		if calls == 1 {
+			service.path = filepath.Join(blocker, "state.json")
+			return semanticResult{}, nil
+		}
+		return emptySemanticResult(input), nil
+	}}
+	var err error
+	service, err = newSilverServiceWithModel(root+"/silver", bronze, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalPath := service.path
+	if !service.processNext(context.Background()) {
+		t.Fatal("first job was not processed")
+	}
+	if service.state.Jobs[0].State != "failed" || !service.pendingPersistence {
+		t.Fatalf("first failure was not retained pending persistence: %+v", service.state.Jobs)
+	}
+	if service.processNext(context.Background()) {
+		t.Fatal("worker selected later work while failed state was not durable")
+	}
+	if service.state.Jobs[1].State != "queued" || calls != 1 {
+		t.Fatalf("later job advanced before storage recovered: jobs=%+v calls=%d", service.state.Jobs, calls)
+	}
+
+	service.path = originalPath
+	if err := service.reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if !service.processNext(context.Background()) {
+		t.Fatal("later job did not run after storage recovered")
+	}
+	if service.state.Jobs[1].State != "completed" || calls != 2 {
+		t.Fatalf("later job did not complete after recovery: jobs=%+v calls=%d", service.state.Jobs, calls)
+	}
+}
+
+func TestSilverReconciliationFailureIsObservable(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	service, err := newSilverServiceWithModel(root+"/silver", bronze, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalDir := bronze.dir
+	blocker := filepath.Join(root, "bronze-blocker")
+	if err := os.WriteFile(blocker, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	bronze.dir = blocker
+	if err := service.reconcile(); err == nil {
+		t.Fatal("reconciliation unexpectedly succeeded")
+	}
+	if got := service.snapshot().Error; !strings.Contains(got, "reconciliation failed") {
+		t.Fatalf("reconciliation error was not exposed: %q", got)
+	}
+	_, _, _, statusError := service.refreshStatus()
+	if !strings.Contains(statusError, "reconciliation failed") {
+		t.Fatalf("lightweight status omitted reconciliation error: %q", statusError)
+	}
+	bronze.dir = originalDir
+	if err := service.reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if got := service.snapshot().Error; got != "" {
+		t.Fatalf("successful reconciliation did not clear operational error: %q", got)
 	}
 }
 
@@ -575,17 +789,20 @@ func (r *countingReader) Read(value []byte) (int, error) {
 
 func TestSilverRejectsKnownBinaryWithoutReadingContent(t *testing.T) {
 	reader := &countingReader{reader: bytes.NewReader(make([]byte, silverMaximumInputBytes+1))}
-	fragments, supported, err := parseSilverReader(bronzeItem{Title: "photo.jpg", Mime: "image/jpeg"}, reader)
-	if err != nil || supported || fragments != nil || reader.read != 0 {
-		t.Fatalf("binary read was not bounded by metadata: read=%d supported=%v fragments=%v err=%v", reader.read, supported, fragments, err)
+	result, err := parseSilverReader(bronzeItem{Title: "photo.jpg", Mime: "image/jpeg"}, reader)
+	if err != nil || result.Coverage.ExtractionState != silverExtractionSkipped ||
+		result.Coverage.SemanticSkipReason != silverSkipUnsupportedContent || result.Fragments != nil || reader.read != 0 {
+		t.Fatalf("binary read was not bounded by metadata: read=%d result=%+v err=%v", reader.read, result, err)
 	}
 }
 
 func TestSilverReaderHasHardInputBound(t *testing.T) {
 	reader := &countingReader{reader: bytes.NewReader(bytes.Repeat([]byte("x"), silverMaximumInputBytes+1024))}
-	fragments, supported, err := parseSilverReader(bronzeItem{Title: "unknown.dat", Mime: "application/octet-stream"}, reader)
-	if err != nil || supported || fragments != nil || reader.read > silverMaximumInputBytes+1 {
-		t.Fatalf("input bound: read=%d supported=%v fragments=%v err=%v", reader.read, supported, fragments, err)
+	result, err := parseSilverReader(bronzeItem{Title: "unknown.dat", Mime: "application/octet-stream"}, reader)
+	if err != nil || result.Coverage.ExtractionState != silverExtractionSkipped ||
+		result.Coverage.SemanticSkipReason != silverSkipSourceTooLarge || result.Fragments != nil ||
+		reader.read > silverMaximumInputBytes+1 {
+		t.Fatalf("input bound: read=%d result=%+v err=%v", reader.read, result, err)
 	}
 }
 

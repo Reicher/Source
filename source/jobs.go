@@ -211,9 +211,9 @@ type sourceJobs struct {
 	silver *silverService
 }
 
-func (j *sourceJobs) refreshStatus() (int64, sourceJobSnapshot, []silverProcessing) {
-	silverRevision, silverJobs, processing := j.silver.refreshStatus()
-	return silverRevision, boundedJobSnapshot(mergeJobSnapshots(j.sync.snapshot(), silverJobs)), processing
+func (j *sourceJobs) refreshStatus() (int64, sourceJobSnapshot, []silverProcessing, string) {
+	silverRevision, silverJobs, processing, silverError := j.silver.refreshStatus()
+	return silverRevision, boundedJobSnapshot(mergeJobSnapshots(j.sync.snapshot(), silverJobs)), processing, silverError
 }
 
 func (j *sourceJobs) snapshot() sourceJobSnapshot {

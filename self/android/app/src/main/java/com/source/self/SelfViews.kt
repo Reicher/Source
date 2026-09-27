@@ -377,6 +377,10 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         })
         val content = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
+            silver.statusError?.let { problem ->
+                addView(label(problem, 14f).apply { setTextColor(secondaryColor) },
+                    LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+            }
             if (silver.sources.any { it.stale }) {
                 addView(label("Some knowledge is being updated; previous results remain visible.", 14f).apply {
                     setTextColor(secondaryColor)
@@ -539,19 +543,17 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         }, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
         val body = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
         if (knowledge.source?.stale == true) {
-            val progress = knowledge.processing?.let {
-                if (it.totalBatches > 0) " · ${it.completedBatches}/${it.totalBatches}" else ""
-            } ?: ""
-            body.addView(label("Updating$progress", 13f).apply {
+            val state = knowledge.processing?.presentation("Updating") ?: "Updating"
+            body.addView(label(state, 13f).apply {
                 setTextColor(secondaryColor)
             })
         }
         if (knowledge.source == null) {
-            val state = knowledge.processing?.let {
-                val progress = if (it.totalBatches > 0) " · ${it.completedBatches}/${it.totalBatches}" else ""
-                "Processing$progress"
-            } ?: "No knowledge"
+            val state = knowledge.processing?.presentation() ?: "No knowledge"
             body.addView(label(state, 15f).apply { setTextColor(secondaryColor) })
+        }
+        knowledge.source?.coveragePresentation()?.let { coverage ->
+            body.addView(label(coverage, 13f).apply { setTextColor(secondaryColor) })
         }
         if (knowledge.entities.isNotEmpty()) {
             knowledge.entities.sortedBy(silver::label).forEach { entity ->

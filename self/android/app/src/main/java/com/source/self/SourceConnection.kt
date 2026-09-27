@@ -76,6 +76,10 @@ class SourceConnection(
         }
         handler.removeCallbacks(tick)
         stopDiscovery()
+    }
+
+    fun close() {
+        stop()
         io.shutdownNow()
     }
 

@@ -417,14 +417,26 @@ func TestSilverRetriesTransientModelFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	service.processNext(context.Background())
-	if service.state.Jobs[0].State != "failed" || service.state.Jobs[0].RetryAt <= time.Now().UnixMilli() {
+	if service.state.Jobs[0].State != "failed" || !service.state.Jobs[0].Retryable ||
+		service.state.Jobs[0].RetryAt <= time.Now().UnixMilli() {
 		t.Fatalf("transient model failure was not scheduled for retry: %+v", service.state.Jobs[0])
 	}
-	service.state.Jobs[0].RetryAt = time.Now().Add(-time.Second).UnixMilli()
-	if err := service.reconcile(); err != nil {
+	service.state.Jobs[0].RetryAt = time.Now().Add(time.Hour).UnixMilli()
+	if err := service.saveLocked(); err != nil {
 		t.Fatal(err)
 	}
-	if service.state.Jobs[0].State != "queued" {
-		t.Fatalf("due model failure was not requeued: %+v", service.state.Jobs[0])
+	restarted, err := newSilverServiceWithModel(root+"/silver", bronze, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restarted.state.Jobs[0].State != "failed" || !restarted.state.Jobs[0].Retryable {
+		t.Fatalf("restart discarded transient failure state: %+v", restarted.state.Jobs[0])
+	}
+	restarted.state.Jobs[0].RetryAt = time.Now().Add(-time.Second).UnixMilli()
+	if err := restarted.reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if restarted.state.Jobs[0].State != "queued" {
+		t.Fatalf("due model failure was not requeued: %+v", restarted.state.Jobs[0])
 	}
 }
