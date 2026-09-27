@@ -47,6 +47,9 @@ services:
       SOURCE_MODEL_URL: http://127.0.0.1:8082
       SOURCE_MODEL_ID: source-semantic
       SOURCE_MODEL_REVISION: 182be2fd6c7bc44887d88a91cb03ff009cc9f549
+      SOURCE_MODEL_CONTEXT_TOKENS: "8192"
+      SOURCE_MODEL_MAX_OUTPUT_TOKENS: "2048"
+      SOURCE_SILVER_SEMANTIC_BATCH_TARGET_KIB: "4"
     volumes:
       - "${SOURCE_DATA_ROOT:?}:/data"
     read_only: true

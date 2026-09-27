@@ -143,6 +143,8 @@ The script verifies or downloads the model, builds the containers, starts them, 
 
 Persistent data defaults to `~/.local/share/source-v1/`; back it up. Set `SOURCE_DATA_ROOT` or `SOURCE_MODEL_ROOT` to other absolute paths when needed.
 
+Source groups Silver semantic work by encoded input size. The deployment defaults to a 4 KiB target through `SOURCE_SILVER_SEMANTIC_BATCH_TARGET_KIB`; Source also bounds requests against `SOURCE_MODEL_CONTEXT_TOKENS` and reserves `SOURCE_MODEL_MAX_OUTPUT_TOKENS` for the response. These processing tunables are configuration only and are not exposed in Self yet.
+
 From another computer, reach the loopback-only setup page through:
 
 ```sh

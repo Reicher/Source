@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -41,10 +42,17 @@ func attachSilverQueue(service *silverService, bronze *bronzeStore) {
 
 type testSemanticModel struct {
 	id, revision string
+	maximum      int
 	run          func(semanticInput) (semanticResult, error)
 }
 
 func (m testSemanticModel) identity() (string, string) { return m.id, m.revision }
+func (m testSemanticModel) maximumInputBytes() int {
+	if m.maximum > 0 {
+		return m.maximum
+	}
+	return 1024 * 1024
+}
 
 func (m testSemanticModel) extract(_ context.Context, input semanticInput) (semanticResult, error) {
 	return m.run(input)
@@ -52,21 +60,35 @@ func (m testSemanticModel) extract(_ context.Context, input semanticInput) (sema
 
 func testConfidence(value float64) *float64 { return &value }
 
+func emptySemanticResult(input semanticInput) semanticResult {
+	result := semanticResult{Fragments: make([]semanticFragmentResult, 0, len(input.Fragments))}
+	for _, fragment := range input.Fragments {
+		result.Fragments = append(result.Fragments, semanticFragmentResult{
+			FragmentID: fragment.ID, Entities: []semanticEntityCandidate{},
+			Attributes: []semanticAttributeCandidate{}, Relationships: []semanticRelationshipCandidate{},
+		})
+	}
+	return result
+}
+
 func namedPeopleTestModel() semanticModel {
 	return testSemanticModel{id: "test-people", revision: "1", run: func(input semanticInput) (semanticResult, error) {
-		var payload struct {
-			Text string `json:"text"`
-		}
-		if err := json.Unmarshal(input.Fragment.Payload, &payload); err != nil {
-			return semanticResult{}, err
-		}
-		var entities []semanticEntityCandidate
-		for index, label := range []string{"Ada Lovelace", "Grace Hopper"} {
-			if strings.Contains(payload.Text, label) {
-				entities = append(entities, semanticEntityCandidate{Ref: fmt.Sprintf("e%d", index+1), Label: label, Confidence: testConfidence(0.99)})
+		result := emptySemanticResult(input)
+		for fragmentIndex, fragment := range input.Fragments {
+			var payload struct {
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(fragment.Payload, &payload); err != nil {
+				return semanticResult{}, err
+			}
+			for index, label := range []string{"Ada Lovelace", "Grace Hopper"} {
+				if strings.Contains(payload.Text, label) {
+					result.Fragments[fragmentIndex].Entities = append(result.Fragments[fragmentIndex].Entities,
+						semanticEntityCandidate{Ref: fmt.Sprintf("e%d", index+1), Label: label, Confidence: testConfidence(0.99)})
+				}
 			}
 		}
-		return semanticResult{Entities: entities}, nil
+		return result, nil
 	}}
 }
 
@@ -124,7 +146,7 @@ func TestSilverQueueAndCheckpointsSurviveRestart(t *testing.T) {
 	bronze := newBronzeStore(root + "/bronze")
 	item := putSilverBronze(t, bronze, "11111111-1111-4111-8111-111111111111", "people.txt", "text/plain", 1,
 		"Ada Lovelace designed a machine.\n\nGrace Hopper built compilers.")
-	service, err := newSilverServiceWithModel(root+"/silver", bronze, namedPeopleTestModel())
+	service, err := newSilverServiceWithConfiguration(root+"/silver", bronze, namedPeopleTestModel(), silverConfiguration{SemanticBatchTargetBytes: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +170,7 @@ func TestSilverQueueAndCheckpointsSurviveRestart(t *testing.T) {
 		t.Fatalf("checkpoint was not persisted: %+v", service.state.Jobs[0])
 	}
 
-	restarted, err := newSilverServiceWithModel(root+"/silver", bronze, namedPeopleTestModel())
+	restarted, err := newSilverServiceWithConfiguration(root+"/silver", bronze, namedPeopleTestModel(), silverConfiguration{SemanticBatchTargetBytes: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,6 +194,210 @@ func TestSilverQueueAndCheckpointsSurviveRestart(t *testing.T) {
 	}
 	if len(snapshot.Entities) != 2 || len(snapshot.Claims) != 2 {
 		t.Fatalf("model candidate resolution missing: entities=%d claims=%d", len(snapshot.Entities), len(snapshot.Claims))
+	}
+}
+
+func TestSilverSemanticBatchesPreserveFragmentEvidenceMapping(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	var content strings.Builder
+	content.WriteString("name,email\n")
+	expectedRows := map[string]int{}
+	for index := 0; index < 40; index++ {
+		label := fmt.Sprintf("Person %02d", index+1)
+		fmt.Fprintf(&content, "%s,person%02d@example.test\n", label, index+1)
+		expectedRows[label] = index + 2
+	}
+	putSilverBronze(t, bronze, "13131313-1313-4131-8131-131313131313", "people.csv", "text/csv", 1, content.String())
+
+	calls := 0
+	largestBatch := 0
+	model := testSemanticModel{id: "batch-model", revision: "1", run: func(input semanticInput) (semanticResult, error) {
+		calls++
+		largestBatch = max(largestBatch, len(input.Fragments))
+		result := emptySemanticResult(input)
+		for index, fragment := range input.Fragments {
+			var payload struct {
+				Columns map[string]string `json:"columns"`
+			}
+			if err := json.Unmarshal(fragment.Payload, &payload); err != nil {
+				return semanticResult{}, err
+			}
+			result.Fragments[index].Entities = []semanticEntityCandidate{{
+				Ref: "person", Label: payload.Columns["name"], Type: "person", Confidence: testConfidence(0.99),
+			}}
+		}
+		return result, nil
+	}}
+	service, err := newSilverServiceWithModel(root+"/silver", bronze, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !service.processNext(context.Background()) {
+		t.Fatal("Silver batch job did not run")
+	}
+	if calls >= len(expectedRows) || largestBatch <= 1 {
+		t.Fatalf("semantic fragments were not batched: calls=%d largest_batch=%d", calls, largestBatch)
+	}
+
+	snapshot := service.snapshot()
+	evidenceByID := map[string]silverEvidence{}
+	for _, evidence := range snapshot.Evidence {
+		evidenceByID[evidence.ID] = evidence
+	}
+	candidates := 0
+	for _, observation := range snapshot.Observations {
+		if observation.Kind != "entity-candidate" {
+			continue
+		}
+		candidates++
+		if len(observation.EvidenceIDs) != 1 {
+			t.Fatalf("batched result lost its single-fragment evidence: %+v", observation)
+		}
+		var payload struct {
+			Label string `json:"label"`
+		}
+		if err := json.Unmarshal(observation.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		evidence, ok := evidenceByID[observation.EvidenceIDs[0]]
+		row, rowOK := evidence.Selector["row"].(int)
+		if !ok || !rowOK || row != expectedRows[payload.Label] {
+			t.Fatalf("semantic result mapped to the wrong CSV row: label=%q evidence=%+v", payload.Label, evidence)
+		}
+	}
+	if candidates != len(expectedRows) || len(snapshot.Entities) != len(expectedRows) {
+		t.Fatalf("batched candidates missing: candidates=%d entities=%d", candidates, len(snapshot.Entities))
+	}
+}
+
+func TestSilverSemanticBatchBoundariesUseEncodedInputSize(t *testing.T) {
+	job := silverJob{BronzeSourceID: "source", BronzeContentSHA256: "hash", Title: "note.txt", Mime: "text/plain"}
+	fragment := func(text string, start int) parsedSilverFragment {
+		return fragmentWithTextRange("text-block", start, start+len(text), text, map[string]any{"text": text})
+	}
+	fragments := []parsedSilverFragment{
+		fragment(strings.Repeat("a", 20), 0),
+		fragment(strings.Repeat("b", 20), 20),
+		fragment(strings.Repeat("c", 600), 40),
+		fragment(strings.Repeat("d", 20), 640),
+	}
+	twoSmall, err := semanticInputForFragments(job, fragments[:2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(twoSmall)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batches, err := buildSilverBatches(job, fragments, len(encoded), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batches) != 3 || len(batches[0].Fragments) != 2 || len(batches[1].Fragments) != 1 || len(batches[2].Fragments) != 1 {
+		t.Fatalf("batch boundaries did not follow encoded semantic size: %+v", batches)
+	}
+}
+
+func TestSilverSemanticBatchBoundariesRespectModelInputLimit(t *testing.T) {
+	job := silverJob{BronzeSourceID: "source", BronzeContentSHA256: "hash", Title: "note.txt", Mime: "text/plain"}
+	first := fragmentWithTextRange("text-block", 0, 10, "fragment-a", map[string]any{"text": "fragment-a"})
+	second := fragmentWithTextRange("text-block", 1, 11, "fragment-b", map[string]any{"text": "fragment-b"})
+	single, err := semanticInputForFragments(job, []parsedSilverFragment{first})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(single)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := testSemanticModel{id: "limited", revision: "1", maximum: len(encoded), run: func(input semanticInput) (semanticResult, error) {
+		return emptySemanticResult(input), nil
+	}}
+	batches, err := buildSilverBatches(job, []parsedSilverFragment{first, second}, 1024*1024, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batches) != 2 || len(batches[0].Fragments) != 1 || len(batches[1].Fragments) != 1 {
+		t.Fatalf("model input limit did not cap the configured batch target: %+v", batches)
+	}
+}
+
+func TestSilverOversizedSemanticFragmentKeepsDeterministicExtraction(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	content := fmt.Sprintf(`{"long":%q,"short":"Ada"}`, strings.Repeat("x", 2048))
+	putSilverBronze(t, bronze, "15151515-1515-4151-8151-151515151515", "values.json", "application/json", 1, content)
+
+	modelCalls := 0
+	model := testSemanticModel{id: "limited-model", revision: "1", maximum: 512, run: func(input semanticInput) (semanticResult, error) {
+		modelCalls++
+		if len(input.Fragments) != 1 || input.Fragments[0].Selector["pointer"] != "/short" {
+			return semanticResult{}, fmt.Errorf("oversized fragment was sent to the model: %+v", input.Fragments)
+		}
+		return emptySemanticResult(input), nil
+	}}
+	service, err := newSilverServiceWithModel(root+"/silver", bronze, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !service.processNext(context.Background()) {
+		t.Fatal("Silver job did not run")
+	}
+	job := service.state.Jobs[0]
+	if job.State != "completed" || job.Attempts != 0 || modelCalls != 1 {
+		t.Fatalf("oversized fragment caused a retry or blocked later semantics: job=%+v calls=%d", job, modelCalls)
+	}
+	snapshot := service.snapshot()
+	if len(snapshot.Sources) != 1 || len(snapshot.Evidence) != 2 || len(snapshot.Observations) != 2 {
+		t.Fatalf("deterministic Silver was not published for every fragment: %+v", snapshot)
+	}
+}
+
+func TestSilverSemanticBatchRetryKeepsCompletedCheckpoints(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	putSilverBronze(t, bronze, "14141414-1414-4141-8141-141414141414", "retry.txt", "text/plain", 1,
+		"First fragment.\n\nSecond fragment.\n\nThird fragment.")
+	calls := map[string]int{}
+	model := testSemanticModel{id: "retry-model", revision: "1", run: func(input semanticInput) (semanticResult, error) {
+		var payload struct {
+			Text string `json:"text"`
+		}
+		if len(input.Fragments) != 1 {
+			return semanticResult{}, fmt.Errorf("expected one fragment per forced test batch, got %d", len(input.Fragments))
+		}
+		if err := json.Unmarshal(input.Fragments[0].Payload, &payload); err != nil {
+			return semanticResult{}, err
+		}
+		calls[payload.Text]++
+		if payload.Text == "Second fragment." && calls[payload.Text] == 1 {
+			return semanticResult{}, errors.New("transient inference failure")
+		}
+		return emptySemanticResult(input), nil
+	}}
+	service, err := newSilverServiceWithConfiguration(root+"/silver", bronze, model,
+		silverConfiguration{SemanticBatchTargetBytes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.processNext(context.Background())
+	job := &service.state.Jobs[0]
+	if job.State != "failed" || len(job.Checkpoints) != 1 {
+		t.Fatalf("failure did not retain the completed batch: %+v", job)
+	}
+	job.RetryAt = time.Now().Add(-time.Second).UnixMilli()
+	if err := service.reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if !service.processNext(context.Background()) {
+		t.Fatal("retry did not run")
+	}
+	if calls["First fragment."] != 1 || calls["Second fragment."] != 2 || calls["Third fragment."] != 1 {
+		t.Fatalf("retry repeated completed semantic work: %+v", calls)
+	}
+	if len(service.snapshot().Sources) != 1 {
+		t.Fatal("successful retry was not published")
 	}
 }
 
