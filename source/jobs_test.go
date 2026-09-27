@@ -80,7 +80,7 @@ func TestJobSnapshotsKeepExistingClientsCompatibleAndStatusBounded(t *testing.T)
 	if snapshot.CompletedCount != 7 || len(snapshot.Completed) != 7 {
 		t.Fatalf("existing job response lost completed jobs: %+v", snapshot)
 	}
-	_, status, _ := jobs.refreshStatus()
+	_, status, _, _ := jobs.refreshStatus()
 	if status.CompletedCount != 7 || len(status.Completed) != 5 {
 		t.Fatalf("lightweight job status was not bounded: %+v", status)
 	}

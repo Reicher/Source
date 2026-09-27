@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -29,12 +30,23 @@ const (
 	silverExtractionVersion = "1"
 	silverResolverID        = "source.silver.candidate-resolver"
 	silverResolverVersion   = "2"
-	silverProcessorVersion  = "3-" + silverExtractionVersion + "-" + semanticProcessorVersion + "-" + silverResolverVersion
+	silverProcessorVersion  = "4-" + silverExtractionVersion + "-" + semanticProcessorVersion + "-" + silverResolverVersion
 	silverResolutionMinimum = 0.70
 	silverMaximumBatchBytes = 4096
 	silverInspectionBytes   = 8192
 	silverMaximumInputBytes = 8 * 1024 * 1024
 	silverReconcileInterval = time.Second
+
+	silverExtractionCompleted = "completed"
+	silverExtractionSkipped   = "skipped"
+	silverSemanticCompleted   = "completed"
+	silverSemanticSkipped     = "skipped"
+	silverSemanticPartial     = "partial"
+
+	silverSkipUnsupportedContent = "unsupported_content"
+	silverSkipSourceTooLarge     = "source_too_large"
+	silverSkipModelUnavailable   = "model_unavailable"
+	silverSkipFragmentTooLarge   = "fragment_exceeds_model_limit"
 )
 
 type silverProducer struct {
@@ -76,20 +88,28 @@ type silverClaim struct {
 	State                    string          `json:"state"`
 }
 
+type silverCoverage struct {
+	ExtractionState    string `json:"extraction_state"`
+	SemanticState      string `json:"semantic_state"`
+	SemanticSkipReason string `json:"semantic_skip_reason,omitempty"`
+}
+
 type silverSource struct {
-	BronzeSourceID      string   `json:"bronze_source_id"`
-	BronzeContentSHA256 string   `json:"bronze_content_sha256"`
-	Title               string   `json:"title"`
-	Mime                string   `json:"mime"`
-	ProcessorID         string   `json:"processor_id"`
-	ProcessorVersion    string   `json:"processor_version"`
-	ModelID             string   `json:"model_id,omitempty"`
-	ModelRevision       string   `json:"model_revision,omitempty"`
-	EvidenceIDs         []string `json:"evidence_ids"`
-	ObservationIDs      []string `json:"observation_ids"`
-	EntityIDs           []string `json:"entity_ids"`
-	ClaimIDs            []string `json:"claim_ids"`
-	Stale               bool     `json:"stale,omitempty"`
+	BronzeSourceID      string         `json:"bronze_source_id"`
+	BronzeContentSHA256 string         `json:"bronze_content_sha256"`
+	Title               string         `json:"title"`
+	Mime                string         `json:"mime"`
+	ProcessorID         string         `json:"processor_id"`
+	ProcessorVersion    string         `json:"processor_version"`
+	ModelID             string         `json:"model_id,omitempty"`
+	ModelRevision       string         `json:"model_revision,omitempty"`
+	SemanticInputLimit  int            `json:"semantic_input_limit,omitempty"`
+	Coverage            silverCoverage `json:"coverage"`
+	EvidenceIDs         []string       `json:"evidence_ids"`
+	ObservationIDs      []string       `json:"observation_ids"`
+	EntityIDs           []string       `json:"entity_ids"`
+	ClaimIDs            []string       `json:"claim_ids"`
+	Stale               bool           `json:"stale,omitempty"`
 }
 
 type silverDataset struct {
@@ -107,6 +127,7 @@ type silverProcessing struct {
 	CompletedBatches int    `json:"completed_batches"`
 	TotalBatches     int    `json:"total_batches"`
 	Error            string `json:"error,omitempty"`
+	Retryable        bool   `json:"retryable"`
 }
 
 type silverSnapshot struct {
@@ -119,6 +140,7 @@ type silverSnapshot struct {
 	Claims        []silverClaim       `json:"claims"`
 	Processing    []silverProcessing  `json:"processing"`
 	Jobs          sourceJobSnapshot   `json:"jobs"`
+	Error         string              `json:"error,omitempty"`
 }
 
 type silverEntityCandidate struct {
@@ -147,13 +169,16 @@ type silverRelationshipCandidate struct {
 }
 
 type silverCheckpoint struct {
-	BatchIndex    int                           `json:"batch_index"`
-	BatchSHA256   string                        `json:"batch_sha256"`
-	Evidence      []silverEvidence              `json:"evidence"`
-	Observations  []silverObservation           `json:"observations"`
-	Entities      []silverEntityCandidate       `json:"entity_candidates,omitempty"`
-	Attributes    []silverAttributeCandidate    `json:"attribute_candidates,omitempty"`
-	Relationships []silverRelationshipCandidate `json:"relationship_candidates,omitempty"`
+	BatchIndex                 int                           `json:"batch_index"`
+	BatchSHA256                string                        `json:"batch_sha256"`
+	Evidence                   []silverEvidence              `json:"evidence"`
+	Observations               []silverObservation           `json:"observations"`
+	Entities                   []silverEntityCandidate       `json:"entity_candidates,omitempty"`
+	Attributes                 []silverAttributeCandidate    `json:"attribute_candidates,omitempty"`
+	Relationships              []silverRelationshipCandidate `json:"relationship_candidates,omitempty"`
+	SemanticFragments          int                           `json:"semantic_fragments,omitempty"`
+	SemanticCompletedFragments int                           `json:"semantic_completed_fragments,omitempty"`
+	SemanticSkipReason         string                        `json:"semantic_skip_reason,omitempty"`
 }
 
 type silverJob struct {
@@ -166,12 +191,15 @@ type silverJob struct {
 	ProcessorVersion    string             `json:"processor_version"`
 	ModelID             string             `json:"model_id,omitempty"`
 	ModelRevision       string             `json:"model_revision,omitempty"`
+	SemanticInputLimit  int                `json:"semantic_input_limit,omitempty"`
+	Coverage            silverCoverage     `json:"coverage"`
 	State               string             `json:"state"`
 	TotalBatches        int                `json:"total_batches"`
 	Checkpoints         []silverCheckpoint `json:"checkpoints,omitempty"`
 	Error               string             `json:"error,omitempty"`
 	Attempts            int                `json:"attempts,omitempty"`
 	RetryAt             int64              `json:"retry_at,omitempty"`
+	Retryable           bool               `json:"retryable"`
 	AcceptedAt          int64              `json:"accepted_at"`
 	UpdatedAt           int64              `json:"updated_at"`
 }
@@ -197,15 +225,37 @@ type silverDiskState struct {
 }
 
 type silverService struct {
-	mu              sync.Mutex
-	path            string
-	bronze          *bronzeStore
-	configuration   silverConfiguration
-	state           silverDiskState
-	persisted       []byte
-	wake            chan struct{}
-	semantic        semanticModel
-	afterCheckpoint func(string, int)
+	mu                 sync.Mutex
+	path               string
+	bronze             *bronzeStore
+	configuration      silverConfiguration
+	state              silverDiskState
+	persisted          []byte
+	wake               chan struct{}
+	semantic           semanticModel
+	afterCheckpoint    func(string, int)
+	statusError        string
+	pendingPersistence bool
+}
+
+type silverProcessError struct {
+	err       error
+	retryable bool
+}
+
+func (e *silverProcessError) Error() string { return e.err.Error() }
+func (e *silverProcessError) Unwrap() error { return e.err }
+
+func permanentSilverProcessError(err error) error {
+	return &silverProcessError{err: err, retryable: false}
+}
+
+func silverProcessErrorIsRetryable(err error) bool {
+	var classified *silverProcessError
+	if errors.As(err, &classified) {
+		return classified.retryable
+	}
+	return true
 }
 
 func newSilverService(dir string, bronze *bronzeStore) (*silverService, error) {
@@ -275,10 +325,11 @@ func newSilverServiceWithConfiguration(dir string, bronze *bronzeStore, model se
 	}
 	recovered := false
 	for index := range s.state.Jobs {
-		if s.state.Jobs[index].State == "running" || s.state.Jobs[index].State == "failed" {
+		if s.state.Jobs[index].State == "running" {
 			s.state.Jobs[index].State = "queued"
 			s.state.Jobs[index].Error = ""
 			s.state.Jobs[index].RetryAt = 0
+			s.state.Jobs[index].Retryable = false
 			recovered = true
 		}
 	}
@@ -299,7 +350,9 @@ func (s *silverService) start(ctx context.Context) {
 		ticker := time.NewTicker(silverReconcileInterval)
 		defer ticker.Stop()
 		for {
-			_ = s.reconcile()
+			if err := s.reconcile(); err != nil {
+				log.Printf("Silver reconciliation failed: %v", err)
+			}
 			for s.processNext(ctx) {
 			}
 			select {
@@ -320,23 +373,25 @@ func (s *silverService) signal() {
 	}
 }
 
-func (s *silverService) modelIdentity() (string, string) {
+func (s *silverService) modelIdentity() (string, string, int) {
 	if s.semantic == nil {
-		return "", ""
+		return "", "", 0
 	}
-	return s.semantic.identity()
+	modelID, modelRevision := s.semantic.identity()
+	return modelID, modelRevision, s.semantic.maximumInputBytes()
 }
 
 func (s *silverService) retryDueFailuresLocked(now time.Time) bool {
 	changed := false
 	for index := range s.state.Jobs {
 		job := &s.state.Jobs[index]
-		if job.State != "failed" || job.RetryAt == 0 || job.RetryAt > now.UnixMilli() {
+		if job.State != "failed" || !job.Retryable || job.RetryAt == 0 || job.RetryAt > now.UnixMilli() {
 			continue
 		}
 		job.State = "queued"
 		job.Error = ""
 		job.RetryAt = 0
+		job.Retryable = false
 		job.UpdatedAt = now.UnixMilli()
 		changed = true
 	}
@@ -345,7 +400,25 @@ func (s *silverService) retryDueFailuresLocked(now time.Time) bool {
 
 // reconcile makes the durable Bronze manifest the source of truth for Silver
 // work. It repairs missed queue entries and requeues transient failures when due.
-func (s *silverService) reconcile() error {
+func (s *silverService) reconcile() (resultErr error) {
+	defer func() {
+		s.mu.Lock()
+		if resultErr != nil {
+			s.statusError = "Silver reconciliation failed: " + resultErr.Error()
+		} else if !s.pendingPersistence {
+			s.statusError = ""
+		}
+		s.mu.Unlock()
+	}()
+	s.mu.Lock()
+	if s.pendingPersistence {
+		if err := s.persistCurrentLocked(); err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("persist pending Silver job state: %w", err)
+		}
+		s.pendingPersistence = false
+	}
+	s.mu.Unlock()
 	items, err := s.bronze.manifest()
 	if err != nil {
 		return err
@@ -391,29 +464,29 @@ func (s *silverService) needsReconcileLocked(item bronzeItem) bool {
 		}
 		return false
 	}
-	modelID, modelRevision := s.modelIdentity()
+	modelID, modelRevision, semanticInputLimit := s.modelIdentity()
 	if published, ok := s.state.Published[item.ID]; ok && s.sourceMatchesCurrent(published.Source, item) {
 		return false
 	}
 	for _, job := range s.state.Jobs {
-		if job.State != "cancelled" && silverJobMatchesItem(job, item, modelID, modelRevision) {
+		if job.State != "cancelled" && silverJobMatchesItem(job, item, modelID, modelRevision, semanticInputLimit) {
 			return false
 		}
 	}
 	return true
 }
 
-func silverJobMatchesItem(job silverJob, item bronzeItem, modelID, modelRevision string) bool {
+func silverJobMatchesItem(job silverJob, item bronzeItem, modelID, modelRevision string, semanticInputLimit int) bool {
 	return job.BronzeSourceID == item.ID && job.BronzeContentSHA256 == item.Hash &&
 		job.Title == item.Title && job.Mime == item.Mime &&
 		job.ProcessorID == silverProcessorID && job.ProcessorVersion == silverProcessorVersion &&
-		job.ModelID == modelID && job.ModelRevision == modelRevision
+		job.ModelID == modelID && job.ModelRevision == modelRevision && job.SemanticInputLimit == semanticInputLimit
 }
 
-func silverSourceMatchesItem(source silverSource, item bronzeItem, modelID, modelRevision string) bool {
+func silverSourceMatchesItem(source silverSource, item bronzeItem, modelID, modelRevision string, semanticInputLimit int) bool {
 	return silverSourceMatchesBronze(source, item) &&
 		source.ProcessorID == silverProcessorID && source.ProcessorVersion == silverProcessorVersion &&
-		source.ModelID == modelID && source.ModelRevision == modelRevision
+		source.ModelID == modelID && source.ModelRevision == modelRevision && source.SemanticInputLimit == semanticInputLimit
 }
 
 func (s *silverService) sourceMatchesCurrent(source silverSource, item bronzeItem) bool {
@@ -421,8 +494,8 @@ func (s *silverService) sourceMatchesCurrent(source silverSource, item bronzeIte
 		return silverSourceMatchesBronze(source, item) &&
 			source.ProcessorID == silverProcessorID && source.ProcessorVersion == silverProcessorVersion
 	}
-	modelID, modelRevision := s.modelIdentity()
-	return silverSourceMatchesItem(source, item, modelID, modelRevision)
+	modelID, modelRevision, semanticInputLimit := s.modelIdentity()
+	return silverSourceMatchesItem(source, item, modelID, modelRevision, semanticInputLimit)
 }
 
 func silverSourceMatchesBronze(source silverSource, item bronzeItem) bool {
@@ -433,11 +506,11 @@ func silverSourceMatchesBronze(source silverSource, item bronzeItem) bool {
 func (s *silverService) enqueue(item bronzeItem) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	modelID, modelRevision := s.modelIdentity()
+	modelID, modelRevision, semanticInputLimit := s.modelIdentity()
 	changed := false
 	for index := range s.state.Jobs {
 		job := &s.state.Jobs[index]
-		if job.BronzeSourceID == item.ID && !silverJobMatchesItem(*job, item, modelID, modelRevision) && (job.State == "queued" || job.State == "running" || job.State == "failed") {
+		if job.BronzeSourceID == item.ID && !silverJobMatchesItem(*job, item, modelID, modelRevision, semanticInputLimit) && (job.State == "queued" || job.State == "running" || job.State == "failed") {
 			job.State = "cancelled"
 			job.Checkpoints = nil
 			job.UpdatedAt = time.Now().UnixMilli()
@@ -485,13 +558,7 @@ func (s *silverService) enqueue(item bronzeItem) (bool, error) {
 	}
 	for index := range s.state.Jobs {
 		job := &s.state.Jobs[index]
-		if job.State != "cancelled" && silverJobMatchesItem(*job, item, modelID, modelRevision) {
-			if job.State == "failed" {
-				job.State = "queued"
-				job.Error = ""
-				job.UpdatedAt = time.Now().UnixMilli()
-				changed = true
-			}
+		if job.State != "cancelled" && silverJobMatchesItem(*job, item, modelID, modelRevision, semanticInputLimit) {
 			if changed {
 				s.state.Revision++
 				if err := s.saveLocked(); err != nil {
@@ -510,7 +577,7 @@ func (s *silverService) enqueue(item bronzeItem) (bool, error) {
 	s.state.Jobs = append(s.state.Jobs, silverJob{
 		ID: fmt.Sprintf("job-%d", s.state.NextJob), BronzeSourceID: item.ID, BronzeContentSHA256: item.Hash,
 		Title: item.Title, Mime: item.Mime, ProcessorID: silverProcessorID, ProcessorVersion: silverProcessorVersion,
-		ModelID: modelID, ModelRevision: modelRevision,
+		ModelID: modelID, ModelRevision: modelRevision, SemanticInputLimit: semanticInputLimit,
 		State: "queued", AcceptedAt: now, UpdatedAt: now,
 	})
 	s.state.Revision++
@@ -542,6 +609,7 @@ func (s *silverService) processNext(ctx context.Context) bool {
 	s.state.Revision++
 	job := s.state.Jobs[index]
 	if err := s.saveLocked(); err != nil {
+		s.statusError = "Silver job state storage failed: " + err.Error()
 		s.mu.Unlock()
 		return false
 	}
@@ -551,13 +619,22 @@ func (s *silverService) processNext(ctx context.Context) bool {
 	if err != nil && !errors.Is(err, context.Canceled) {
 		s.mu.Lock()
 		if current := s.jobLocked(job.ID); current != nil && current.State == "running" {
+			retryable := silverProcessErrorIsRetryable(err)
 			current.State = "failed"
 			current.Error = err.Error()
+			current.Retryable = retryable
 			current.Attempts++
-			current.RetryAt = time.Now().Add(silverRetryDelay(current.Attempts)).UnixMilli()
+			if retryable {
+				current.RetryAt = time.Now().Add(silverRetryDelay(current.Attempts)).UnixMilli()
+			} else {
+				current.RetryAt = 0
+			}
 			current.UpdatedAt = time.Now().UnixMilli()
 			s.state.Revision++
-			_ = s.saveLocked()
+			if saveErr := s.saveFailureLocked(); saveErr != nil {
+				s.statusError = "Silver failed-state storage failed: " + saveErr.Error()
+				log.Printf("Silver failed-state storage failed for %s: %v", job.ID, saveErr)
+			}
 		}
 		s.mu.Unlock()
 	}
@@ -584,9 +661,12 @@ func (s *silverService) processJob(ctx context.Context, jobID string) error {
 
 	item, file, err := s.bronze.openContent(copy.BronzeSourceID)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return permanentSilverProcessError(fmt.Errorf("Bronze content is missing: %w", err))
+		}
 		return err
 	}
-	fragments, supported, err := parseSilverReader(item, file)
+	parsed, err := parseSilverReader(item, file)
 	closeErr := file.Close()
 	if err != nil {
 		return err
@@ -597,15 +677,18 @@ func (s *silverService) processJob(ctx context.Context, jobID string) error {
 	if item.Hash != copy.BronzeContentSHA256 {
 		return s.cancelJob(jobID)
 	}
-	if !supported {
-		fragments = nil
-	}
+	fragments := parsed.Fragments
 
 	s.mu.Lock()
 	job = s.jobLocked(jobID)
 	if job == nil || job.State != "running" {
 		s.mu.Unlock()
 		return context.Canceled
+	}
+	job.Coverage = parsed.Coverage
+	if job.Coverage.SemanticState == "" && s.semantic == nil {
+		job.Coverage.SemanticState = silverSemanticSkipped
+		job.Coverage.SemanticSkipReason = silverSkipModelUnavailable
 	}
 	batches, err := buildSilverBatches(copy, fragments, s.configuration.SemanticBatchTargetBytes, s.semantic)
 	if err != nil {
@@ -671,8 +754,11 @@ func (s *silverService) publish(jobID string, current bronzeItem) error {
 		return context.Canceled
 	}
 	latest, err := s.bronze.load(current.ID)
-	modelID, modelRevision := s.modelIdentity()
-	if err != nil || latest.Deleted || !silverJobMatchesItem(*job, latest, modelID, modelRevision) {
+	modelID, modelRevision, semanticInputLimit := s.modelIdentity()
+	if err != nil {
+		return fmt.Errorf("load current Bronze metadata: %w", err)
+	}
+	if latest.Deleted || !silverJobMatchesItem(*job, latest, modelID, modelRevision, semanticInputLimit) {
 		return s.cancelJobLocked(job)
 	}
 	if len(job.Checkpoints) != job.TotalBatches {
@@ -682,7 +768,7 @@ func (s *silverService) publish(jobID string, current bronzeItem) error {
 	dataset := silverDataset{Source: silverSource{
 		BronzeSourceID: job.BronzeSourceID, BronzeContentSHA256: job.BronzeContentSHA256,
 		Title: job.Title, Mime: job.Mime, ProcessorID: job.ProcessorID, ProcessorVersion: job.ProcessorVersion,
-		ModelID: job.ModelID, ModelRevision: job.ModelRevision,
+		ModelID: job.ModelID, ModelRevision: job.ModelRevision, SemanticInputLimit: job.SemanticInputLimit,
 	}, PublishedAt: time.Now().UnixMilli()}
 	sort.Slice(job.Checkpoints, func(i, j int) bool { return job.Checkpoints[i].BatchIndex < job.Checkpoints[j].BatchIndex })
 	entitySeen := map[string]bool{}
@@ -691,6 +777,7 @@ func (s *silverService) publish(jobID string, current bronzeItem) error {
 		dataset.Observations = append(dataset.Observations, checkpoint.Observations...)
 		s.resolveCheckpointCandidatesLocked(&dataset, checkpoint, entitySeen, job.ModelID, job.ModelRevision)
 	}
+	dataset.Source.Coverage = silverCoverageForCompletedJob(*job)
 	for _, evidence := range dataset.Evidence {
 		dataset.Source.EvidenceIDs = append(dataset.Source.EvidenceIDs, evidence.ID)
 	}
@@ -707,15 +794,51 @@ func (s *silverService) publish(jobID string, current bronzeItem) error {
 		s.state.History[job.BronzeSourceID] = append(s.state.History[job.BronzeSourceID], prior)
 	}
 	s.state.Published[job.BronzeSourceID] = dataset
+	job.Coverage = dataset.Source.Coverage
 	job.State = "completed"
 	job.Checkpoints = nil
 	job.Error = ""
 	job.Attempts = 0
 	job.RetryAt = 0
+	job.Retryable = false
 	job.UpdatedAt = time.Now().UnixMilli()
 	s.state.Revision++
 	s.state.DataRevision++
 	return s.saveLocked()
+}
+
+func silverCoverageForCompletedJob(job silverJob) silverCoverage {
+	coverage := job.Coverage
+	if coverage.SemanticState != "" {
+		return coverage
+	}
+	semanticFragments := 0
+	completedFragments := 0
+	reasons := map[string]bool{}
+	for _, checkpoint := range job.Checkpoints {
+		semanticFragments += checkpoint.SemanticFragments
+		completedFragments += checkpoint.SemanticCompletedFragments
+		if checkpoint.SemanticSkipReason != "" {
+			reasons[checkpoint.SemanticSkipReason] = true
+		}
+	}
+	switch {
+	case completedFragments == semanticFragments:
+		coverage.SemanticState = silverSemanticCompleted
+	case completedFragments == 0:
+		coverage.SemanticState = silverSemanticSkipped
+	default:
+		coverage.SemanticState = silverSemanticPartial
+	}
+	if len(reasons) > 0 {
+		values := make([]string, 0, len(reasons))
+		for reason := range reasons {
+			values = append(values, reason)
+		}
+		sort.Strings(values)
+		coverage.SemanticSkipReason = strings.Join(values, ",")
+	}
+	return coverage
 }
 
 type resolvedSilverCandidate struct {
@@ -874,6 +997,9 @@ func (s *silverService) cancelJob(jobID string) error {
 func (s *silverService) cancelJobLocked(job *silverJob) error {
 	job.State = "cancelled"
 	job.Checkpoints = nil
+	job.Error = ""
+	job.RetryAt = 0
+	job.Retryable = false
 	job.UpdatedAt = time.Now().UnixMilli()
 	s.state.Revision++
 	return s.saveLocked()
@@ -930,17 +1056,35 @@ func replaceCheckpoint(checkpoints []silverCheckpoint, next silverCheckpoint) []
 }
 
 func (s *silverService) saveLocked() error {
+	wasPending := s.pendingPersistence
+	if err := s.persistCurrentLocked(); err != nil {
+		if !wasPending {
+			s.restoreLocked()
+		}
+		return err
+	}
+	s.pendingPersistence = false
+	return nil
+}
+
+func (s *silverService) saveFailureLocked() error {
+	if err := s.persistCurrentLocked(); err != nil {
+		s.pendingPersistence = true
+		return err
+	}
+	s.pendingPersistence = false
+	return nil
+}
+
+func (s *silverService) persistCurrentLocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0700); err != nil {
-		s.restoreLocked()
 		return err
 	}
 	value, err := json.Marshal(s.state)
 	if err != nil {
-		s.restoreLocked()
 		return err
 	}
 	if err := savePrivate(s.path, value); err != nil {
-		s.restoreLocked()
 		return err
 	}
 	s.persisted = value
@@ -958,7 +1102,7 @@ func (s *silverService) restoreLocked() {
 func (s *silverService) snapshot() silverSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	snapshot := silverSnapshot{SchemaVersion: silverSchemaVersion, Revision: s.state.DataRevision}
+	snapshot := silverSnapshot{SchemaVersion: silverSchemaVersion, Revision: s.state.DataRevision, Error: s.statusError}
 	entityMap := map[string]silverEntity{}
 	claimMap := map[string]silverClaim{}
 	evidenceMap := map[string]silverEvidence{}
@@ -971,7 +1115,12 @@ func (s *silverService) snapshot() silverSnapshot {
 	for _, id := range ids {
 		dataset := s.state.Published[id]
 		current, err := s.bronze.load(id)
-		if err != nil || current.Deleted || !silverSourceMatchesBronze(dataset.Source, current) {
+		if err != nil {
+			s.statusError = "Silver snapshot validation failed: " + err.Error()
+			snapshot.Error = s.statusError
+			continue
+		}
+		if current.Deleted || !silverSourceMatchesBronze(dataset.Source, current) {
 			continue
 		}
 		dataset.Source.Stale = !s.sourceMatchesCurrent(dataset.Source, current)
@@ -993,7 +1142,11 @@ func (s *silverService) snapshot() silverSnapshot {
 		if job.State == "completed" || job.State == "cancelled" {
 			continue
 		}
-		snapshot.Processing = append(snapshot.Processing, silverProcessing{BronzeSourceID: job.BronzeSourceID, State: job.State, CompletedBatches: len(job.Checkpoints), TotalBatches: job.TotalBatches, Error: job.Error})
+		snapshot.Processing = append(snapshot.Processing, silverProcessing{
+			BronzeSourceID: job.BronzeSourceID, State: job.State,
+			CompletedBatches: len(job.Checkpoints), TotalBatches: job.TotalBatches,
+			Error: job.Error, Retryable: job.Retryable,
+		})
 	}
 	appendSortedValues(evidenceMap, &snapshot.Evidence)
 	appendSortedValues(observationMap, &snapshot.Observations)
@@ -1005,10 +1158,10 @@ func (s *silverService) snapshot() silverSnapshot {
 	return snapshot
 }
 
-func (s *silverService) refreshStatus() (int64, sourceJobSnapshot, []silverProcessing) {
+func (s *silverService) refreshStatus() (int64, sourceJobSnapshot, []silverProcessing, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.state.DataRevision, s.jobSnapshotLocked(), s.processingSnapshotLocked()
+	return s.state.DataRevision, s.jobSnapshotLocked(), s.processingSnapshotLocked(), s.statusError
 }
 
 func (s *silverService) processingSnapshotLocked() []silverProcessing {
@@ -1019,7 +1172,8 @@ func (s *silverService) processingSnapshotLocked() []silverProcessing {
 		}
 		processing = append(processing, silverProcessing{
 			BronzeSourceID: job.BronzeSourceID, State: job.State,
-			CompletedBatches: len(job.Checkpoints), TotalBatches: job.TotalBatches, Error: job.Error,
+			CompletedBatches: len(job.Checkpoints), TotalBatches: job.TotalBatches,
+			Error: job.Error, Retryable: job.Retryable,
 		})
 	}
 	sort.Slice(processing, func(i, j int) bool {
@@ -1071,6 +1225,11 @@ type parsedSilverFragment struct {
 	Excerpt  string
 	Payload  any
 	Text     string
+}
+
+type silverParseResult struct {
+	Fragments []parsedSilverFragment
+	Coverage  silverCoverage
 }
 
 type silverSemanticBatch struct {
@@ -1161,26 +1320,48 @@ func checkpointsMatchingBatches(checkpoints []silverCheckpoint, batches []silver
 	return matching
 }
 
-func parseSilverReader(item bronzeItem, reader io.Reader) ([]parsedSilverFragment, bool, error) {
+func parseSilverReader(item bronzeItem, reader io.Reader) (silverParseResult, error) {
 	if !declaredSilverText(item.Mime) && knownBinarySilverInput(item) {
-		return nil, false, nil
+		return silverParseResult{Coverage: silverCoverage{
+			ExtractionState: silverExtractionSkipped, SemanticState: silverSemanticSkipped,
+			SemanticSkipReason: silverSkipUnsupportedContent,
+		}}, nil
 	}
 	buffered := bufio.NewReaderSize(reader, silverInspectionBytes)
 	prefix, err := buffered.Peek(silverInspectionBytes)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, bufio.ErrBufferFull) {
-		return nil, false, err
+		return silverParseResult{}, err
 	}
 	if !declaredSilverText(item.Mime) && silverPrefixLooksBinary(prefix) {
-		return nil, false, nil
+		return silverParseResult{Coverage: silverCoverage{
+			ExtractionState: silverExtractionSkipped, SemanticState: silverSemanticSkipped,
+			SemanticSkipReason: silverSkipUnsupportedContent,
+		}}, nil
 	}
 	data, err := io.ReadAll(io.LimitReader(buffered, silverMaximumInputBytes+1))
 	if err != nil {
-		return nil, false, err
+		return silverParseResult{}, err
 	}
 	if len(data) > silverMaximumInputBytes {
-		return nil, false, nil
+		return silverParseResult{Coverage: silverCoverage{
+			ExtractionState: silverExtractionSkipped, SemanticState: silverSemanticSkipped,
+			SemanticSkipReason: silverSkipSourceTooLarge,
+		}}, nil
 	}
-	return parseSilverText(item, data)
+	fragments, supported, err := parseSilverText(item, data)
+	if err != nil {
+		return silverParseResult{}, err
+	}
+	if !supported {
+		return silverParseResult{Coverage: silverCoverage{
+			ExtractionState: silverExtractionSkipped, SemanticState: silverSemanticSkipped,
+			SemanticSkipReason: silverSkipUnsupportedContent,
+		}}, nil
+	}
+	return silverParseResult{
+		Fragments: fragments,
+		Coverage:  silverCoverage{ExtractionState: silverExtractionCompleted},
+	}, nil
 }
 
 func declaredSilverText(mime string) bool {
@@ -1251,7 +1432,7 @@ func parseSilverText(item bronzeItem, data []byte) ([]parsedSilverFragment, bool
 	declaredText := declaredSilverText(item.Mime)
 	if !utf8.Valid(data) || bytes.IndexByte(data, 0) >= 0 {
 		if declaredText {
-			return nil, true, errors.New("text-like Bronze is not valid UTF-8")
+			return nil, true, permanentSilverProcessError(errors.New("text-like Bronze is not valid UTF-8"))
 		}
 		return nil, false, nil
 	}
@@ -1588,16 +1769,18 @@ func extractSilverBatch(ctx context.Context, job silverJob, fragments []parsedSi
 		checkpoint.Observations = append(checkpoint.Observations, observation)
 		evidenceByID[evidence.ID] = evidence
 	}
+	input, err := semanticInputForFragments(job, fragments)
+	if err != nil {
+		return silverCheckpoint{}, err
+	}
+	checkpoint.SemanticFragments = len(input.Fragments)
 	if model == nil {
 		return checkpoint, nil
 	}
 	modelID, modelRevision := model.identity()
-	if modelID != job.ModelID || modelRevision != job.ModelRevision {
-		return silverCheckpoint{}, errors.New("Source model identity changed during Silver processing")
-	}
-	input, err := semanticInputForFragments(job, fragments)
-	if err != nil {
-		return silverCheckpoint{}, err
+	if modelID != job.ModelID || modelRevision != job.ModelRevision ||
+		model.maximumInputBytes() != job.SemanticInputLimit {
+		return silverCheckpoint{}, errors.New("Source model identity or input limit changed during Silver processing")
 	}
 	if len(input.Fragments) == 0 {
 		return checkpoint, nil
@@ -1610,6 +1793,7 @@ func extractSilverBatch(ctx context.Context, job silverJob, fragments []parsedSi
 	// The batcher isolates it, and Silver still publishes its exact evidence
 	// and deterministic observation instead of retrying a permanent failure.
 	if len(encodedInput) > model.maximumInputBytes() {
+		checkpoint.SemanticSkipReason = silverSkipFragmentTooLarge
 		return checkpoint, nil
 	}
 	result, err := model.extract(ctx, input)
@@ -1617,11 +1801,12 @@ func extractSilverBatch(ctx context.Context, job silverJob, fragments []parsedSi
 		return silverCheckpoint{}, err
 	}
 	if err := validateSemanticResult(result); err != nil {
-		return silverCheckpoint{}, fmt.Errorf("invalid Source model semantic result: %w", err)
+		return silverCheckpoint{}, permanentSilverProcessError(fmt.Errorf("invalid Source model semantic result: %w", err))
 	}
 	if err := validateSemanticResultMapping(input, result); err != nil {
-		return silverCheckpoint{}, fmt.Errorf("invalid Source model semantic result: %w", err)
+		return silverCheckpoint{}, permanentSilverProcessError(fmt.Errorf("invalid Source model semantic result: %w", err))
 	}
+	checkpoint.SemanticCompletedFragments = len(input.Fragments)
 	semanticProducer := silverProducer{ProcessorID: semanticProcessorID, ProcessorVersion: semanticProcessorVersion, ModelID: modelID, ModelRevision: modelRevision}
 	for _, fragmentResult := range result.Fragments {
 		evidence, ok := evidenceByID[fragmentResult.FragmentID]

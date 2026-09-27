@@ -254,10 +254,15 @@ func (m *httpSemanticModel) extract(ctx context.Context, input semanticInput) (s
 		return semanticResult{}, fmt.Errorf("read Source model response: %w", err)
 	}
 	if len(body) > semanticMaximumResponse {
-		return semanticResult{}, errors.New("Source model response is too large")
+		return semanticResult{}, permanentSilverProcessError(errors.New("Source model response is too large"))
 	}
 	if response.StatusCode != http.StatusOK {
-		return semanticResult{}, fmt.Errorf("Source model returned HTTP %d: %s", response.StatusCode, truncate(strings.TrimSpace(string(body)), 240))
+		err := fmt.Errorf("Source model returned HTTP %d: %s", response.StatusCode, truncate(strings.TrimSpace(string(body)), 240))
+		if response.StatusCode != http.StatusRequestTimeout && response.StatusCode != http.StatusTooEarly &&
+			response.StatusCode != http.StatusTooManyRequests && response.StatusCode < 500 {
+			return semanticResult{}, permanentSilverProcessError(err)
+		}
+		return semanticResult{}, err
 	}
 	var completion struct {
 		Choices []struct {
@@ -265,14 +270,14 @@ func (m *httpSemanticModel) extract(ctx context.Context, input semanticInput) (s
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(body, &completion); err != nil || len(completion.Choices) != 1 {
-		return semanticResult{}, errors.New("invalid Source model completion response")
+		return semanticResult{}, permanentSilverProcessError(errors.New("invalid Source model completion response"))
 	}
 	result, err := decodeSemanticResult(completion.Choices[0].Message.Content)
 	if err != nil {
-		return semanticResult{}, fmt.Errorf("invalid Source model semantic result: %w", err)
+		return semanticResult{}, permanentSilverProcessError(fmt.Errorf("invalid Source model semantic result: %w", err))
 	}
 	if err := validateSemanticResultMapping(input, result); err != nil {
-		return semanticResult{}, fmt.Errorf("invalid Source model semantic result: %w", err)
+		return semanticResult{}, permanentSilverProcessError(fmt.Errorf("invalid Source model semantic result: %w", err))
 	}
 	return result, nil
 }

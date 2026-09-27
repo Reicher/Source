@@ -19,6 +19,13 @@ data class SilverSource(
     val stale: Boolean = false,
     val modelId: String? = null,
     val modelRevision: String? = null,
+    val coverage: SilverCoverage? = null,
+)
+
+data class SilverCoverage(
+    val extractionState: String,
+    val semanticState: String,
+    val semanticSkipReason: String?,
 )
 
 data class SilverEvidence(
@@ -70,11 +77,15 @@ data class SilverProcessing(
     val state: String,
     val completedBatches: Int,
     val totalBatches: Int,
+    val error: String? = null,
+    val retryable: Boolean = false,
 ) {
     companion object {
         fun list(values: JSONArray): List<SilverProcessing> = values.objects().map { processing -> SilverProcessing(
             processing.getString("bronze_source_id"), processing.getString("state"),
             processing.getInt("completed_batches"), processing.getInt("total_batches"),
+            processing.optString("error").takeIf(String::isNotEmpty),
+            processing.optBoolean("retryable", false),
         ) }
     }
 }
@@ -136,6 +147,8 @@ private fun SilverProcessing.persistenceJson(): JSONObject = JSONObject()
     .put("state", state)
     .put("completed_batches", completedBatches)
     .put("total_batches", totalBatches)
+    .put("retryable", retryable)
+    .also { value -> error?.let { value.put("error", it) } }
 
 internal fun SourceStatus.persistenceJson(): JSONObject {
     val persistedJobs = requireNotNull(jobs)
@@ -147,6 +160,7 @@ internal fun SourceStatus.persistenceJson(): JSONObject {
         .put("processing", JSONArray().also { values ->
             persistedProcessing.forEach { values.put(it.persistenceJson()) }
         })
+        .also { value -> silverError?.let { value.put("silver_error", it) } }
 }
 
 internal fun sourceStatusFromPersistenceJson(value: JSONObject): SourceStatus = SourceStatus(
@@ -155,6 +169,7 @@ internal fun sourceStatusFromPersistenceJson(value: JSONObject): SourceStatus = 
     jobsRevision = value.getLong("jobs_revision"),
     jobs = SourceJobs.fromJson(value.getJSONObject("jobs")),
     processing = SilverProcessing.list(value.getJSONArray("processing")),
+    silverError = value.optString("silver_error").takeIf(String::isNotEmpty),
 )
 
 data class SilverKnowledge(
@@ -177,6 +192,7 @@ data class SilverSnapshot(
     val claims: List<SilverClaim>,
     val processing: List<SilverProcessing>,
     val jobs: SourceJobs = SourceJobs.EMPTY,
+    val statusError: String? = null,
 ) {
     fun needsSilverSnapshot(status: SourceStatus): Boolean =
         status.silverRevision == null || revision != status.silverRevision
@@ -186,7 +202,7 @@ data class SilverSnapshot(
         val nextProcessing = status.processing ?: return this
         if (status.silverRevision != revision || status.jobsRevision != nextJobs.revision ||
             nextJobs.revision < jobs.revision) return this
-        return copy(processing = nextProcessing, jobs = nextJobs)
+        return copy(processing = nextProcessing, jobs = nextJobs, statusError = status.silverError)
     }
 
     fun forBronze(id: String): SilverKnowledge {
@@ -320,6 +336,11 @@ data class SilverSnapshot(
                     source.optBoolean("stale", false),
                     source.optString("model_id").takeIf(String::isNotEmpty),
                     source.optString("model_revision").takeIf(String::isNotEmpty),
+                    source.optJSONObject("coverage")?.let { coverage -> SilverCoverage(
+                        coverage.optString("extraction_state"),
+                        coverage.optString("semantic_state"),
+                        coverage.optString("semantic_skip_reason").takeIf(String::isNotEmpty),
+                    ) },
                 ) },
                 value.array("evidence").objects().map { evidence -> SilverEvidence(
                     evidence.getString("id"), evidence.getString("bronze_source_id"),
@@ -352,6 +373,7 @@ data class SilverSnapshot(
                 },
                 SilverProcessing.list(value.array("processing")),
                 if (jobs == null) SourceJobs.EMPTY else SourceJobs.fromJson(jobs),
+                value.optString("error").takeIf(String::isNotEmpty),
             )
         }
     }

@@ -103,11 +103,19 @@ class MainActivity : Activity() {
         }
         render()
         if (identityReady) {
-            if (state.source() == null) startScan() else {
-                connection.start()
-                BackgroundSyncScheduler.enqueueIfPending(this, state, bronze)
-            }
+            if (state.source() == null) startScan()
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (identityReady && state.source() != null) connection.start()
+    }
+
+    override fun onStop() {
+        connection.stop()
+        BackgroundSyncScheduler.enqueueIfPending(this, state, bronze)
+        super.onStop()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -489,8 +497,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         onBackInvokedDispatcher.unregisterOnBackInvokedCallback(systemBack)
-        connection.stop()
-        BackgroundSyncScheduler.enqueueIfPending(this, state, bronze)
+        connection.close()
         if (isFinishing && !omniAddInProgress) clearOmniAttachments()
         views.close()
         io.shutdownNow()

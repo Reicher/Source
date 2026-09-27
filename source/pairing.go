@@ -313,11 +313,11 @@ func (i *identity) newLanHandler(ctx context.Context) (http.Handler, error) {
 		}
 		personID := i.state.PersonID
 		i.mu.Unlock()
-		silverRevision, jobSnapshot, processing := jobs.refreshStatus()
+		silverRevision, jobSnapshot, processing, silverError := jobs.refreshStatus()
 		writeJSON(w, map[string]any{
 			"id": i.id, "person_id": personID, "status": "connected",
 			"silver_revision": silverRevision, "jobs_revision": jobSnapshot.Revision,
-			"jobs": jobSnapshot, "processing": processing,
+			"jobs": jobSnapshot, "processing": processing, "silver_error": silverError,
 		})
 	})
 	mux.Handle("/v1/bronze", i.trusted(bronze))
