@@ -24,5 +24,7 @@ jobs:
           persist-credentials: false
       - name: Deploy Source
         env:
+          # Optional override. The deploy preflight detects the default-route
+          # private IPv4 address when this environment variable is unset.
           SOURCE_LAN_ADDRESS: ${{ vars.SOURCE_LAN_ADDRESS }}
         run: ./scripts/deploy.sh
