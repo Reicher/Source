@@ -1094,9 +1094,8 @@ func buildSilverBatches(job silverJob, fragments []parsedSilverFragment, targetB
 	if targetBytes <= 0 {
 		return nil, errors.New("Silver semantic batch target must be positive")
 	}
-	maximumBytes := targetBytes
 	if model != nil {
-		maximumBytes = model.maximumInputBytes()
+		maximumBytes := model.maximumInputBytes()
 		if maximumBytes <= 0 {
 			return nil, errors.New("Source model semantic input limit must be positive")
 		}
@@ -1141,9 +1140,6 @@ func buildSilverBatches(job silverJob, fragments []parsedSilverFragment, targetB
 			if err != nil {
 				return nil, err
 			}
-		}
-		if model != nil && semanticFragment && len(encoded) > maximumBytes {
-			return nil, fmt.Errorf("semantic fragment input is %d bytes; model limit is %d bytes", len(encoded), maximumBytes)
 		}
 		current = candidate
 	}
@@ -1604,6 +1600,16 @@ func extractSilverBatch(ctx context.Context, job silverJob, fragments []parsedSi
 		return silverCheckpoint{}, err
 	}
 	if len(input.Fragments) == 0 {
+		return checkpoint, nil
+	}
+	encodedInput, err := json.Marshal(input)
+	if err != nil {
+		return silverCheckpoint{}, err
+	}
+	// A single deterministic fragment can be larger than the model context.
+	// The batcher isolates it, and Silver still publishes its exact evidence
+	// and deterministic observation instead of retrying a permanent failure.
+	if len(encodedInput) > model.maximumInputBytes() {
 		return checkpoint, nil
 	}
 	result, err := model.extract(ctx, input)

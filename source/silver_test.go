@@ -323,6 +323,37 @@ func TestSilverSemanticBatchBoundariesRespectModelInputLimit(t *testing.T) {
 	}
 }
 
+func TestSilverOversizedSemanticFragmentKeepsDeterministicExtraction(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	content := fmt.Sprintf(`{"long":%q,"short":"Ada"}`, strings.Repeat("x", 2048))
+	putSilverBronze(t, bronze, "15151515-1515-4151-8151-151515151515", "values.json", "application/json", 1, content)
+
+	modelCalls := 0
+	model := testSemanticModel{id: "limited-model", revision: "1", maximum: 512, run: func(input semanticInput) (semanticResult, error) {
+		modelCalls++
+		if len(input.Fragments) != 1 || input.Fragments[0].Selector["pointer"] != "/short" {
+			return semanticResult{}, fmt.Errorf("oversized fragment was sent to the model: %+v", input.Fragments)
+		}
+		return emptySemanticResult(input), nil
+	}}
+	service, err := newSilverServiceWithModel(root+"/silver", bronze, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !service.processNext(context.Background()) {
+		t.Fatal("Silver job did not run")
+	}
+	job := service.state.Jobs[0]
+	if job.State != "completed" || job.Attempts != 0 || modelCalls != 1 {
+		t.Fatalf("oversized fragment caused a retry or blocked later semantics: job=%+v calls=%d", job, modelCalls)
+	}
+	snapshot := service.snapshot()
+	if len(snapshot.Sources) != 1 || len(snapshot.Evidence) != 2 || len(snapshot.Observations) != 2 {
+		t.Fatalf("deterministic Silver was not published for every fragment: %+v", snapshot)
+	}
+}
+
 func TestSilverSemanticBatchRetryKeepsCompletedCheckpoints(t *testing.T) {
 	root := t.TempDir()
 	bronze := newBronzeStore(root + "/bronze")
