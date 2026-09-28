@@ -19,10 +19,11 @@ import (
 
 const (
 	semanticProcessorID                  = "source.silver.semantic-model"
-	semanticProcessorVersion             = "4"
+	semanticProcessorVersion             = "5"
 	semanticMaximumResponse              = 1024 * 1024
 	semanticMaximumCandidates            = 128
 	semanticMaximumFragments             = 512
+	semanticContractMaximumAttempts      = 3
 	semanticDefaultBatchTargetBytes      = 4 * 1024
 	semanticDefaultContextTokens         = 8192
 	semanticDefaultMaximumOutputTokens   = 2048
@@ -79,7 +80,47 @@ type semanticFragmentResult struct {
 }
 
 type semanticResult struct {
-	Fragments []semanticFragmentResult `json:"fragments"`
+	Fragments    []semanticFragmentResult `json:"fragments"`
+	responseHash string
+}
+
+// semanticContractError identifies an unusable model response rather than an
+// operational inference failure. Silver handles these errors within the
+// current batch so one bad response cannot fail the complete Bronze source.
+type semanticContractError struct {
+	cause        error
+	expectedIDs  []string
+	returnedIDs  []string
+	responseHash string
+}
+
+func (e *semanticContractError) Error() string {
+	return "invalid Source model semantic result: " + e.cause.Error()
+}
+
+func (e *semanticContractError) Unwrap() error { return e.cause }
+
+func semanticInputFragmentIDs(input semanticInput) []string {
+	ids := make([]string, 0, len(input.Fragments))
+	for _, fragment := range input.Fragments {
+		ids = append(ids, fragment.ID)
+	}
+	return ids
+}
+
+func semanticResultFragmentIDs(result semanticResult) []string {
+	ids := make([]string, 0, len(result.Fragments))
+	for _, fragment := range result.Fragments {
+		ids = append(ids, truncate(fragment.FragmentID, 160))
+	}
+	return ids
+}
+
+func newSemanticContractError(input semanticInput, result semanticResult, responseHash string, cause error) *semanticContractError {
+	return &semanticContractError{
+		cause: cause, expectedIDs: semanticInputFragmentIDs(input),
+		returnedIDs: semanticResultFragmentIDs(result), responseHash: responseHash,
+	}
 }
 
 type silverConfiguration struct {
@@ -267,7 +308,9 @@ func (m *httpSemanticModel) extract(ctx context.Context, input semanticInput) (s
 		return semanticResult{}, fmt.Errorf("read Source model response: %w", err)
 	}
 	if len(body) > semanticMaximumResponse {
-		return semanticResult{}, permanentSilverProcessError(errors.New("Source model response is too large"))
+		return semanticResult{}, newSemanticContractError(
+			input, semanticResult{}, hashBytes(body), errors.New("Source model response is too large"),
+		)
 	}
 	if response.StatusCode != http.StatusOK {
 		err := fmt.Errorf("Source model returned HTTP %d: %s", response.StatusCode, truncate(strings.TrimSpace(string(body)), 240))
@@ -283,15 +326,17 @@ func (m *httpSemanticModel) extract(ctx context.Context, input semanticInput) (s
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(body, &completion); err != nil || len(completion.Choices) != 1 {
-		return semanticResult{}, permanentSilverProcessError(errors.New("invalid Source model completion response"))
+		return semanticResult{}, newSemanticContractError(
+			input, semanticResult{}, hashBytes(body), errors.New("invalid Source model completion response"),
+		)
 	}
-	result, err := decodeSemanticModelResult(completion.Choices[0].Message.Content)
+	completionContent := completion.Choices[0].Message.Content
+	responseHash := hashBytes([]byte(completionContent))
+	result, err := decodeSemanticModelResult(completionContent)
 	if err != nil {
-		return semanticResult{}, permanentSilverProcessError(fmt.Errorf("invalid Source model semantic result: %w", err))
+		return semanticResult{}, newSemanticContractError(input, semanticResult{}, responseHash, err)
 	}
-	if err := validateSemanticResultMapping(input, result); err != nil {
-		return semanticResult{}, permanentSilverProcessError(fmt.Errorf("invalid Source model semantic result: %w", err))
-	}
+	result.responseHash = responseHash
 	return result, nil
 }
 
@@ -315,6 +360,9 @@ var (
 func decodeSemanticResult(content string) (semanticResult, error) {
 	result, err := decodeSemanticResultStructure(content)
 	if err != nil {
+		return semanticResult{}, err
+	}
+	if err := validateSemanticFragmentIDs(result); err != nil {
 		return semanticResult{}, err
 	}
 	if err := validateSemanticCandidates(result); err != nil {
@@ -383,12 +431,7 @@ func decodeSemanticResultStructure(content string) (semanticResult, error) {
 		return semanticResult{}, errors.New("semantic result must contain a bounded fragments array")
 	}
 	candidateCount := 0
-	fragmentIDs := map[string]bool{}
 	for _, fragment := range result.Fragments {
-		if strings.TrimSpace(fragment.FragmentID) == "" || len(fragment.FragmentID) > 128 || fragmentIDs[fragment.FragmentID] {
-			return semanticResult{}, errors.New("invalid or duplicate fragment_id")
-		}
-		fragmentIDs[fragment.FragmentID] = true
 		if fragment.Entities == nil || fragment.Attributes == nil || fragment.Relationships == nil {
 			return semanticResult{}, errors.New("semantic fragment result must contain all candidate arrays")
 		}
@@ -398,6 +441,17 @@ func decodeSemanticResultStructure(content string) (semanticResult, error) {
 		return semanticResult{}, errors.New("too many semantic candidates")
 	}
 	return result, nil
+}
+
+func validateSemanticFragmentIDs(result semanticResult) error {
+	fragmentIDs := map[string]bool{}
+	for _, fragment := range result.Fragments {
+		if strings.TrimSpace(fragment.FragmentID) == "" || len(fragment.FragmentID) > 128 || fragmentIDs[fragment.FragmentID] {
+			return errors.New("invalid or duplicate fragment_id")
+		}
+		fragmentIDs[fragment.FragmentID] = true
+	}
+	return nil
 }
 
 func validateSemanticCandidates(result semanticResult) error {
