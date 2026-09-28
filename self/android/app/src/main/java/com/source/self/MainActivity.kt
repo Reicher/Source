@@ -5,6 +5,8 @@ import android.app.AlertDialog
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.WindowInsets
 import android.widget.EditText
 import android.window.OnBackInvokedCallback
@@ -49,6 +51,15 @@ class MainActivity : Activity() {
     private var indexedSilverRevision: Long? = null
     private var cachedSilverCandidates = emptyList<OmniSearchCandidate>()
     private val systemBack = OnBackInvokedCallback { handleBack() }
+    private val connectionAgeHandler = Handler(Looper.getMainLooper())
+    private val connectionAgeTick = object : Runnable {
+        override fun run() {
+            if (!connected && section == AppSection.SOURCE && detailId == null && knowledgeSourceId == null && entityId == null) {
+                render(preserveInteraction = true)
+            }
+            connectionAgeHandler.postDelayed(this, 30_000L)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -82,13 +93,19 @@ class MainActivity : Activity() {
                 isConnected,
                 message,
             )
-            if (connected && !isConnected && disconnectedAt == null) disconnectedAt = System.currentTimeMillis()
-            if (isConnected) disconnectedAt = null
+            val previousDisconnectedAt = disconnectedAt
+            val now = System.currentTimeMillis()
+            if (isConnected) {
+                disconnectedAt = null
+            } else {
+                if (disconnectedAt == null) disconnectedAt = now
+            }
             connected = isConnected
             error = message
             val dataChanged = pendingSourceDataRefresh
             pendingSourceDataRefresh = false
-            if (presentationChanged || dataChanged || rescan) render(preserveInteraction = true)
+            val ageChanged = disconnectedAt != previousDisconnectedAt
+            if (presentationChanged || ageChanged || dataChanged || rescan) render(preserveInteraction = true)
             if (rescan) startScan()
         }, {
             desktop.reconcileBronze(bronze.all())
@@ -109,10 +126,13 @@ class MainActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
+        connectionAgeHandler.removeCallbacks(connectionAgeTick)
+        connectionAgeHandler.postDelayed(connectionAgeTick, 30_000L)
         if (identityReady && state.source() != null) connection.start()
     }
 
     override fun onStop() {
+        connectionAgeHandler.removeCallbacks(connectionAgeTick)
         connection.stop()
         BackgroundSyncScheduler.enqueueIfPending(this, state, bronze)
         super.onStop()
@@ -249,6 +269,17 @@ class MainActivity : Activity() {
         if (entityId != null && selectedEntity == null) entityId = null
         val knowledgeItem = knowledgeSourceId?.let(bronze::get)?.takeUnless { it.deleted }
         if (knowledgeSourceId != null && knowledgeItem == null) knowledgeSourceId = null
+        val detailTitle = when {
+            selectedEntity != null -> silverSnapshot.label(selectedEntity)
+            knowledgeItem != null -> "Claims"
+            selected != null -> selected.title
+            else -> null
+        }
+        val detailTier = when {
+            selectedEntity != null || knowledgeItem != null -> OmniResultTier.SILVER
+            selected != null -> OmniResultTier.BRONZE
+            else -> null
+        }
         val content = if (selectedEntity != null) {
             views.entityDetail(
                 selectedEntity,
@@ -329,7 +360,6 @@ class MainActivity : Activity() {
             AppSection.SOURCE -> views.source(
                 connected,
                 disconnectedAt,
-                error,
                 silverSnapshot,
                 onBronze = ::openBronze,
                 onEntity = { id ->
@@ -341,13 +371,15 @@ class MainActivity : Activity() {
         val omniCandidates = buildList {
             addAll(silverOmniCandidates(silverSnapshot))
             bronze.all().filterNot(BronzeItem::deleted).forEach { item ->
-                add(OmniSearchCandidate(OmniResultTier.BRONZE, item.id, item.title))
+                add(bronzeOmniCandidate(item))
             }
         }
         setContentView(views.app(
             content = content,
             selected = section,
             connected = connected,
+            detailTitle = detailTitle,
+            detailTier = detailTier,
             omniText = omniText,
             attachmentCount = omniAttachments.size,
             omniEnabled = !omniAddInProgress,
@@ -363,6 +395,7 @@ class MainActivity : Activity() {
             },
             onAdd = ::addOmniInput,
             onOpenResult = ::openOmniResult,
+            onBack = ::handleBack,
             onSection = { destination ->
                 section = destination
                 detailId = null
@@ -477,6 +510,24 @@ class MainActivity : Activity() {
         return cachedSilverCandidates
     }
 
+    private fun bronzeOmniCandidate(item: BronzeItem): OmniSearchCandidate {
+        val displayTitle = if (item.mime == "text/plain" && item.title.startsWith("note-")) {
+            runCatching {
+                bronze.content(item).bufferedReader(Charsets.UTF_8).use { reader ->
+                    val preview = CharArray(240)
+                    val count = reader.read(preview).coerceAtLeast(0)
+                    excerptWords(String(preview, 0, count), limit = 10)
+                }
+            }.getOrNull()?.ifBlank { item.title } ?: item.title
+        } else item.title
+        return OmniSearchCandidate(
+            OmniResultTier.BRONZE,
+            item.id,
+            displayTitle,
+            listOf(displayTitle, item.title).distinct(),
+        )
+    }
+
     private fun desktopItemMenu(ref: DesktopObjectRef) {
         val actions = arrayOf("Move earlier", "Move later", "Unpin")
         AlertDialog.Builder(this).setItems(actions) { _, which ->
@@ -495,12 +546,10 @@ class MainActivity : Activity() {
     }
 
     private fun confirmDelete(item: BronzeItem) {
-        AlertDialog.Builder(this).setMessage("Delete ${item.title}?")
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Delete") { _, _ ->
+        views.confirmDelete(item) {
                 detailId = null
                 write { bronze.delete(item.id) }
-            }.show()
+            }
     }
 
     private fun handleBack() {
@@ -516,6 +565,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        connectionAgeHandler.removeCallbacks(connectionAgeTick)
         onBackInvokedDispatcher.unregisterOnBackInvokedCallback(systemBack)
         connection.close()
         if (isFinishing && !omniAddInProgress) clearOmniAttachments()
