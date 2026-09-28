@@ -542,6 +542,53 @@ func TestSilverSemanticContractFailureSplitsAndSourceOwnsSingleIdentity(t *testi
 	}
 }
 
+func TestSilverSemanticContractRecoverySharesCandidateBudgetAcrossSplits(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	putSilverBronze(t, bronze, "38383838-3838-4383-8383-383838383838", "bounded-contract.txt", "text/plain", 1,
+		"First fragment.\n\nSecond fragment.")
+	calls := map[string]int{}
+	model := testSemanticModel{id: "bounded-contract-model", revision: "1", run: func(input semanticInput) (semanticResult, error) {
+		if len(input.Fragments) > 1 {
+			calls["combined"]++
+			result := emptySemanticResult(input)
+			result.Fragments = result.Fragments[:1]
+			return result, nil
+		}
+		var payload struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(input.Fragments[0].Payload, &payload); err != nil {
+			return semanticResult{}, err
+		}
+		calls[payload.Text]++
+		result := emptySemanticResult(input)
+		for index := 0; index < semanticMaximumCandidates; index++ {
+			result.Fragments[0].Entities = append(result.Fragments[0].Entities, semanticEntityCandidate{
+				Ref: fmt.Sprintf("e%d", index), Label: fmt.Sprintf("Candidate %d", index), Confidence: testConfidence(0.99),
+			})
+		}
+		return result, nil
+	}}
+	service, err := newSilverServiceWithModel(root+"/silver", bronze, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.processNext(context.Background())
+	if calls["combined"] != semanticContractMaximumAttempts || calls["First fragment."] != 1 ||
+		calls["Second fragment."] != semanticContractMaximumAttempts {
+		t.Fatalf("shared recovery budget produced unexpected calls: %+v", calls)
+	}
+	snapshot := service.snapshot()
+	if len(snapshot.Entities) != semanticMaximumCandidates {
+		t.Fatalf("split recovery exceeded its aggregate candidate bound: entities=%d", len(snapshot.Entities))
+	}
+	coverage := snapshot.Sources[0].Coverage
+	if coverage.SemanticState != silverSemanticPartial || coverage.SemanticSkipReason != silverSkipModelContract {
+		t.Fatalf("candidate budget exhaustion did not preserve partial coverage: %+v", coverage)
+	}
+}
+
 func TestSilverSemanticContractFailureSkipsOnlyIrrecoverableFragment(t *testing.T) {
 	root := t.TempDir()
 	bronze := newBronzeStore(root + "/bronze")

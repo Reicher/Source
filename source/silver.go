@@ -1872,10 +1872,41 @@ type silverSemanticRecovery struct {
 	SkippedContractFragment bool
 }
 
-func (r *silverSemanticRecovery) append(next silverSemanticRecovery) {
+func (r *silverSemanticRecovery) append(next silverSemanticRecovery) error {
 	r.Fragments = append(r.Fragments, next.Fragments...)
 	r.CompletedFragments += next.CompletedFragments
 	r.SkippedContractFragment = r.SkippedContractFragment || next.SkippedContractFragment
+	if len(r.Fragments) > semanticMaximumFragments || semanticCandidateCount(r.Fragments) > semanticMaximumCandidates {
+		return errors.New("semantic recovery exceeded aggregate result bounds")
+	}
+	return nil
+}
+
+type silverSemanticRecoveryBudget struct {
+	RemainingFragments  int
+	RemainingCandidates int
+}
+
+func (b *silverSemanticRecoveryBudget) reserve(result semanticResult) error {
+	fragments := len(result.Fragments)
+	candidates := semanticCandidateCount(result.Fragments)
+	if fragments > b.RemainingFragments {
+		return fmt.Errorf("semantic recovery needs %d fragment slots; %d remain", fragments, b.RemainingFragments)
+	}
+	if candidates > b.RemainingCandidates {
+		return fmt.Errorf("semantic recovery needs %d candidate slots; %d remain", candidates, b.RemainingCandidates)
+	}
+	b.RemainingFragments -= fragments
+	b.RemainingCandidates -= candidates
+	return nil
+}
+
+func semanticCandidateCount(fragments []semanticFragmentResult) int {
+	count := 0
+	for _, fragment := range fragments {
+		count += len(fragment.Entities) + len(fragment.Attributes) + len(fragment.Relationships)
+	}
+	return count
 }
 
 func recoverSilverSemanticFragments(
@@ -1884,6 +1915,21 @@ func recoverSilverSemanticFragments(
 	fragments []parsedSilverFragment,
 	model semanticModel,
 	batchPath string,
+) (silverSemanticRecovery, error) {
+	budget := silverSemanticRecoveryBudget{
+		RemainingFragments:  semanticMaximumFragments,
+		RemainingCandidates: semanticMaximumCandidates,
+	}
+	return recoverSilverSemanticFragmentsWithinBudget(ctx, job, fragments, model, batchPath, &budget)
+}
+
+func recoverSilverSemanticFragmentsWithinBudget(
+	ctx context.Context,
+	job silverJob,
+	fragments []parsedSilverFragment,
+	model semanticModel,
+	batchPath string,
+	budget *silverSemanticRecoveryBudget,
 ) (silverSemanticRecovery, error) {
 	input, err := semanticInputForFragments(job, fragments)
 	if err != nil {
@@ -1918,6 +1964,8 @@ func recoverSilverSemanticFragments(
 			contractCause = err
 		} else if err := validateSemanticResultMapping(input, result); err != nil {
 			contractCause = err
+		} else if err := budget.reserve(result); err != nil {
+			contractCause = err
 		}
 		if contractCause == nil {
 			return silverSemanticRecovery{Fragments: result.Fragments, CompletedFragments: len(input.Fragments)}, nil
@@ -1944,15 +1992,17 @@ func recoverSilverSemanticFragments(
 		"Silver semantic contract recovery: job=%s batch=%s action=split fragments=%d left=%d right=%d attempts=%d",
 		job.ID, batchPath, len(fragments), middle, len(fragments)-middle, semanticContractMaximumAttempts,
 	)
-	left, err := recoverSilverSemanticFragments(ctx, job, fragments[:middle], model, batchPath+".0")
+	left, err := recoverSilverSemanticFragmentsWithinBudget(ctx, job, fragments[:middle], model, batchPath+".0", budget)
 	if err != nil {
 		return silverSemanticRecovery{}, err
 	}
-	right, err := recoverSilverSemanticFragments(ctx, job, fragments[middle:], model, batchPath+".1")
+	right, err := recoverSilverSemanticFragmentsWithinBudget(ctx, job, fragments[middle:], model, batchPath+".1", budget)
 	if err != nil {
 		return silverSemanticRecovery{}, err
 	}
-	left.append(right)
+	if err := left.append(right); err != nil {
+		return silverSemanticRecovery{}, err
+	}
 	return left, nil
 }
 
