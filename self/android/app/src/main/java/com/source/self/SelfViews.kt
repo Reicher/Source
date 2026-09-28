@@ -28,13 +28,14 @@ import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import java.text.DateFormat
-import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -51,12 +52,16 @@ private val accentColor = Color.rgb(61, 124, 91)
 private val disconnectedColor = Color.rgb(169, 91, 91)
 private val secondaryColor = Color.rgb(112, 103, 94)
 private val rippleColor = Color.argb(36, 61, 124, 91)
-private val desktopPastels = intArrayOf(
-    Color.rgb(255, 240, 232),
-    Color.rgb(240, 236, 250),
-    Color.rgb(234, 244, 244),
-    Color.rgb(248, 241, 217),
-)
+private val destructiveColor = Color.rgb(176, 63, 55)
+private val destructiveSurface = Color.rgb(252, 235, 232)
+private val bronzeColor = Color.rgb(166, 94, 50)
+private val bronzeSurface = Color.rgb(245, 229, 218)
+private val silverColor = Color.rgb(102, 114, 126)
+private val silverSurface = Color.rgb(232, 237, 241)
+private val goldColor = Color.rgb(176, 133, 30)
+private val goldSurface = Color.rgb(248, 235, 189)
+private val warningColor = Color.rgb(143, 99, 28)
+private val warningSurface = Color.rgb(249, 237, 211)
 
 enum class AppSection(val label: String) {
     DESKTOP("Desktop"), SELF("Self"), SOURCE("Source"),
@@ -65,12 +70,14 @@ enum class AppSection(val label: String) {
 class SelfViews(private val activity: Activity, private val bronze: BronzeStore) {
     private val thumbnails = ThumbnailLoader(bronze, dp(220), dp(300))
     private val scrollPositions = mutableMapOf<String, Int>()
+    private val localDisplayTitles = mutableMapOf<String, String>()
     private var localStorageList: ListView? = null
     private var localStorageListSort: LocalStorageSort? = null
 
     fun close() {
         localStorageList = null
         scrollPositions.clear()
+        localDisplayTitles.clear()
         thumbnails.close()
     }
 
@@ -78,6 +85,8 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         content: View,
         selected: AppSection,
         connected: Boolean,
+        detailTitle: String?,
+        detailTier: OmniResultTier?,
         omniText: String,
         attachmentCount: Int,
         omniEnabled: Boolean,
@@ -88,6 +97,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         onClearAttachments: () -> Unit,
         onAdd: () -> Unit,
         onOpenResult: (OmniSearchCandidate) -> Unit,
+        onBack: () -> Unit,
         onSection: (AppSection) -> Unit,
     ): View {
         activity.window.statusBarColor = backgroundColor
@@ -103,19 +113,29 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                 view.setPadding(dp(12) + bars.left, dp(10) + bars.top, dp(12) + bars.right, dp(6) + bars.bottom)
                 insets
             }
-            addView(omniBox(
-                omniText,
-                attachmentCount,
-                omniEnabled,
-                restoreOmniFocus,
-                omniCandidates,
-                onOmniTextChanged,
-                onAttach,
-                onClearAttachments,
-                onAdd,
-                onOpenResult,
-            ), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
-            addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
+            val main = FrameLayout(activity).apply {
+                clipChildren = false
+                clipToPadding = false
+            }
+            val chrome = if (detailTitle == null) {
+                omniBox(
+                    omniText,
+                    attachmentCount,
+                    omniEnabled,
+                    restoreOmniFocus,
+                    omniCandidates,
+                    onOmniTextChanged,
+                    onAttach,
+                    onClearAttachments,
+                    onAdd,
+                    onOpenResult,
+                )
+            } else {
+                detailHeader(detailTitle, detailTier, onBack)
+            }
+            main.addView(content, FrameLayout.LayoutParams(-1, -1).apply { topMargin = dp(64) })
+            main.addView(chrome, FrameLayout.LayoutParams(-1, -2))
+            addView(main, LinearLayout.LayoutParams(-1, 0, 1f))
             addView(bottomNavigation(selected, connected, onSection), LinearLayout.LayoutParams(-1, -2))
             post { windowInsetsController?.show(WindowInsets.Type.systemBars()) }
         }
@@ -126,10 +146,38 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         val content = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            addView(label(status, 25f, true).apply { gravity = Gravity.CENTER })
-            message?.let { addView(label(it, 15f).apply { setTextColor(secondaryColor); gravity = Gravity.CENTER }) }
+            setPadding(dp(24), dp(24), dp(24), dp(24))
+            background = GradientDrawable().apply {
+                setColor(surfaceColor)
+                cornerRadius = dp(18).toFloat()
+                setStroke(dp(1), borderColor)
+            }
+            addView(label("Self", 30f, true).apply {
+                setTextColor(accentColor)
+                gravity = Gravity.CENTER
+            })
+            addView(label(status, 20f, true).apply {
+                gravity = Gravity.CENTER
+            }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+            if (status.contains("Connecting")) {
+                addView(ProgressBar(activity).apply {
+                    indeterminateTintList = ColorStateList.valueOf(accentColor)
+                }, LinearLayout.LayoutParams(dp(28), dp(28)).apply {
+                    gravity = Gravity.CENTER_HORIZONTAL
+                    topMargin = dp(12)
+                })
+            }
+            message?.let {
+                addView(label(it, 15f).apply {
+                    setTextColor(disconnectedColor)
+                    gravity = Gravity.CENTER
+                }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+            }
         }
-        addView(content, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER))
+        addView(content, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER).apply {
+            marginStart = dp(28)
+            marginEnd = dp(28)
+        })
     }
 
     fun desktop(
@@ -175,7 +223,16 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         onOpenResult: (OmniSearchCandidate) -> Unit,
     ): View = LinearLayout(activity).apply {
         orientation = LinearLayout.VERTICAL
-        val results = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
+        elevation = dp(8).toFloat()
+        val results = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setPadding(0, dp(2), 0, dp(2))
+            background = GradientDrawable().apply {
+                setColor(backgroundColor)
+                cornerRadius = dp(10).toFloat()
+            }
+        }
         val add = label("Add", 14f, true).apply {
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
@@ -211,10 +268,25 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                 } else false
             }
         }
+        val clear = ImageButton(activity).apply {
+            setImageResource(R.drawable.ic_clear)
+            imageTintList = ColorStateList.valueOf(secondaryColor)
+            background = RippleDrawable(ColorStateList.valueOf(rippleColor), null, null)
+            contentDescription = "Clear search"
+            visibility = View.GONE
+            isEnabled = enabled
+            setPadding(dp(11), dp(11), dp(11), dp(11))
+            setOnClickListener { editor.setText("") }
+        }
         fun showResults(query: String) {
             results.removeAllViews()
-            if (!enabled) return
-            searchOmniBox(query, candidates).forEachIndexed { index, result ->
+            if (!enabled) {
+                results.visibility = View.GONE
+                return
+            }
+            val matches = searchOmniBox(query, candidates, limit = 5)
+            results.visibility = if (matches.isEmpty()) View.GONE else View.VISIBLE
+            matches.forEachIndexed { index, result ->
                 results.addView(omniResult(result, onOpenResult), LinearLayout.LayoutParams(-1, -2).apply {
                     if (index > 0) topMargin = dp(2)
                 })
@@ -222,6 +294,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         }
         fun update(value: String) {
             add.visibility = if (value.isNotEmpty() || attachmentCount > 0) View.VISIBLE else View.GONE
+            clear.visibility = if (value.isNotEmpty()) View.VISIBLE else View.GONE
             showResults(value)
         }
         val input = LinearLayout(activity).apply {
@@ -233,16 +306,20 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                 cornerRadius = dp(14).toFloat()
                 setStroke(dp(1), borderColor)
             }
-            addView(label("📎", 20f).apply {
-                gravity = Gravity.CENTER
+            addView(ImageButton(activity).apply {
+                setImageResource(R.drawable.ic_attach_file)
+                imageTintList = ColorStateList.valueOf(secondaryColor)
+                background = RippleDrawable(ColorStateList.valueOf(rippleColor), null, null)
                 contentDescription = "Attach files"
                 isClickable = true
                 isFocusable = enabled
                 isEnabled = enabled
                 alpha = if (enabled) 1f else 0.55f
+                setPadding(dp(11), dp(11), dp(11), dp(11))
                 setOnClickListener { onAttach() }
-            }, LinearLayout.LayoutParams(dp(42), dp(42)))
+            }, LinearLayout.LayoutParams(dp(46), dp(46)))
             addView(editor, LinearLayout.LayoutParams(0, dp(46), 1f))
+            addView(clear, LinearLayout.LayoutParams(dp(42), dp(42)))
             addView(add, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(2) })
         }
         addView(input, LinearLayout.LayoutParams(-1, -2))
@@ -284,19 +361,50 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
     ): View = LinearLayout(activity).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
+        minimumHeight = dp(48)
         setPadding(dp(14), dp(9), dp(12), dp(9))
         background = GradientDrawable().apply {
-            setColor(elevatedColor)
-            cornerRadius = dp(9).toFloat()
-            setStroke(dp(1), borderColor)
+            setColor(tierSurface(result.tier))
+            cornerRadius = dp(10).toFloat()
+            setStroke(dp(1), tierAccent(result.tier))
         }
         addView(label(result.title, 15f), LinearLayout.LayoutParams(0, -2, 1f))
-        addView(label(result.tier.displayName, 12f, true).apply { setTextColor(secondaryColor) })
+        addView(tierBadge(result.tier), LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(10) })
         contentDescription = "${result.title}, ${result.tier.displayName}"
         isClickable = true
-        isFocusable = false
+        isFocusable = true
         setOnClickListener { onOpen(result) }
     }
+
+    private fun detailHeader(title: String, tier: OmniResultTier?, onBack: () -> Unit): View =
+        LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = dp(56)
+            background = GradientDrawable().apply {
+                setColor(surfaceColor)
+                cornerRadius = dp(14).toFloat()
+                setStroke(dp(1), borderColor)
+            }
+            addView(ImageButton(activity).apply {
+                setImageResource(R.drawable.ic_arrow_back)
+                imageTintList = ColorStateList.valueOf(primaryColor)
+                background = RippleDrawable(ColorStateList.valueOf(rippleColor), null, null)
+                contentDescription = "Back"
+                setPadding(dp(12), dp(12), dp(12), dp(12))
+                setOnClickListener { onBack() }
+            }, LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginStart = dp(2) })
+            addView(label(title, 19f, true).apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            }, LinearLayout.LayoutParams(0, -2, 1f).apply {
+                marginStart = dp(4)
+                marginEnd = dp(8)
+            })
+            tier?.let {
+                addView(tierBadge(it), LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(12) })
+            }
+        }
 
     fun self(localCount: Int, onLocalStorage: () -> Unit): View = screen { body ->
         body.addView(card().apply {
@@ -331,13 +439,19 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.END
             LocalStorageSort.entries.forEach { option ->
-                addView(label(option.label, 14f, option == sort).apply {
+                val selected = option == sort
+                val sortLabel = when {
+                    !selected -> option.label
+                    option == LocalStorageSort.NAME -> "Name ↑"
+                    else -> "Modified ↓"
+                }
+                addView(label(sortLabel, 14f, selected).apply {
                     gravity = Gravity.CENTER
                     minimumWidth = dp(88)
                     minimumHeight = dp(48)
-                    setTextColor(if (option == sort) accentColor else secondaryColor)
+                    setTextColor(if (selected) accentColor else secondaryColor)
                     background = GradientDrawable().apply {
-                        setColor(if (option == sort) selectedColor else Color.TRANSPARENT)
+                        setColor(if (selected) selectedColor else Color.TRANSPARENT)
                         cornerRadius = dp(10).toFloat()
                     }
                     contentDescription = "Sort by ${option.label.lowercase(Locale.ROOT)}"
@@ -366,31 +480,17 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
     fun source(
         connected: Boolean,
         disconnectedAt: Long?,
-        message: String?,
         silver: SilverSnapshot,
         onBronze: (String) -> Unit,
         onEntity: (String) -> Unit,
     ): View = screen { body ->
-        val status = when {
-            connected -> "Connected"
-            disconnectedAt != null -> "Disconnected since ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(disconnectedAt))}"
-            else -> "Disconnected"
-        }
-        body.addView(card().apply {
-            addView(label(status, 18f, true).apply { setTextColor(if (connected) accentColor else primaryColor) })
-            message?.let { addView(label(it, 14f).apply { setTextColor(secondaryColor) }) }
-        })
+        val now = System.currentTimeMillis()
         val localBronze = bronze.all()
         val content = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             silver.statusError?.let { problem ->
-                addView(label(problem, 14f).apply { setTextColor(secondaryColor) },
+                addView(infoBanner(problem, destructiveColor, destructiveSurface),
                     LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
-            }
-            if (silver.sources.any { it.stale }) {
-                addView(label("Some knowledge is being updated; previous results remain visible.", 14f).apply {
-                    setTextColor(secondaryColor)
-                }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
             }
             addView(label("Queue (${silver.jobs.queuedCount})", 19f, true), sectionMargin())
             if (silver.jobs.queued.isEmpty()) {
@@ -402,31 +502,88 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             }
             if (silver.entities.isNotEmpty()) {
                 addView(label("Entities", 19f, true), sectionMargin())
-                silver.entities.sortedBy(silver::label).forEach { entity ->
-                    addView(entityRow(entity, silver) { onEntity(entity.id) })
+                silver.entities
+                    .map { entity -> entity to silver.activeClaimCount(entity.id) }
+                    .sortedWith(
+                        compareByDescending<Pair<SilverEntity, Int>> { it.second }
+                            .thenBy { silver.label(it.first).lowercase(Locale.getDefault()) }
+                            .thenBy { it.first.id },
+                    )
+                    .forEach { (entity, claimCount) ->
+                    addView(entityRow(entity, silver, claimCount) { onEntity(entity.id) },
+                        LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
                 }
             }
         }
-        body.addView(ScrollView(activity).apply {
-            addView(content)
-            preserveScroll("source")
+        body.addView(FrameLayout(activity).apply {
+            addView(ScrollView(activity).apply {
+                alpha = if (connected) 1f else 0.24f
+                addView(content)
+                preserveScroll("source")
+            }, FrameLayout.LayoutParams(-1, -1))
+            if (!connected) {
+                addView(View(activity).apply {
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                    setBackgroundColor(Color.argb(72, 224, 224, 224))
+                    isClickable = true
+                }, FrameLayout.LayoutParams(-1, -1))
+                val duration = disconnectedAt?.let {
+                    connectionDurationPresentation(now - it)
+                }
+                addView(label(
+                    if (duration == null) "Disconnected" else "Disconnected · $duration",
+                    14f,
+                    true,
+                ).apply {
+                    gravity = Gravity.CENTER
+                    setTextColor(disconnectedColor)
+                    setPadding(dp(14), dp(8), dp(14), dp(8))
+                    background = GradientDrawable().apply {
+                        setColor(surfaceColor)
+                        cornerRadius = dp(12).toFloat()
+                        setStroke(dp(1), disconnectedColor)
+                    }
+                    elevation = dp(4).toFloat()
+                }, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
+            }
         }, LinearLayout.LayoutParams(-1, 0, 1f))
     }
 
     private fun jobRow(job: SourceJob, sourceId: String?, onBronze: (String) -> Unit): View = LinearLayout(activity).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(10), dp(7), dp(10), dp(7))
+        setPadding(dp(12), dp(9), dp(12), dp(9))
+        val failed = job.state.equals("failed", ignoreCase = true)
+        val running = job.state.equals("running", ignoreCase = true)
+        val stateColor = when {
+            failed -> destructiveColor
+            running -> accentColor
+            else -> secondaryColor
+        }
+        val stateSurface = when {
+            failed -> destructiveSurface
+            running -> selectedColor
+            else -> surfaceColor
+        }
         val cardBackground = GradientDrawable().apply {
-            setColor(surfaceColor)
+            setColor(stateSurface)
             cornerRadius = dp(10).toFloat()
-            setStroke(dp(1), borderColor)
+            setStroke(dp(1), stateColor)
         }
         background = cardBackground
-        addView(label(job.title, 15f, true))
+        addView(LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(label(job.title, 15f, true).apply {
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(statusBadge(humanize(job.state), stateColor),
+                LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) })
+        })
         val kind = if (job.kind == "silver_extraction") {
-            "Silver extraction · ${job.state.replace('_', ' ')}"
+            "Silver extraction"
         } else {
-            "Sync · ${if (job.direction == "to_source") "to Source" else "to Self"}"
+            "Sync ${if (job.direction == "to_source") "to Source" else "to Self"}"
         }
         addView(label(kind, 13f).apply { setTextColor(secondaryColor) })
         sourceId?.let { id ->
@@ -496,15 +653,27 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             knowledge.processing != null -> "Claims · …"
             else -> "Claims · 0"
         }
+        val hasClaims = knowledge.activeClaimCount > 0
         root.addView(LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, dp(6), 0, 0)
-            addView(compactActionButton(knowledgeLabel, onKnowledge), LinearLayout.LayoutParams(0, dp(44), 1.35f))
-            addView(compactActionButton(if (isPinned) "Unpin" else "Pin", onPinToggle),
-                LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginStart = dp(4) })
-            addView(compactActionButton("Delete", onDelete),
-                LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginStart = dp(4) })
+            addView(compactActionButton(
+                knowledgeLabel,
+                onKnowledge,
+                enabled = hasClaims,
+            ), LinearLayout.LayoutParams(0, dp(48), 1.35f))
+            addView(compactActionButton(
+                if (isPinned) "Unpin" else "Pin",
+                onPinToggle,
+            ),
+                LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(4) })
+            addView(compactActionButton(
+                "Delete",
+                onDelete,
+                destructive = true,
+            ),
+                LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(4) })
         }, LinearLayout.LayoutParams(-1, -2))
         return root
     }
@@ -529,6 +698,19 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             image.contentDescription = "Full-screen image"
             addView(image, FrameLayout.LayoutParams(-1, -1))
         }
+        addView(ImageButton(activity).apply {
+            setImageResource(R.drawable.ic_arrow_back)
+            imageTintList = ColorStateList.valueOf(Color.WHITE)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.argb(170, 0, 0, 0))
+            }
+            contentDescription = "Close full-screen image"
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            setOnClickListener { onExit() }
+        }, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.TOP or Gravity.START).apply {
+            setMargins(dp(16), dp(16), 0, 0)
+        })
     }
 
     fun silverDetail(
@@ -601,8 +783,9 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         background = RippleDrawable(
             ColorStateList.valueOf(rippleColor),
             GradientDrawable().apply {
-                setColor(surfaceColor)
+                setColor(silverSurface)
                 cornerRadius = dp(8).toFloat()
+                setStroke(dp(1), silverColor)
             },
             null,
         )
@@ -614,9 +797,8 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         }
         addView(label(description, 15f), LinearLayout.LayoutParams(0, -2, 1f))
         silver.confidence(claim)?.let { confidence ->
-            addView(label(confidenceText(confidence), 14f, true).apply {
-                gravity = Gravity.END or Gravity.CENTER_VERTICAL
-            }, LinearLayout.LayoutParams(dp(64), -1).apply { marginStart = dp(12) })
+            addView(valueBadge(confidenceText(confidence), silverColor, surfaceColor),
+                LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(12) })
         }
         contentDescription = description
         if (subject != null) {
@@ -644,6 +826,9 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         }
         val sources = silver.supportingBronze(entity.id)
         if (sources.isNotEmpty()) {
+            body.addView(label("Bronze sources · ${sources.size}", 17f, true).apply {
+                setTextColor(bronzeColor)
+            }, sectionMargin())
             sources.forEach { sourceId ->
                 val title = silver.sources.firstOrNull { it.bronzeSourceId == sourceId }?.title
                     ?: bronze.get(sourceId)?.title
@@ -656,9 +841,10 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         }, LinearLayout.LayoutParams(-1, 0, 1f))
         root.addView(LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END
-            addView(compactActionButton(if (isPinned) "Unpin" else "Pin", onPinToggle),
-                LinearLayout.LayoutParams(-2, dp(44)))
+            addView(compactActionButton(
+                if (isPinned) "Unpin from Desktop" else "Pin to Desktop",
+                onPinToggle,
+            ), LinearLayout.LayoutParams(-1, dp(48)))
         }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
         return root
     }
@@ -668,8 +854,9 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             orientation = LinearLayout.VERTICAL
             val confidence = group.confidence?.let(::confidenceText)
             background = GradientDrawable().apply {
-                setColor(surfaceColor)
+                setColor(silverSurface)
                 cornerRadius = dp(8).toFloat()
+                setStroke(dp(1), silverColor)
             }
             addView(LinearLayout(activity).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -690,9 +877,8 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                 }
                 addView(statement, LinearLayout.LayoutParams(0, -2, 1f))
                 confidence?.let { value ->
-                    addView(label(value, 14f, true).apply {
-                        gravity = Gravity.END or Gravity.CENTER_VERTICAL
-                    }, LinearLayout.LayoutParams(dp(64), -1).apply { marginStart = dp(12) })
+                    addView(valueBadge(value, silverColor, surfaceColor),
+                        LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(12) })
                 }
             })
             contentDescription = buildString {
@@ -721,8 +907,9 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         background = RippleDrawable(
             ColorStateList.valueOf(rippleColor),
             GradientDrawable().apply {
-                setColor(Color.TRANSPARENT)
+                setColor(silverSurface)
                 cornerRadius = dp(8).toFloat()
+                setStroke(dp(1), silverColor)
             },
             null,
         )
@@ -730,10 +917,11 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             maxLines = 2
             ellipsize = TextUtils.TruncateAt.END
         }, LinearLayout.LayoutParams(0, -2, 1f))
-        addView(label(claimCount.toString(), 13f, true).apply {
-            setTextColor(secondaryColor)
-            gravity = Gravity.END
-        }, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(10) })
+        addView(valueBadge(
+            "$claimCount ${if (claimCount == 1) "claim" else "claims"}",
+            silverColor,
+            surfaceColor,
+        ), LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(10) })
         contentDescription = "${silver.label(entity)}, $claimCount ${if (claimCount == 1) "claim" else "claims"}"
         isClickable = true
         isFocusable = true
@@ -744,8 +932,9 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         orientation = LinearLayout.VERTICAL
         setPadding(dp(12), dp(8), dp(12), dp(8))
         background = GradientDrawable().apply {
-            setColor(surfaceColor)
+            setColor(silverSurface)
             cornerRadius = dp(8).toFloat()
+            setStroke(dp(1), silverColor)
         }
         val summary = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -764,9 +953,8 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             }
             addView(statement, LinearLayout.LayoutParams(0, -2, 1f))
             finding.confidence?.let { confidence ->
-                addView(label(confidenceText(confidence), 14f, true).apply {
-                    gravity = Gravity.END or Gravity.CENTER_VERTICAL
-                }, LinearLayout.LayoutParams(dp(64), -1).apply { marginStart = dp(12) })
+                addView(valueBadge(confidenceText(confidence), silverColor, surfaceColor),
+                    LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(12) })
             }
         }
         addView(summary)
@@ -786,18 +974,28 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
     }
 
     private fun sourceRow(title: String?, action: () -> Unit): View = label(
-        title?.let { "Source: $it" } ?: "Source",
+        title?.let { "$it  ›" } ?: "Source  ›",
         13f,
         true,
     ).apply {
-        setTextColor(accentColor)
-        setPadding(dp(10), dp(10), dp(10), dp(10))
+        setTextColor(bronzeColor)
+        setPadding(dp(12), dp(12), dp(12), dp(12))
         maxLines = 1
         ellipsize = TextUtils.TruncateAt.END
-        background = RippleDrawable(ColorStateList.valueOf(rippleColor), null, null)
+        background = RippleDrawable(
+            ColorStateList.valueOf(rippleColor),
+            GradientDrawable().apply {
+                setColor(bronzeSurface)
+                cornerRadius = dp(8).toFloat()
+                setStroke(dp(1), bronzeColor)
+            },
+            null,
+        )
         isClickable = true
         isFocusable = true
         setOnClickListener { action() }
+    }.also { view ->
+        view.layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) }
     }
 
     private fun unavailablePreview(): TextView = label("Preview unavailable", 15f).apply {
@@ -807,6 +1005,9 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
 
     private fun overlayButton(value: String, action: () -> Unit): TextView = label(value, 12f, true).apply {
         setPadding(dp(9), dp(6), dp(9), dp(6))
+        minHeight = dp(44)
+        minWidth = dp(48)
+        gravity = Gravity.CENTER
         background = RippleDrawable(ColorStateList.valueOf(rippleColor), overlayBackground(), null)
         isClickable = true
         isFocusable = true
@@ -856,11 +1057,38 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             addView(metadataRow("Modified", date.format(Date(item.modified))))
             addView(metadataRow("Sync status", syncStatus(item)))
         }
-        AlertDialog.Builder(activity)
+        val dialog = AlertDialog.Builder(activity)
             .setTitle("Metadata")
             .setView(content)
             .setPositiveButton("Close", null)
-            .show()
+            .create()
+        dialog.setOnShowListener { styleDialog(dialog) }
+        dialog.show()
+    }
+
+    fun confirmDelete(item: BronzeItem, onDelete: () -> Unit) {
+        val dialog = AlertDialog.Builder(activity)
+            .setMessage("Delete ${item.title}?")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Delete") { _, _ -> onDelete() }
+            .create()
+        dialog.setOnShowListener { styleDialog(dialog, destructive = true) }
+        dialog.show()
+    }
+
+    private fun styleDialog(dialog: AlertDialog, destructive: Boolean = false) {
+        dialog.window?.setBackgroundDrawable(GradientDrawable().apply {
+            setColor(surfaceColor)
+            cornerRadius = dp(18).toFloat()
+        })
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.apply {
+            isAllCaps = false
+            setTextColor(if (destructive) destructiveColor else accentColor)
+        }
+        dialog.getButton(AlertDialog.BUTTON_NEGATIVE)?.apply {
+            isAllCaps = false
+            setTextColor(secondaryColor)
+        }
     }
 
     private fun metadataRow(name: String, value: String): View = LinearLayout(activity).apply {
@@ -872,6 +1100,71 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
 
     private fun syncStatus(item: BronzeItem): String =
         if (item.ackedRevision == item.revision) "Synced" else "Sync pending"
+
+    private fun tierAccent(tier: OmniResultTier): Int = when (tier) {
+        OmniResultTier.BRONZE -> bronzeColor
+        OmniResultTier.SILVER -> silverColor
+        OmniResultTier.GOLD -> goldColor
+    }
+
+    private fun tierSurface(tier: OmniResultTier): Int = when (tier) {
+        OmniResultTier.BRONZE -> bronzeSurface
+        OmniResultTier.SILVER -> silverSurface
+        OmniResultTier.GOLD -> goldSurface
+    }
+
+    private fun tierBadge(tier: OmniResultTier): TextView =
+        valueBadge(tier.displayName, tierAccent(tier), surfaceColor)
+
+    private fun valueBadge(value: String, color: Int, surface: Int): TextView =
+        label(value, 12f, true).apply {
+            setTextColor(color)
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(3), dp(8), dp(3))
+            background = GradientDrawable().apply {
+                setColor(surface)
+                cornerRadius = dp(12).toFloat()
+                setStroke(dp(1), color)
+            }
+        }
+
+    private fun statusBadge(value: String, color: Int): TextView =
+        valueBadge(value.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString() }, color, surfaceColor)
+
+    private fun infoBanner(value: String, color: Int, surface: Int): View =
+        LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = GradientDrawable().apply {
+                setColor(surface)
+                cornerRadius = dp(10).toFloat()
+                setStroke(dp(1), color)
+            }
+            addView(valueBadge("!", color, Color.TRANSPARENT))
+            addView(label(value, 14f).apply { setTextColor(color) },
+                LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(9) })
+        }
+
+    private fun localDisplayTitle(item: BronzeItem): String = localDisplayTitles.getOrPut(item.id) {
+        if (item.mime == "text/plain") {
+            runCatching {
+                textPreview(item).lineSequence().firstOrNull { it.isNotBlank() }?.trim()
+            }.getOrNull()?.take(120)?.ifBlank { item.title } ?: item.title
+        } else item.title
+    }
+
+    private fun fileKindBadge(item: BronzeItem): TextView {
+        val kind = when {
+            item.mime.startsWith("image/") -> "IMG"
+            item.mime == "text/plain" && item.title.startsWith("note-") -> "NOTE"
+            item.mime.contains("csv") || item.title.endsWith(".csv", ignoreCase = true) -> "CSV"
+            item.mime.startsWith("text/") -> "TXT"
+            item.mime.contains("pdf") -> "PDF"
+            else -> "FILE"
+        }
+        return valueBadge(kind, bronzeColor, bronzeSurface)
+    }
 
     private fun fileSize(bytes: Long): String {
         if (bytes < 1024) return "$bytes B"
@@ -885,7 +1178,7 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         return String.format(Locale.getDefault(), if (value >= 10) "%.0f %s" else "%.1f %s", value, units[unit])
     }
 
-    private fun confidenceText(value: Double): String = String.format(Locale.US, "%.2f", value)
+    private fun confidenceText(value: Double): String = String.format(Locale.US, "%.0f%%", value * 100)
 
     private fun humanize(value: String): String = value.replace('_', ' ').replace('-', ' ')
 
@@ -916,11 +1209,32 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         setOnClickListener { action() }
     }
 
-    private fun compactActionButton(value: String, action: () -> Unit): Button = Button(activity).apply {
+    private fun compactActionButton(
+        value: String,
+        action: () -> Unit,
+        destructive: Boolean = false,
+        enabled: Boolean = true,
+    ): Button = Button(activity).apply {
+        val buttonFill = when {
+            !enabled -> elevatedColor
+            destructive -> destructiveSurface
+            else -> surfaceColor
+        }
+        val buttonBorder = when {
+            !enabled -> borderColor
+            destructive -> destructiveColor
+            else -> borderColor
+        }
         text = value
         textSize = 13f
         isAllCaps = false
-        setTextColor(primaryColor)
+        setTextColor(when {
+            !enabled -> secondaryColor
+            destructive -> destructiveColor
+            else -> primaryColor
+        })
+        isEnabled = enabled
+        alpha = if (enabled) 1f else 0.72f
         minimumWidth = 0
         minimumHeight = 0
         minWidth = 0
@@ -929,13 +1243,13 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         background = RippleDrawable(
             ColorStateList.valueOf(rippleColor),
             GradientDrawable().apply {
-                setColor(surfaceColor)
+                setColor(buttonFill)
                 cornerRadius = dp(9).toFloat()
-                setStroke(dp(1), borderColor)
+                setStroke(dp(1), buttonBorder)
             },
             null,
         )
-        setOnClickListener { action() }
+        if (enabled) setOnClickListener { action() }
     }
 
     fun dp(value: Int) = (value * activity.resources.displayMetrics.density + 0.5f).toInt()
@@ -953,42 +1267,51 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
 
     private fun bottomNavigation(selected: AppSection, connected: Boolean, onSection: (AppSection) -> Unit) =
         LinearLayout(activity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(4), 0, 0)
-            AppSection.entries.forEach { section ->
-                val tab = FrameLayout(activity).apply {
-                    background = GradientDrawable().apply {
-                        setColor(if (section == selected) selectedColor else backgroundColor)
-                        cornerRadius = dp(10).toFloat()
-                    }
-                    contentDescription = if (section == AppSection.SOURCE) {
-                        "Source, ${if (connected) "connected" else "disconnected"}"
-                    } else section.label
-                    setOnClickListener { onSection(section) }
-                }
-                val contents = LinearLayout(activity).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    addView(label(section.label, 14f, true).apply {
-                        setTextColor(if (section == selected) accentColor else secondaryColor)
-                    })
-                    if (section == AppSection.SOURCE) addView(View(activity).apply {
-                        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(surfaceColor)
+            elevation = dp(6).toFloat()
+            addView(View(activity).apply {
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                setBackgroundColor(borderColor)
+            }, LinearLayout.LayoutParams(-1, dp(1)))
+            addView(LinearLayout(activity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(4), 0, 0)
+                AppSection.entries.forEach { section ->
+                    val tab = FrameLayout(activity).apply {
                         background = GradientDrawable().apply {
-                            shape = GradientDrawable.OVAL
-                            setColor(if (connected) accentColor else disconnectedColor)
+                            setColor(if (section == selected) selectedColor else surfaceColor)
+                            cornerRadius = dp(10).toFloat()
                         }
-                    }, LinearLayout.LayoutParams(dp(8), dp(8)).apply {
-                        marginStart = dp(5)
-                        topMargin = dp(1)
-                        gravity = Gravity.TOP
+                        contentDescription = if (section == AppSection.SOURCE) {
+                            "Source, ${if (connected) "connected" else "disconnected"}"
+                        } else section.label
+                        setOnClickListener { onSection(section) }
+                    }
+                    val contents = LinearLayout(activity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        addView(label(section.label, 14f, true).apply {
+                            setTextColor(if (section == selected) accentColor else secondaryColor)
+                        })
+                        if (section == AppSection.SOURCE) addView(View(activity).apply {
+                            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                            background = GradientDrawable().apply {
+                                shape = GradientDrawable.OVAL
+                                setColor(if (connected) accentColor else disconnectedColor)
+                            }
+                        }, LinearLayout.LayoutParams(dp(8), dp(8)).apply {
+                            marginStart = dp(5)
+                            topMargin = dp(1)
+                            gravity = Gravity.TOP
+                        })
+                    }
+                    tab.addView(contents, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
+                    addView(tab, LinearLayout.LayoutParams(0, dp(50), 1f).apply {
+                        marginStart = dp(2); marginEnd = dp(2)
                     })
                 }
-                tab.addView(contents, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
-                addView(tab, LinearLayout.LayoutParams(0, dp(50), 1f).apply {
-                    marginStart = dp(2); marginEnd = dp(2)
-                })
-            }
+            }, LinearLayout.LayoutParams(-1, dp(54)))
         }
 
     private inner class LocalStorageAdapter(private val items: List<BronzeItem>) : BaseAdapter() {
@@ -1005,19 +1328,30 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             return LinearLayout(activity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                minimumHeight = dp(52)
+                minimumHeight = dp(64)
                 setPadding(dp(10), dp(4), dp(10), dp(4))
                 background = RippleDrawable(ColorStateList.valueOf(rippleColor), null, null)
                 contentDescription = "Open ${item.title}"
-                addView(label(item.title, 15f).apply {
-                    maxLines = 1
-                    ellipsize = TextUtils.TruncateAt.END
+                addView(fileKindBadge(item), LinearLayout.LayoutParams(-2, -2).apply {
+                    marginEnd = dp(10)
+                })
+                addView(LinearLayout(activity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(label(localDisplayTitle(item), 15f, true).apply {
+                        maxLines = 1
+                        ellipsize = TextUtils.TruncateAt.END
+                    })
+                    val subtitle = if (item.mime == "text/plain" && item.title.startsWith("note-")) {
+                        "${item.title}  ·  ${date.format(Date(item.modified))}"
+                    } else {
+                        "${fileSize(item.size)}  ·  ${date.format(Date(item.modified))}"
+                    }
+                    addView(label(subtitle, 12f).apply {
+                        setTextColor(secondaryColor)
+                        maxLines = 1
+                        ellipsize = TextUtils.TruncateAt.END
+                    })
                 }, LinearLayout.LayoutParams(0, -2, 1f))
-                addView(label(date.format(Date(item.modified)), 12f).apply {
-                    setTextColor(secondaryColor)
-                    gravity = Gravity.END
-                    maxLines = 1
-                }, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(10) })
             }
         }
     }
@@ -1036,14 +1370,17 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         return LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(8), dp(8), dp(8), dp(8))
-            background = GradientDrawable().apply {
+            val cardBackground = GradientDrawable().apply {
                 setColor(desktopTileColor(ref))
                 cornerRadius = dp(12).toFloat()
-                setStroke(dp(1), borderColor)
+                setStroke(dp(1), desktopTileBorderColor(ref))
             }
+            background = RippleDrawable(ColorStateList.valueOf(rippleColor), cardBackground, null)
             contentDescription = item?.title ?: entity?.let(silver::label) ?: "Item"
             when {
-                entity != null -> addView(label(silver.label(entity), 16f, true))
+                entity != null -> addView(label(silver.label(entity), 16f, true).apply {
+                    setTextColor(silverColor)
+                })
                 item == null -> addView(label("Item", 16f, true))
                 item.mime.startsWith("image/") -> {
                     val image = ImageView(activity).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
@@ -1058,7 +1395,8 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
                 else -> showCompactFilename(this, item.title)
             }
             if (item != null && item.ackedRevision != item.revision) {
-                addView(label("•", 16f).apply { setTextColor(secondaryColor); gravity = Gravity.END })
+                addView(statusBadge("Syncing", warningColor),
+                    LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(5) })
             }
             setOnClickListener { onOpen(ref) }
             setOnLongClickListener {
@@ -1084,8 +1422,15 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         }
     }
 
-    private fun desktopTileColor(ref: DesktopObjectRef): Int =
-        desktopPastels[(ref.key.hashCode() and Int.MAX_VALUE) % desktopPastels.size]
+    private fun desktopTileColor(ref: DesktopObjectRef): Int = when (ref.objectType) {
+        DESKTOP_OBJECT_SILVER -> silverSurface
+        else -> bronzeSurface
+    }
+
+    private fun desktopTileBorderColor(ref: DesktopObjectRef): Int = when (ref.objectType) {
+        DESKTOP_OBJECT_SILVER -> silverColor
+        else -> bronzeColor
+    }
 
     private fun showCompactFilename(container: LinearLayout, title: String) {
         container.removeAllViews()
