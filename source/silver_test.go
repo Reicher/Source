@@ -467,12 +467,137 @@ func TestSilverSemanticBatchRetryKeepsCompletedCheckpoints(t *testing.T) {
 	}
 }
 
-func TestSilverPermanentSemanticFailureDoesNotRetry(t *testing.T) {
+func TestSilverSemanticContractFailureRetriesBeforeSplitting(t *testing.T) {
 	root := t.TempDir()
 	bronze := newBronzeStore(root + "/bronze")
-	putSilverBronze(t, bronze, "18181818-1818-4181-8181-181818181818", "invalid.txt", "text/plain", 1, "A note")
+	putSilverBronze(t, bronze, "18181818-1818-4181-8181-181818181818", "retry-contract.txt", "text/plain", 1,
+		"First fragment.\n\nSecond fragment.")
+	calls := 0
+	model := testSemanticModel{id: "contract-retry-model", revision: "1", run: func(input semanticInput) (semanticResult, error) {
+		calls++
+		if calls < semanticContractMaximumAttempts {
+			result := emptySemanticResult(input)
+			result.Fragments = result.Fragments[:1]
+			return result, nil
+		}
+		return emptySemanticResult(input), nil
+	}}
+	service, err := newSilverServiceWithModel(root+"/silver", bronze, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.processNext(context.Background())
+	if calls != semanticContractMaximumAttempts || service.state.Jobs[0].State != "completed" {
+		t.Fatalf("contract failure was not retried in place: calls=%d job=%+v", calls, service.state.Jobs[0])
+	}
+	coverage := service.snapshot().Sources[0].Coverage
+	if coverage.SemanticState != silverSemanticCompleted || coverage.SemanticSkipReason != "" {
+		t.Fatalf("successful contract retry lost complete coverage: %+v", coverage)
+	}
+}
+
+func TestSilverSemanticContractFailureSplitsAndSourceOwnsSingleIdentity(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	putSilverBronze(t, bronze, "28282828-2828-4282-8282-282828282828", "split-contract.txt", "text/plain", 1,
+		"Ada One.\n\nGrace Two.\n\nKatherine Three.\n\nDorothy Four.")
+	callsBySize := map[int]int{}
+	model := testSemanticModel{id: "contract-split-model", revision: "1", run: func(input semanticInput) (semanticResult, error) {
+		callsBySize[len(input.Fragments)]++
+		if len(input.Fragments) > 1 {
+			result := emptySemanticResult(input)
+			result.Fragments = result.Fragments[:len(result.Fragments)-1]
+			return result, nil
+		}
+		var payload struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(input.Fragments[0].Payload, &payload); err != nil {
+			return semanticResult{}, err
+		}
+		result := emptySemanticResult(input)
+		result.Fragments[0].FragmentID = "model-owned-id"
+		result.Fragments[0].Entities = []semanticEntityCandidate{{
+			Ref: "person", Label: strings.TrimSuffix(payload.Text, "."), Type: "person", Confidence: testConfidence(0.99),
+		}}
+		return result, nil
+	}}
+	service, err := newSilverServiceWithModel(root+"/silver", bronze, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.processNext(context.Background())
+	if callsBySize[4] != semanticContractMaximumAttempts || callsBySize[2] != 2*semanticContractMaximumAttempts || callsBySize[1] != 4 {
+		t.Fatalf("contract recovery did not recursively split as expected: %+v", callsBySize)
+	}
+	snapshot := service.snapshot()
+	if len(snapshot.Sources) != 1 || len(snapshot.Entities) != 4 ||
+		snapshot.Sources[0].Coverage.SemanticState != silverSemanticCompleted {
+		t.Fatalf("split contract recovery did not publish complete semantics: %+v", snapshot)
+	}
+	for _, evidence := range snapshot.Evidence {
+		if evidence.BronzeSourceID != "28282828-2828-4282-8282-282828282828" {
+			t.Fatalf("split recovery changed Source-owned provenance: %+v", evidence)
+		}
+	}
+}
+
+func TestSilverSemanticContractFailureSkipsOnlyIrrecoverableFragment(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	putSilverBronze(t, bronze, "29292929-2929-4292-8292-292929292929", "partial-contract.txt", "text/plain", 1,
+		"Good fragment.\n\nBad fragment.")
+	calls := map[string]int{}
+	model := testSemanticModel{id: "contract-partial-model", revision: "1", run: func(input semanticInput) (semanticResult, error) {
+		if len(input.Fragments) > 1 {
+			calls["combined"]++
+			result := emptySemanticResult(input)
+			result.Fragments = result.Fragments[:1]
+			return result, nil
+		}
+		var payload struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(input.Fragments[0].Payload, &payload); err != nil {
+			return semanticResult{}, err
+		}
+		calls[payload.Text]++
+		if payload.Text == "Bad fragment." {
+			return semanticResult{Fragments: []semanticFragmentResult{}}, nil
+		}
+		return emptySemanticResult(input), nil
+	}}
+	service, err := newSilverServiceWithModel(root+"/silver", bronze, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.processNext(context.Background())
+	if calls["combined"] != semanticContractMaximumAttempts || calls["Good fragment."] != 1 ||
+		calls["Bad fragment."] != semanticContractMaximumAttempts {
+		t.Fatalf("unexpected partial recovery calls: %+v", calls)
+	}
+	job := service.state.Jobs[0]
+	snapshot := service.snapshot()
+	if job.State != "completed" || job.Attempts != 0 || len(snapshot.Processing) != 0 || len(snapshot.Sources) != 1 {
+		t.Fatalf("isolated contract failure blocked publication: job=%+v snapshot=%+v", job, snapshot)
+	}
+	coverage := snapshot.Sources[0].Coverage
+	if coverage.SemanticState != silverSemanticPartial || coverage.SemanticSkipReason != silverSkipModelContract {
+		t.Fatalf("omitted fragment was mistaken for successful empty semantics: %+v", coverage)
+	}
+	if len(snapshot.Evidence) != 2 || len(snapshot.Observations) != 2 {
+		t.Fatalf("partial semantics lost deterministic extraction: evidence=%d observations=%d", len(snapshot.Evidence), len(snapshot.Observations))
+	}
+}
+
+func TestSilverSingleContractFailurePublishesSkippedCoverage(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	putSilverBronze(t, bronze, "30303030-3030-4303-8303-303030303030", "invalid.txt", "text/plain", 1, "A note")
+	calls := 0
 	model := testSemanticModel{id: "invalid-model", revision: "1", run: func(semanticInput) (semanticResult, error) {
-		return semanticResult{}, nil
+		calls++
+		return semanticResult{Fragments: []semanticFragmentResult{}}, nil
 	}}
 	service, err := newSilverServiceWithModel(root+"/silver", bronze, model)
 	if err != nil {
@@ -480,18 +605,12 @@ func TestSilverPermanentSemanticFailureDoesNotRetry(t *testing.T) {
 	}
 	service.processNext(context.Background())
 	job := service.state.Jobs[0]
-	if job.State != "failed" || job.Retryable || job.RetryAt != 0 || job.Error == "" {
-		t.Fatalf("permanent model failure was scheduled for retry: %+v", job)
+	if job.State != "completed" || job.Attempts != 0 || calls != semanticContractMaximumAttempts {
+		t.Fatalf("single contract failure did not complete with bounded attempts: calls=%d job=%+v", calls, job)
 	}
-	if err := service.reconcile(); err != nil {
-		t.Fatal(err)
-	}
-	if service.state.Jobs[0].State != "failed" {
-		t.Fatalf("permanent failure was requeued: %+v", service.state.Jobs[0])
-	}
-	processing := service.snapshot().Processing
-	if len(processing) != 1 || processing[0].Error == "" || processing[0].Retryable {
-		t.Fatalf("permanent failure was not exposed: %+v", processing)
+	coverage := service.snapshot().Sources[0].Coverage
+	if coverage.SemanticState != silverSemanticSkipped || coverage.SemanticSkipReason != silverSkipModelContract {
+		t.Fatalf("single contract failure did not publish skipped coverage: %+v", coverage)
 	}
 }
 
@@ -548,7 +667,7 @@ func TestSilverPendingFailurePersistenceBlocksLaterJobs(t *testing.T) {
 		calls++
 		if calls == 1 {
 			service.path = filepath.Join(blocker, "state.json")
-			return semanticResult{}, nil
+			return semanticResult{}, errors.New("model unavailable")
 		}
 		return emptySemanticResult(input), nil
 	}}

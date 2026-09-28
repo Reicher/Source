@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -104,6 +105,30 @@ func TestSemanticHTTPModelUsesUntrustedContentAsData(t *testing.T) {
 	})
 	if err != nil || len(result.Fragments) != 1 || len(result.Fragments[0].Entities) != 0 {
 		t.Fatalf("model extraction failed: result=%+v err=%v", result, err)
+	}
+}
+
+func TestSemanticHTTPModelReportsSafeContractDiagnostics(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{
+			"role": "assistant", "content": `{"fragments":[`,
+		}}}})
+	}))
+	defer server.Close()
+	model, err := newHTTPSemanticModel(server.URL, "source-model", "revision-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := semanticInput{Fragments: []semanticFragmentInput{{ID: "expected-first"}, {ID: "expected-second"}}}
+	_, err = model.extract(context.Background(), input)
+	var contract *semanticContractError
+	if !errors.As(err, &contract) {
+		t.Fatalf("malformed response was not classified as a model-contract failure: %v", err)
+	}
+	if len(contract.expectedIDs) != 2 || contract.expectedIDs[0] != "expected-first" ||
+		contract.expectedIDs[1] != "expected-second" || len(contract.returnedIDs) != 0 ||
+		len(contract.responseHash) != sha256.Size*2 {
+		t.Fatalf("contract diagnostics are incomplete or unsafe: %+v", contract)
 	}
 }
 
@@ -294,6 +319,17 @@ func TestSemanticModelResultStillRejectsInvalidStructure(t *testing.T) {
 		if _, err := decodeSemanticModelResult(value); err == nil {
 			t.Fatalf("accepted structurally invalid model result: %s", value)
 		}
+	}
+}
+
+func TestSemanticModelResultDefersFragmentIdentityToSource(t *testing.T) {
+	value := `{"fragments":[{"entities":[],"attributes":[],"relationships":[]}]}`
+	result, err := decodeSemanticModelResult(value)
+	if err != nil || len(result.Fragments) != 1 || result.Fragments[0].FragmentID != "" {
+		t.Fatalf("model result identity could not be deferred to Source: result=%+v err=%v", result, err)
+	}
+	if _, err := decodeSemanticResult(value); err == nil {
+		t.Fatal("strict semantic result validation accepted a missing fragment identity")
 	}
 }
 
