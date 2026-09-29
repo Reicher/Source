@@ -235,6 +235,7 @@ type silverService struct {
 	wake               chan struct{}
 	semantic           semanticModel
 	afterCheckpoint    func(string, int)
+	onPublish          func()
 	statusError        string
 	pendingPersistence bool
 }
@@ -813,7 +814,11 @@ func (s *silverService) publish(jobID string, current bronzeItem) error {
 	job.UpdatedAt = time.Now().UnixMilli()
 	s.state.Revision++
 	s.state.DataRevision++
-	return s.saveLocked()
+	err = s.saveLocked()
+	if err == nil && s.onPublish != nil {
+		s.onPublish()
+	}
+	return err
 }
 
 func silverCoverageForCompletedJob(job silverJob) silverCoverage {

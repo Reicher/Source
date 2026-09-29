@@ -52,6 +52,7 @@ type identity struct {
 	qrToken   string
 	qrExpires time.Time
 	jobs      *sourceJobs
+	retrieval *retrievalService
 }
 
 func randomString(n int) (string, error) {
@@ -239,19 +240,38 @@ func (i *identity) newLanHandler(ctx context.Context) (http.Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load Silver processing state: %w", err)
 	}
+	embedder, err := embedderFromEnvironment()
+	if err != nil {
+		return nil, fmt.Errorf("load embedding model configuration: %w", err)
+	}
+	retrieval, err := newRetrievalService(filepath.Join(dataDir, "silver"), silver, embedder)
+	if err != nil {
+		return nil, fmt.Errorf("load Silver retrieval index: %w", err)
+	}
 	syncJobs, err := newSyncJobStore(filepath.Join(dataDir, "jobs"))
 	if err != nil {
+		_ = retrieval.close()
 		return nil, fmt.Errorf("load sync job state: %w", err)
 	}
 	jobs := &sourceJobs{sync: syncJobs, silver: silver}
 	i.mu.Lock()
 	i.jobs = jobs
+	i.retrieval = retrieval
 	i.mu.Unlock()
 	bronze.onCommit = func(item bronzeItem) error {
 		_, err := silver.enqueue(item)
+		if err == nil {
+			retrieval.signal()
+		}
 		return err
 	}
+	silver.onPublish = retrieval.signal
 	silver.start(ctx)
+	retrieval.start(ctx)
+	go func() {
+		<-ctx.Done()
+		_ = retrieval.close()
+	}()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.HandleFunc("POST /v1/pair", func(w http.ResponseWriter, r *http.Request) {
 		if r.TLS == nil || len(r.TLS.PeerCertificates) != 1 {
@@ -318,6 +338,7 @@ func (i *identity) newLanHandler(ctx context.Context) (http.Handler, error) {
 			"id": i.id, "person_id": personID, "status": "connected",
 			"silver_revision": silverRevision, "jobs_revision": jobSnapshot.Revision,
 			"jobs": jobSnapshot, "processing": processing, "silver_error": silverError,
+			"retrieval": retrieval.currentStatus(),
 		})
 	})
 	mux.Handle("/v1/bronze", i.trusted(bronze))
@@ -326,6 +347,21 @@ func (i *identity) newLanHandler(ctx context.Context) (http.Handler, error) {
 		snapshot := silver.snapshot()
 		snapshot.Jobs = jobs.snapshot()
 		writeJSON(w, snapshot)
+	})))
+	mux.Handle("POST /v1/retrieval", i.trusted(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request retrievalRequest
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&request); err != nil || requireJSONEOF(decoder) != nil {
+			http.Error(w, "invalid retrieval request", http.StatusBadRequest)
+			return
+		}
+		result, err := retrieval.search(r.Context(), request)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, result)
 	})))
 	mux.Handle("POST /v1/jobs/sync", i.trusted(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
@@ -420,6 +456,30 @@ func (i *identity) setupHandler(host string) http.Handler {
 	})
 	mux.HandleFunc("GET /jobs", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, i.jobSnapshot())
+	})
+	mux.HandleFunc("GET /retrieval", func(w http.ResponseWriter, r *http.Request) {
+		i.mu.Lock()
+		retrieval := i.retrieval
+		i.mu.Unlock()
+		if retrieval == nil {
+			http.Error(w, "retrieval unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		limit := retrievalDefaultLimit
+		if value := r.URL.Query().Get("limit"); value != "" {
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				http.Error(w, "invalid retrieval limit", http.StatusBadRequest)
+				return
+			}
+			limit = parsed
+		}
+		result, err := retrieval.search(r.Context(), retrievalRequest{Query: r.URL.Query().Get("q"), Limit: limit})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, result)
 	})
 	mux.HandleFunc("GET /setup.js", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
