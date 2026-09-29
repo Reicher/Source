@@ -406,22 +406,68 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             }
         }
 
-    fun self(localCount: Int, onLocalStorage: () -> Unit): View = screen { body ->
+    fun self(
+        localCount: Int,
+        silverCount: Int,
+        onLocalStorage: () -> Unit,
+        onSilverKnowledge: () -> Unit,
+    ): View = screen { body ->
         body.addView(card().apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             minimumHeight = dp(56)
-            addView(label("Local storage", 17f, true), LinearLayout.LayoutParams(0, -2, 1f))
+            addView(label("Bronze storage", 17f, true), LinearLayout.LayoutParams(0, -2, 1f))
             addView(label("$localCount ${if (localCount == 1) "item" else "items"}", 14f).apply {
                 setTextColor(secondaryColor)
             })
-            contentDescription = "Local storage, $localCount ${if (localCount == 1) "item" else "items"}"
+            contentDescription = "Bronze storage, $localCount ${if (localCount == 1) "item" else "items"}"
             isClickable = true
             isFocusable = true
             setOnClickListener { onLocalStorage() }
         })
+        body.addView(card().apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = dp(56)
+            addView(label("Silver knowledge", 17f, true), LinearLayout.LayoutParams(0, -2, 1f))
+            addView(label("$silverCount ${if (silverCount == 1) "entity" else "entities"}", 14f).apply {
+                setTextColor(secondaryColor)
+            })
+            contentDescription = "Silver knowledge, $silverCount ${if (silverCount == 1) "entity" else "entities"}"
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { onSilverKnowledge() }
+        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
     }
 
+    fun silverKnowledge(silver: SilverSnapshot, onEntity: (String) -> Unit): View = screen { body ->
+        if (silver.entities.isEmpty()) {
+            body.addView(label("No entities yet", 17f).apply {
+                setTextColor(secondaryColor)
+                gravity = Gravity.CENTER
+                setPadding(0, dp(40), 0, 0)
+            })
+        } else {
+            body.addView(ScrollView(activity).apply {
+                isVerticalScrollBarEnabled = false
+                addView(LinearLayout(activity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    silver.entities
+                        .map { entity -> entity to silver.activeClaimCount(entity.id) }
+                        .sortedWith(
+                            compareByDescending<Pair<SilverEntity, Int>> { it.second }
+                                .thenBy { silver.label(it.first).lowercase(Locale.getDefault()) }
+                                .thenBy { it.first.id },
+                        )
+                        .forEach { (entity, claimCount) ->
+                            addView(entityRow(entity, silver, claimCount) { onEntity(entity.id) },
+                                LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
+                        }
+                })
+                preserveScroll("silver-knowledge")
+            }, LinearLayout.LayoutParams(-1, 0, 1f))
+        }
+    }
     fun localStorage(
         items: List<BronzeItem>,
         sort: LocalStorageSort,
@@ -482,7 +528,6 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
         disconnectedAt: Long?,
         silver: SilverSnapshot,
         onBronze: (String) -> Unit,
-        onEntity: (String) -> Unit,
     ): View = screen { body ->
         val now = System.currentTimeMillis()
         val localBronze = bronze.all()
@@ -498,20 +543,6 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             } else {
                 silver.jobs.queued.forEach { job ->
                     addView(jobRow(job, resolveJobBronzeSourceId(job, localBronze), onBronze))
-                }
-            }
-            if (silver.entities.isNotEmpty()) {
-                addView(label("Entities", 19f, true), sectionMargin())
-                silver.entities
-                    .map { entity -> entity to silver.activeClaimCount(entity.id) }
-                    .sortedWith(
-                        compareByDescending<Pair<SilverEntity, Int>> { it.second }
-                            .thenBy { silver.label(it.first).lowercase(Locale.getDefault()) }
-                            .thenBy { it.first.id },
-                    )
-                    .forEach { (entity, claimCount) ->
-                    addView(entityRow(entity, silver, claimCount) { onEntity(entity.id) },
-                        LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
                 }
             }
         }
