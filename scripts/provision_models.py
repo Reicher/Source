@@ -47,10 +47,12 @@ def validate_entry(entry):
 
 def load_manifest(path=MANIFEST):
     manifest = json.loads(path.read_text(encoding="utf-8"))
-    if set(manifest) != {"self", "source"}:
-        raise ValueError("manifest must contain self and source")
+    if set(manifest) != {"self", "source", "source_embedding"}:
+        raise ValueError("manifest must contain self, source, and source_embedding")
     for target in manifest.values():
         validate_entry(target)
+    if not isinstance(manifest["source_embedding"].get("dimensions"), int) or manifest["source_embedding"]["dimensions"] <= 0:
+        raise ValueError("source_embedding must declare positive dimensions")
     parts = manifest["self"].get("parts")
     if not isinstance(parts, list) or len(parts) != 3:
         raise ValueError("Self must have three asset-pack parts")
@@ -167,7 +169,7 @@ def verify(target, entry):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("target", choices=("self", "source", "all"), nargs="?", default="all")
+    parser.add_argument("target", choices=("self", "source", "source-embedding", "all"), nargs="?", default="all")
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--check", action="store_true", help="validate the pinned manifest only")
     action.add_argument("--verify", action="store_true", help="verify provisioned files without downloading")
@@ -176,7 +178,14 @@ def main():
     if args.check:
         print("Model manifest is valid")
         return
-    targets = ("self", "source") if args.target == "all" else (args.target,)
+    if args.target == "all":
+        targets = ("self", "source", "source_embedding")
+    elif args.target == "source":
+        targets = ("source", "source_embedding")
+    elif args.target == "source-embedding":
+        targets = ("source_embedding",)
+    else:
+        targets = (args.target,)
     for target in targets:
         if args.verify:
             verify(target, manifest[target])

@@ -36,6 +36,43 @@ services:
     cap_drop:
       - ALL
 
+  source-embedding:
+    image: "${SOURCE_LLAMA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-b10964}"
+    user: "${SOURCE_UID:?}:${SOURCE_GID:?}"
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - --model
+      - /models/Qwen3-Embedding-0.6B-Q8_0.gguf
+      - --alias
+      - source-embedding
+      - --host
+      - 127.0.0.1
+      - --port
+      - "8083"
+      - --ctx-size
+      - "4096"
+      - --parallel
+      - "1"
+      - --embedding
+      - --pooling
+      - last
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8083/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 2m
+    volumes:
+      - "${SOURCE_MODEL_ROOT:?}:/models:ro"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
   source:
     build:
       context: ./source
@@ -46,6 +83,7 @@ services:
     restart: unless-stopped
     depends_on:
       - source-model
+      - source-embedding
     # Source advertises its LAN address with mDNS, which needs the host network.
     network_mode: host
     command: ["-listen", "${SOURCE_LAN_ADDRESS:?}:8443", "-setup", "127.0.0.1:8081", "-data", "/data/pairing"]
@@ -57,6 +95,11 @@ services:
       SOURCE_MODEL_MAX_OUTPUT_TOKENS: "2048"
       SOURCE_MODEL_REQUEST_TIMEOUT_MINUTES: "1440"
       SOURCE_SILVER_SEMANTIC_BATCH_TARGET_KIB: "4"
+      SOURCE_EMBEDDING_URL: http://127.0.0.1:8083
+      SOURCE_EMBEDDING_MODEL_ID: source-embedding
+      SOURCE_EMBEDDING_MODEL_REVISION: 370f27d7550e0def9b39c1f16d3fbaa13aa67728
+      SOURCE_EMBEDDING_DIMENSIONS: "1024"
+      SOURCE_EMBEDDING_REQUEST_TIMEOUT_MINUTES: "10"
     volumes:
       - "${SOURCE_DATA_ROOT:?}:/data"
     read_only: true
