@@ -43,6 +43,7 @@ class MainActivity : Activity() {
     private var fullScreenImageId: String? = null
     private var section = AppSection.DESKTOP
     private var localStorageOpen = false
+    private var silverKnowledgeOpen = false
     private var localStorageSort = LocalStorageSort.NAME
     private var omniText = ""
     private val omniAttachments = mutableListOf<Uri>()
@@ -79,6 +80,7 @@ class MainActivity : Activity() {
             runCatching { AppSection.valueOf(it) }.getOrNull()
         } ?: AppSection.DESKTOP
         localStorageOpen = savedInstanceState?.getBoolean("local_storage_open") ?: false
+        silverKnowledgeOpen = savedInstanceState?.getBoolean("silver_knowledge_open") ?: false
         localStorageSort = savedInstanceState?.getString("local_storage_sort")?.let {
             runCatching { LocalStorageSort.valueOf(it) }.getOrNull()
         } ?: LocalStorageSort.NAME
@@ -145,6 +147,7 @@ class MainActivity : Activity() {
         outState.putString("full_screen_image", fullScreenImageId)
         outState.putString("section", section.name)
         outState.putBoolean("local_storage_open", localStorageOpen)
+        outState.putBoolean("silver_knowledge_open", silverKnowledgeOpen)
         outState.putString("local_storage_sort", localStorageSort.name)
         outState.putString("omni_text", omniText)
         outState.putStringArrayList("omni_attachments", ArrayList(omniAttachments.map(Uri::toString)))
@@ -342,19 +345,34 @@ class MainActivity : Activity() {
             )
             AppSection.SELF -> {
                 val localItems = bronze.all().filterNot(BronzeItem::deleted)
-                if (localStorageOpen) views.localStorage(
-                    localItems,
-                    localStorageSort,
-                    onSort = { sort ->
-                        if (sort != localStorageSort) {
-                            localStorageSort = sort
+                when {
+                    localStorageOpen -> views.localStorage(
+                        localItems,
+                        localStorageSort,
+                        onSort = { sort ->
+                            if (sort != localStorageSort) {
+                                localStorageSort = sort
+                                render()
+                            }
+                        },
+                        onOpen = ::openBronze,
+                    )
+                    silverKnowledgeOpen -> views.silverKnowledge(silverSnapshot) { id ->
+                        entityId = id
+                        render()
+                    }
+                    else -> views.self(
+                        localItems.size,
+                        silverSnapshot.entities.size,
+                        onLocalStorage = {
+                            localStorageOpen = true
                             render()
-                        }
-                    },
-                    onOpen = ::openBronze,
-                ) else views.self(localItems.size) {
-                    localStorageOpen = true
-                    render()
+                        },
+                        onSilverKnowledge = {
+                            silverKnowledgeOpen = true
+                            render()
+                        },
+                    )
                 }
             }
             AppSection.SOURCE -> views.source(
@@ -362,10 +380,6 @@ class MainActivity : Activity() {
                 disconnectedAt,
                 silverSnapshot,
                 onBronze = ::openBronze,
-                onEntity = { id ->
-                    entityId = id
-                    render()
-                },
             )
         }
         val omniCandidates = buildList {
@@ -402,6 +416,7 @@ class MainActivity : Activity() {
                 knowledgeSourceId = null
                 entityId = null
                 localStorageOpen = false
+                silverKnowledgeOpen = false
                 render()
             },
         ))
@@ -559,6 +574,7 @@ class MainActivity : Activity() {
             knowledgeSourceId != null -> { knowledgeSourceId = null; render() }
             detailId != null -> { detailId = null; render() }
             localStorageOpen -> { localStorageOpen = false; render() }
+            silverKnowledgeOpen -> { silverKnowledgeOpen = false; render() }
             section != AppSection.DESKTOP -> { section = AppSection.DESKTOP; render() }
             else -> finish()
         }
