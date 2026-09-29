@@ -17,6 +17,8 @@ Bronze
 
 The retrieval chunk processor reads published deterministic observations rather than parsing Bronze again. Text blocks and Markdown headings retain UTF-8 byte-range selectors; JSON values retain JSON pointers; CSV rows retain row selectors and column-aware text. This avoids a competing chunking model and gives retrieval the same Evidence IDs already used by knowledge Silver.
 
+An individual JSON scalar or table field can still be larger than the embedding runtime context even though ordinary text fragments are already bounded. The retrieval processor therefore splits every derived text deterministically at UTF-8-safe boundaries of at most 3 KiB. Split parts retain the same Silver observation and Evidence provenance while receiving distinct stable chunk IDs.
+
 ## Storage and lifecycle
 
 `silver/retrieval.sqlite` owns only the retrieval representation. The existing `silver/state.json` knowledge pipeline remains unchanged in this baseline; migrating all Silver jobs and knowledge generations to SQLite is a separate scalability change.

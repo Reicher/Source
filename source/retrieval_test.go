@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,6 +27,7 @@ type testEmbedder struct {
 	panicValue        any
 	transientFailures int
 	successDelay      time.Duration
+	maximumInputBytes int
 }
 
 func (e *testEmbedder) Identity() ModelIdentity {
@@ -56,6 +58,9 @@ func (e *testEmbedder) Embed(_ context.Context, input []string) ([][]float32, er
 	}
 	result := make([][]float32, len(input))
 	for index, text := range input {
+		if e.maximumInputBytes > 0 && len(text) > e.maximumInputBytes {
+			return nil, fmt.Errorf("embedding input is %d bytes; limit is %d", len(text), e.maximumInputBytes)
+		}
 		lower := strings.ToLower(text)
 		vector := []float32{0.01, 0.01, 0.01}
 		switch {
@@ -174,6 +179,49 @@ func TestRetrievalKeepsDistinctObservationsThatShareEvidence(t *testing.T) {
 	values := chunks["source"]
 	if len(values) != 2 || values[0].ID == values[1].ID || values[0].ObservationID == values[1].ObservationID {
 		t.Fatalf("shared Evidence collapsed distinct observations: %+v", values)
+	}
+}
+
+func TestRetrievalSplitsOversizedObservationsBeforeEmbedding(t *testing.T) {
+	root := t.TempDir()
+	_, silver, item := publishedRetrievalFixture(t, root)
+	largeValue := strings.Repeat("å", retrievalMaximumChunkBytes*2)
+	payload, err := json.Marshal(map[string]any{"path": "/large", "value": largeValue})
+	if err != nil {
+		t.Fatal(err)
+	}
+	silver.mu.Lock()
+	dataset := silver.state.Published[item.ID]
+	dataset.Observations = append(dataset.Observations, silverObservation{
+		ID: "oversized-observation", Kind: "parsed-json-value", Payload: payload,
+		EvidenceIDs: []string{dataset.Evidence[0].ID},
+		Producer:    silverProducer{ProcessorID: silverExtractionID, ProcessorVersion: silverExtractionVersion},
+	})
+	silver.state.Published[item.ID] = dataset
+	silver.mu.Unlock()
+
+	embedder := &testEmbedder{
+		id: "embedding", revision: "bounded", dimensions: 3, maximumInputBytes: retrievalMaximumChunkBytes,
+	}
+	retrieval, err := newRetrievalService(root+"/silver", silver, embedder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer retrieval.close()
+	if err := retrieval.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var parts, maximumBytes int
+	if err := retrieval.db.QueryRow(`SELECT count(*), max(length(CAST(text AS BLOB)))
+		FROM retrieval_chunks WHERE observation_id = ?`, "oversized-observation").Scan(&parts, &maximumBytes); err != nil {
+		t.Fatal(err)
+	}
+	status, err := retrieval.readStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parts < 2 || maximumBytes > retrievalMaximumChunkBytes || status.State != "ready" || status.Chunks != status.Embeddings {
+		t.Fatalf("oversized observation was not safely embedded: parts=%d maximum=%d status=%+v", parts, maximumBytes, status)
 	}
 }
 
@@ -345,6 +393,27 @@ func TestRetrievalRebuildsDerivedDatabaseForSchemaChange(t *testing.T) {
 	status, err := rebuilt.readStatus()
 	if err != nil || status.State != "ready" || status.Chunks == 0 {
 		t.Fatalf("rebuilt schema did not reconcile: status=%+v err=%v", status, err)
+	}
+}
+
+func TestRetrievalRebuildsCorruptDerivedDatabase(t *testing.T) {
+	root := t.TempDir()
+	_, silver, _ := publishedRetrievalFixture(t, root)
+	path := root + "/silver/retrieval.sqlite"
+	if err := os.WriteFile(path, []byte("not a SQLite database"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	retrieval, err := newRetrievalService(root+"/silver", silver, &testEmbedder{id: "embedding", revision: "one", dimensions: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer retrieval.close()
+	if err := retrieval.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	status, err := retrieval.readStatus()
+	if err != nil || status.State != "ready" || status.Chunks == 0 || status.Chunks != status.Embeddings {
+		t.Fatalf("corrupt derived database was not rebuilt: status=%+v err=%v", status, err)
 	}
 }
 

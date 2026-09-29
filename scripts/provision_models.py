@@ -157,7 +157,7 @@ def provision_self(entry):
 
 
 def verify(target, entry):
-    if target == "source":
+    if target in ("source", "source_embedding"):
         paths = [(source_model_path(entry), entry)]
     else:
         paths = list(zip(part_paths(entry["parts"]), entry["parts"]))

@@ -15,9 +15,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	sqliteVec "github.com/asg017/sqlite-vec-go-bindings/cgo"
-	_ "github.com/mattn/go-sqlite3"
+	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
 func init() {
@@ -25,17 +26,20 @@ func init() {
 }
 
 const (
-	retrievalSchemaVersion             = 2
+	retrievalSchemaVersion             = 3
 	retrievalChunkProcessorID          = "source.silver.retrieval-chunks"
-	retrievalChunkProcessorVersion     = "1"
+	retrievalChunkProcessorVersion     = "2"
 	retrievalEmbeddingProcessorID      = "source.silver.embeddings"
 	retrievalEmbeddingProcessorVersion = "1"
+	retrievalMaximumChunkBytes         = 3 * 1024
 	retrievalDefaultLimit              = 10
 	retrievalMaximumLimit              = 50
 	retrievalEmbeddingBatchSize        = 1
 	retrievalFusionConstant            = 60.0
 	retrievalReconcileInterval         = 10 * time.Second
 )
+
+var errRetrievalSchemaMismatch = errors.New("retrieval SQLite schema mismatch")
 
 type retrievalService struct {
 	db       *sql.DB
@@ -123,6 +127,22 @@ func newRetrievalService(dir string, silver *silverService, embedder Embedder) (
 		return nil, err
 	}
 	path := filepath.Join(dir, "retrieval.sqlite")
+	for attempt := 0; attempt < 2; attempt++ {
+		service, err := openRetrievalService(path, silver, embedder)
+		if err == nil {
+			return service, nil
+		}
+		if attempt > 0 || (!errors.Is(err, errRetrievalSchemaMismatch) && !retrievalSQLiteCorrupt(err)) {
+			return nil, err
+		}
+		if err := removeRetrievalDatabase(path); err != nil {
+			return nil, err
+		}
+	}
+	return nil, errors.New("rebuild retrieval SQLite database")
+}
+
+func openRetrievalService(path string, silver *silverService, embedder Embedder) (*retrievalService, error) {
 	// Retrieval is fully derived from Silver, so discard sidecars left by the
 	// short-lived WAL/WASM implementation before opening the native database.
 	// A single connection does not need WAL, and reconciliation restores any
@@ -148,24 +168,12 @@ func newRetrievalService(dir string, silver *silverService, embedder Embedder) (
 	if schemaExists == 1 {
 		if err := db.QueryRow(`SELECT version FROM retrieval_schema LIMIT 1`).Scan(&storedVersion); err != nil {
 			db.Close()
-			return nil, fmt.Errorf("read retrieval SQLite schema: %w", err)
+			return nil, fmt.Errorf("%w: read version: %v", errRetrievalSchemaMismatch, err)
 		}
 	}
 	if schemaExists == 1 && storedVersion != retrievalSchemaVersion {
-		if err := db.Close(); err != nil {
-			return nil, err
-		}
-		for _, suffix := range []string{"", "-wal", "-shm"} {
-			if err := os.Remove(path + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return nil, fmt.Errorf("replace retrieval SQLite schema: %w", err)
-			}
-		}
-		db, err = sql.Open("sqlite3", dsn)
-		if err != nil {
-			return nil, err
-		}
-		db.SetMaxOpenConns(1)
-		db.SetMaxIdleConns(1)
+		db.Close()
+		return nil, fmt.Errorf("%w: have %d, want %d", errRetrievalSchemaMismatch, storedVersion, retrievalSchemaVersion)
 	}
 	service := &retrievalService{db: db, path: path, silver: silver, embedder: embedder, wake: make(chan struct{}, 1)}
 	if err := service.initialize(); err != nil {
@@ -180,6 +188,23 @@ func newRetrievalService(dir string, silver *silverService, embedder Embedder) (
 	service.status = status
 	_ = os.Chmod(path, 0600)
 	return service, nil
+}
+
+func removeRetrievalDatabase(path string) error {
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.Remove(path + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("replace retrieval SQLite database: %w", err)
+		}
+	}
+	return nil
+}
+
+func retrievalSQLiteCorrupt(err error) bool {
+	var sqliteError sqlite3.Error
+	if !errors.As(err, &sqliteError) {
+		return false
+	}
+	return sqliteError.Code == sqlite3.ErrCorrupt || sqliteError.Code == sqlite3.ErrNotADB || sqliteError.Code == sqlite3.ErrFormat
 }
 
 func (s *retrievalService) initialize() error {
@@ -214,7 +239,7 @@ func (s *retrievalService) initialize() error {
             text TEXT NOT NULL,
             evidence_processor_id TEXT NOT NULL,
             evidence_processor_version TEXT NOT NULL,
-	            UNIQUE(bronze_source_id, observation_id)
+	            UNIQUE(bronze_source_id, chunk_id)
         )`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS retrieval_fts USING fts5(chunk_id UNINDEXED, text, tokenize='unicode61')`,
 		`CREATE TABLE IF NOT EXISTS retrieval_embedding_rows (
@@ -366,20 +391,49 @@ func retrievalChunksFromSnapshot(snapshot silverSnapshot) (map[string][]retrieva
 		if !ok || source.BronzeContentSHA256 != item.BronzeContentSHA256 {
 			continue
 		}
-		chunk := retrievalChunk{
-			BronzeSourceID: item.BronzeSourceID, BronzeContentSHA256: item.BronzeContentSHA256,
-			Title: source.Title, Mime: source.Mime, ObservationID: observation.ID, EvidenceID: item.ID, Selector: item.Selector,
-			Text: text, EvidenceProducer: observation.Producer,
+		for part, partText := range splitRetrievalText(text) {
+			chunk := retrievalChunk{
+				BronzeSourceID: item.BronzeSourceID, BronzeContentSHA256: item.BronzeContentSHA256,
+				Title: source.Title, Mime: source.Mime, ObservationID: observation.ID, EvidenceID: item.ID, Selector: item.Selector,
+				Text: partText, EvidenceProducer: observation.Producer,
+			}
+			chunk.ID = stableID("source-silver-retrieval-chunk", struct {
+				ObservationID, EvidenceID, ProcessorID, ProcessorVersion string
+				Part                                                     int
+			}{observation.ID, item.ID, retrievalChunkProcessorID, retrievalChunkProcessorVersion, part})
+			result[source.BronzeSourceID] = append(result[source.BronzeSourceID], chunk)
 		}
-		chunk.ID = stableID("source-silver-retrieval-chunk", struct {
-			ObservationID, EvidenceID, ProcessorID, ProcessorVersion string
-		}{observation.ID, item.ID, retrievalChunkProcessorID, retrievalChunkProcessorVersion})
-		result[source.BronzeSourceID] = append(result[source.BronzeSourceID], chunk)
 	}
 	for sourceID := range result {
 		sort.Slice(result[sourceID], func(i, j int) bool { return result[sourceID][i].ID < result[sourceID][j].ID })
 	}
 	return result, nil
+}
+
+func splitRetrievalText(text string) []string {
+	remaining := strings.TrimSpace(text)
+	parts := make([]string, 0, 1+len(remaining)/retrievalMaximumChunkBytes)
+	for len(remaining) > retrievalMaximumChunkBytes {
+		end := retrievalMaximumChunkBytes
+		for end > 0 && !utf8.RuneStart(remaining[end]) {
+			end--
+		}
+		if end == 0 {
+			_, end = utf8.DecodeRuneInString(remaining)
+		}
+		if boundary := strings.LastIndexAny(remaining[:end], " \t\r\n"); boundary >= retrievalMaximumChunkBytes/2 {
+			end = boundary
+		}
+		part := strings.TrimSpace(remaining[:end])
+		if part != "" {
+			parts = append(parts, part)
+		}
+		remaining = strings.TrimSpace(remaining[end:])
+	}
+	if remaining != "" {
+		parts = append(parts, remaining)
+	}
+	return parts
 }
 
 func retrievalText(kind string, payload json.RawMessage) (string, bool) {

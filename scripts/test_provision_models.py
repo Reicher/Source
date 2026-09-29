@@ -53,6 +53,14 @@ class ProvisionModelsTest(unittest.TestCase):
                 open_request.assert_not_called()
             self.assertEqual(destination.read_bytes(), data)
 
+    def test_verifies_source_embedding_as_single_file(self):
+        data = b"embedding model"
+        model = entry(data)
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict("os.environ", {"SOURCE_MODEL_ROOT": directory}):
+                provision_models.source_model_path(model).write_bytes(data)
+                provision_models.verify("source_embedding", model)
+
     def test_resumes_download_and_verifies_checksum(self):
         data = b"a small test model"
         with tempfile.TemporaryDirectory() as directory:
