@@ -1,10 +1,14 @@
 FROM golang:1.25-bookworm AS build
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libsqlite3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . ./
-RUN CGO_ENABLED=0 go build -trimpath -o /out/source .
+RUN go build -tags sqlite_fts5 -trimpath -o /out/source .
 
 FROM debian:bookworm-slim
 ARG SOURCE_REVISION=unknown

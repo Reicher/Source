@@ -16,19 +16,23 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/asg017/sqlite-vec-go-bindings/ncruces"
-	_ "github.com/ncruces/go-sqlite3/driver"
+	sqliteVec "github.com/asg017/sqlite-vec-go-bindings/cgo"
+	_ "github.com/mattn/go-sqlite3"
 )
 
+func init() {
+	sqliteVec.Auto()
+}
+
 const (
-	retrievalSchemaVersion             = 1
+	retrievalSchemaVersion             = 2
 	retrievalChunkProcessorID          = "source.silver.retrieval-chunks"
 	retrievalChunkProcessorVersion     = "1"
 	retrievalEmbeddingProcessorID      = "source.silver.embeddings"
 	retrievalEmbeddingProcessorVersion = "1"
 	retrievalDefaultLimit              = 10
 	retrievalMaximumLimit              = 50
-	retrievalEmbeddingBatchSize        = 32
+	retrievalEmbeddingBatchSize        = 1
 	retrievalFusionConstant            = 60.0
 	retrievalReconcileInterval         = 10 * time.Second
 )
@@ -58,6 +62,7 @@ type retrievalChunk struct {
 	BronzeContentSHA256 string
 	Title               string
 	Mime                string
+	ObservationID       string
 	EvidenceID          string
 	Selector            map[string]any
 	Text                string
@@ -92,6 +97,7 @@ type retrievalResult struct {
 	BronzeContentSHA256 string         `json:"bronze_content_sha256"`
 	BronzeTitle         string         `json:"bronze_title"`
 	BronzeMime          string         `json:"bronze_mime"`
+	SilverObservationID string         `json:"silver_observation_id"`
 	EvidenceID          string         `json:"evidence_id"`
 	EvidenceSelector    map[string]any `json:"evidence_selector,omitempty"`
 	EvidenceProducer    silverProducer `json:"evidence_producer"`
@@ -117,6 +123,15 @@ func newRetrievalService(dir string, silver *silverService, embedder Embedder) (
 		return nil, err
 	}
 	path := filepath.Join(dir, "retrieval.sqlite")
+	// Retrieval is fully derived from Silver, so discard sidecars left by the
+	// short-lived WAL/WASM implementation before opening the native database.
+	// A single connection does not need WAL, and reconciliation restores any
+	// discarded derived writes.
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if err := os.Remove(path + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("remove retrieval SQLite sidecar: %w", err)
+		}
+	}
 	dsn := (&url.URL{Scheme: "file", Path: path}).String()
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
@@ -124,6 +139,34 @@ func newRetrievalService(dir string, silver *silverService, embedder Embedder) (
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
+	var storedVersion int
+	var schemaExists int
+	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='retrieval_schema'`).Scan(&schemaExists); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("inspect retrieval SQLite schema: %w", err)
+	}
+	if schemaExists == 1 {
+		if err := db.QueryRow(`SELECT version FROM retrieval_schema LIMIT 1`).Scan(&storedVersion); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("read retrieval SQLite schema: %w", err)
+		}
+	}
+	if schemaExists == 1 && storedVersion != retrievalSchemaVersion {
+		if err := db.Close(); err != nil {
+			return nil, err
+		}
+		for _, suffix := range []string{"", "-wal", "-shm"} {
+			if err := os.Remove(path + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("replace retrieval SQLite schema: %w", err)
+			}
+		}
+		db, err = sql.Open("sqlite3", dsn)
+		if err != nil {
+			return nil, err
+		}
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+	}
 	service := &retrievalService{db: db, path: path, silver: silver, embedder: embedder, wake: make(chan struct{}, 1)}
 	if err := service.initialize(); err != nil {
 		db.Close()
@@ -142,11 +185,11 @@ func newRetrievalService(dir string, silver *silverService, embedder Embedder) (
 func (s *retrievalService) initialize() error {
 	statements := []string{
 		`PRAGMA foreign_keys = ON`,
-		`PRAGMA journal_mode = WAL`,
+		`PRAGMA journal_mode = DELETE`,
 		`PRAGMA synchronous = FULL`,
 		`PRAGMA busy_timeout = 5000`,
 		`CREATE TABLE IF NOT EXISTS retrieval_schema (version INTEGER NOT NULL)`,
-		`INSERT INTO retrieval_schema(version) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM retrieval_schema)`,
+		fmt.Sprintf(`INSERT INTO retrieval_schema(version) SELECT %d WHERE NOT EXISTS (SELECT 1 FROM retrieval_schema)`, retrievalSchemaVersion),
 		`CREATE TABLE IF NOT EXISTS retrieval_sources (
             bronze_source_id TEXT PRIMARY KEY,
             bronze_content_sha256 TEXT NOT NULL,
@@ -163,14 +206,15 @@ func (s *retrievalService) initialize() error {
             chunk_id TEXT NOT NULL UNIQUE,
             bronze_source_id TEXT NOT NULL REFERENCES retrieval_sources(bronze_source_id) ON DELETE CASCADE,
             bronze_content_sha256 TEXT NOT NULL,
-            title TEXT NOT NULL,
-            mime TEXT NOT NULL,
-            evidence_id TEXT NOT NULL,
+	            title TEXT NOT NULL,
+	            mime TEXT NOT NULL,
+	            observation_id TEXT NOT NULL,
+	            evidence_id TEXT NOT NULL,
             selector_json TEXT NOT NULL,
             text TEXT NOT NULL,
             evidence_processor_id TEXT NOT NULL,
             evidence_processor_version TEXT NOT NULL,
-            UNIQUE(bronze_source_id, evidence_id)
+	            UNIQUE(bronze_source_id, observation_id)
         )`,
 		`CREATE VIRTUAL TABLE IF NOT EXISTS retrieval_fts USING fts5(chunk_id UNINDEXED, text, tokenize='unicode61')`,
 		`CREATE TABLE IF NOT EXISTS retrieval_embedding_rows (
@@ -214,7 +258,7 @@ func (s *retrievalService) start(ctx context.Context) {
 		ticker := time.NewTicker(retrievalReconcileInterval)
 		defer ticker.Stop()
 		for {
-			if err := s.reconcile(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			if err := s.reconcileSafely(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				s.setRuntimeError(err)
 			}
 			select {
@@ -228,6 +272,15 @@ func (s *retrievalService) start(ctx context.Context) {
 	s.signal()
 }
 
+func (s *retrievalService) reconcileSafely(ctx context.Context) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("retrieval reconcile panic: %v", recovered)
+		}
+	}()
+	return s.reconcile(ctx)
+}
+
 func (s *retrievalService) signal() {
 	select {
 	case s.wake <- struct{}{}:
@@ -239,7 +292,14 @@ func (s *retrievalService) setRuntimeError(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.status.State = "failed"
-	s.status.Error = err.Error()
+	s.status.Error = truncate(err.Error(), 1000)
+}
+
+func (s *retrievalService) setRuntimeRebuilding() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.status.State = "rebuilding"
+	s.status.Error = ""
 }
 
 func (s *retrievalService) currentStatus() retrievalStatus {
@@ -252,6 +312,9 @@ func (s *retrievalService) reconcile(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if s.embedder != nil && s.currentStatus().State != "ready" {
+		s.setRuntimeRebuilding()
+	}
 	snapshot := s.silver.snapshot()
 	chunksBySource, err := retrievalChunksFromSnapshot(snapshot)
 	if err != nil {
@@ -260,6 +323,9 @@ func (s *retrievalService) reconcile(ctx context.Context) error {
 	changed, err := s.syncChunks(ctx, snapshot.Sources, chunksBySource)
 	if err != nil {
 		return err
+	}
+	if changed && s.embedder != nil {
+		s.setRuntimeRebuilding()
 	}
 	if err := s.syncEmbeddings(ctx, changed); err != nil {
 		return err
@@ -302,12 +368,12 @@ func retrievalChunksFromSnapshot(snapshot silverSnapshot) (map[string][]retrieva
 		}
 		chunk := retrievalChunk{
 			BronzeSourceID: item.BronzeSourceID, BronzeContentSHA256: item.BronzeContentSHA256,
-			Title: source.Title, Mime: source.Mime, EvidenceID: item.ID, Selector: item.Selector,
+			Title: source.Title, Mime: source.Mime, ObservationID: observation.ID, EvidenceID: item.ID, Selector: item.Selector,
 			Text: text, EvidenceProducer: observation.Producer,
 		}
 		chunk.ID = stableID("source-silver-retrieval-chunk", struct {
-			EvidenceID, ProcessorID, ProcessorVersion string
-		}{item.ID, retrievalChunkProcessorID, retrievalChunkProcessorVersion})
+			ObservationID, EvidenceID, ProcessorID, ProcessorVersion string
+		}{observation.ID, item.ID, retrievalChunkProcessorID, retrievalChunkProcessorVersion})
 		result[source.BronzeSourceID] = append(result[source.BronzeSourceID], chunk)
 	}
 	for sourceID := range result {
@@ -366,11 +432,6 @@ func retrievalText(kind string, payload json.RawMessage) (string, bool) {
 }
 
 func (s *retrievalService) syncChunks(ctx context.Context, sources []silverSource, chunks map[string][]retrievalChunk) (bool, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback()
 	wanted := make(map[string]silverSource, len(sources))
 	for _, source := range sources {
 		wanted[source.BronzeSourceID] = source
@@ -379,8 +440,8 @@ func (s *retrievalService) syncChunks(ctx context.Context, sources []silverSourc
 		hash, processorID, processorVersion, chunkSetSHA256 string
 		chunkCount                                          int
 	}{}
-	rows, err := tx.QueryContext(ctx, `SELECT bronze_source_id, bronze_content_sha256, processor_id, processor_version,
-        chunk_count, chunk_set_sha256 FROM retrieval_sources`)
+	rows, err := s.db.QueryContext(ctx, `SELECT bronze_source_id, bronze_content_sha256, processor_id, processor_version,
+	        chunk_count, chunk_set_sha256 FROM retrieval_sources`)
 	if err != nil {
 		return false, err
 	}
@@ -400,7 +461,13 @@ func (s *retrievalService) syncChunks(ctx context.Context, sources []silverSourc
 		return false, err
 	}
 	changed := false
-	for id, existing := range stored {
+	storedIDs := make([]string, 0, len(stored))
+	for id := range stored {
+		storedIDs = append(storedIDs, id)
+	}
+	sort.Strings(storedIDs)
+	for _, id := range storedIDs {
+		existing := stored[id]
 		source, exists := wanted[id]
 		expectedChunks := chunks[id]
 		if exists && existing.hash == source.BronzeContentSHA256 &&
@@ -408,7 +475,15 @@ func (s *retrievalService) syncChunks(ctx context.Context, sources []silverSourc
 			existing.chunkCount == len(expectedChunks) && existing.chunkSetSHA256 == retrievalChunkSetSHA256(expectedChunks) {
 			continue
 		}
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return false, err
+		}
 		if err := deleteRetrievalSource(ctx, tx, id); err != nil {
+			tx.Rollback()
+			return false, err
+		}
+		if err := tx.Commit(); err != nil {
 			return false, err
 		}
 		changed = true
@@ -420,45 +495,54 @@ func (s *retrievalService) syncChunks(ctx context.Context, sources []silverSourc
 			existing.chunkCount == len(expectedChunks) && existing.chunkSetSHA256 == retrievalChunkSetSHA256(expectedChunks) {
 			continue
 		}
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return false, err
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO retrieval_sources(
-            bronze_source_id, bronze_content_sha256, title, mime, processor_id, processor_version,
-            chunk_count, chunk_set_sha256, indexed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, source.BronzeSourceID, source.BronzeContentSHA256, source.Title, source.Mime,
+	            bronze_source_id, bronze_content_sha256, title, mime, processor_id, processor_version,
+	            chunk_count, chunk_set_sha256, indexed_at
+	        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, source.BronzeSourceID, source.BronzeContentSHA256, source.Title, source.Mime,
 			retrievalChunkProcessorID, retrievalChunkProcessorVersion, len(expectedChunks),
 			retrievalChunkSetSHA256(expectedChunks), time.Now().UnixMilli()); err != nil {
+			tx.Rollback()
 			return false, err
 		}
 		for _, chunk := range expectedChunks {
 			selector, err := json.Marshal(chunk.Selector)
 			if err != nil {
+				tx.Rollback()
 				return false, err
 			}
 			result, err := tx.ExecContext(ctx, `INSERT INTO retrieval_chunks(
-                chunk_id, bronze_source_id, bronze_content_sha256, title, mime, evidence_id, selector_json, text,
-                evidence_processor_id, evidence_processor_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, chunk.ID, chunk.BronzeSourceID, chunk.BronzeContentSHA256,
-				chunk.Title, chunk.Mime, chunk.EvidenceID, string(selector), chunk.Text,
+	                chunk_id, bronze_source_id, bronze_content_sha256, title, mime, observation_id, evidence_id, selector_json, text,
+	                evidence_processor_id, evidence_processor_version
+	            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, chunk.ID, chunk.BronzeSourceID, chunk.BronzeContentSHA256,
+				chunk.Title, chunk.Mime, chunk.ObservationID, chunk.EvidenceID, string(selector), chunk.Text,
 				chunk.EvidenceProducer.ProcessorID, chunk.EvidenceProducer.ProcessorVersion)
 			if err != nil {
+				tx.Rollback()
 				return false, err
 			}
 			rowID, err := result.LastInsertId()
 			if err != nil {
+				tx.Rollback()
 				return false, err
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO retrieval_fts(rowid, chunk_id, text) VALUES (?, ?, ?)`, rowID, chunk.ID, chunk.Text); err != nil {
+				tx.Rollback()
 				return false, err
 			}
+		}
+		if err := tx.Commit(); err != nil {
+			return false, err
 		}
 		changed = true
 	}
 	if changed {
-		if _, err := tx.ExecContext(ctx, `UPDATE retrieval_representation SET state = 'rebuilding', error = '', updated_at = ? WHERE kind = 'embeddings'`, time.Now().UnixMilli()); err != nil {
+		if _, err := s.db.ExecContext(ctx, `UPDATE retrieval_representation SET state = 'rebuilding', error = '', updated_at = ? WHERE kind = 'embeddings'`, time.Now().UnixMilli()); err != nil {
 			return false, err
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return false, err
 	}
 	return changed, nil
 }
@@ -466,6 +550,7 @@ func (s *retrievalService) syncChunks(ctx context.Context, sources []silverSourc
 func retrievalChunkSetSHA256(chunks []retrievalChunk) string {
 	type identity struct {
 		ID                       string         `json:"id"`
+		ObservationID            string         `json:"observation_id"`
 		EvidenceID               string         `json:"evidence_id"`
 		Selector                 map[string]any `json:"selector"`
 		Text                     string         `json:"text"`
@@ -475,7 +560,7 @@ func retrievalChunkSetSHA256(chunks []retrievalChunk) string {
 	values := make([]identity, 0, len(chunks))
 	for _, chunk := range chunks {
 		values = append(values, identity{
-			ID: chunk.ID, EvidenceID: chunk.EvidenceID, Selector: chunk.Selector, Text: chunk.Text,
+			ID: chunk.ID, ObservationID: chunk.ObservationID, EvidenceID: chunk.EvidenceID, Selector: chunk.Selector, Text: chunk.Text,
 			EvidenceProcessorID:      chunk.EvidenceProducer.ProcessorID,
 			EvidenceProcessorVersion: chunk.EvidenceProducer.ProcessorVersion,
 		})
@@ -832,9 +917,9 @@ func (s *retrievalService) fuseResults(ctx context.Context, lexical, semantic []
 	for rowID, value := range byRow {
 		var selector string
 		err := s.db.QueryRowContext(ctx, `SELECT text, bronze_source_id, bronze_content_sha256, title, mime,
-            evidence_id, selector_json, evidence_processor_id, evidence_processor_version
-            FROM retrieval_chunks WHERE rowid = ?`, rowID).Scan(&value.Text, &value.BronzeSourceID,
-			&value.BronzeContentSHA256, &value.BronzeTitle, &value.BronzeMime, &value.EvidenceID,
+	            observation_id, evidence_id, selector_json, evidence_processor_id, evidence_processor_version
+	            FROM retrieval_chunks WHERE rowid = ?`, rowID).Scan(&value.Text, &value.BronzeSourceID,
+			&value.BronzeContentSHA256, &value.BronzeTitle, &value.BronzeMime, &value.SilverObservationID, &value.EvidenceID,
 			&selector, &value.EvidenceProducer.ProcessorID, &value.EvidenceProducer.ProcessorVersion)
 		if err != nil {
 			return nil, err

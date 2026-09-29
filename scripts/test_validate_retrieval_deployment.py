@@ -27,6 +27,14 @@ class ValidateRetrievalDeploymentTest(unittest.TestCase):
         }
         self.assertIn("Göteborg", validation.observation_text(observation))
 
+    def test_accepts_null_collections_from_existing_silver_state(self):
+        published = {
+            "source": {"observations": None, "entities": None, "claims": None}
+        }
+        self.assertEqual(validation.select_private_query({"published": published}), "source")
+        self.assertEqual(validation.count_published_records(published, "entities"), 0)
+        self.assertEqual(validation.count_published_records(published, "claims"), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

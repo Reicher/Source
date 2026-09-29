@@ -21,6 +21,8 @@ The retrieval chunk processor reads published deterministic observations rather 
 
 `silver/retrieval.sqlite` owns only the retrieval representation. The existing `silver/state.json` knowledge pipeline remains unchanged in this baseline; migrating all Silver jobs and knowledge generations to SQLite is a separate scalability change.
 
+Source uses sqlite-vec's official CGO binding with `mattn/go-sqlite3` and the `sqlite_fts5` build tag. The earlier WASM-backed driver was rejected after its pager failed against the real persistent Docker volume on plattserver; the CGO binding embeds sqlite-vec into the Source binary and uses native SQLite without a separate database service.
+
 The SQLite database contains:
 
 - source and chunk metadata with Bronze hashes and Evidence selectors;
@@ -51,7 +53,7 @@ Content-Type: application/json
 {"query":"Where did we stay in Gothenburg?","limit":10}
 ```
 
-Every result includes channel-specific ranks/scores, final hybrid score, chunk text, Bronze source ID/hash/title/MIME, Evidence ID/selector, and chunk/embedding producer identities. The loopback setup server also exposes `GET /retrieval?q=...&limit=...` for deployment verification; it is subject to the existing loopback-only host and remote-address checks.
+Every result includes channel-specific ranks/scores, final hybrid score, chunk text, Bronze source ID/hash/title/MIME, Silver observation ID, Evidence ID/selector, and chunk/embedding producer identities. The loopback setup server also exposes `GET /retrieval/status` and `GET /retrieval?q=...&limit=...` for deployment verification; both are subject to the existing loopback-only host and remote-address checks.
 
 Use `scripts/retrieval_smoke.py` to compare exact-term, paraphrased, cross-file, lexical-favored, and semantic-favored questions while recording wall-clock latency and channel attribution.
 

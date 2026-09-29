@@ -36,7 +36,7 @@ func TestHealthz(t *testing.T) {
 		t.Fatal(err)
 	}
 	response := httptest.NewRecorder()
-	i.lanHandler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	testLanHandler(t, i).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("GET /healthz: got %d, want %d", response.Code, http.StatusNoContent)
 	}

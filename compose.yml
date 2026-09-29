@@ -58,9 +58,19 @@ services:
       - --pooling
       - last
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:8083/health"]
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - --show-error
+        - --header
+        - "Content-Type: application/json"
+        - --data
+        - '{"model":"source-embedding","input":["health"]}'
+        - http://127.0.0.1:8083/v1/embeddings
       interval: 30s
-      timeout: 5s
+      timeout: 30s
       retries: 5
       start_period: 2m
     volumes:
@@ -82,8 +92,10 @@ services:
     user: "${SOURCE_UID:?}:${SOURCE_GID:?}"
     restart: unless-stopped
     depends_on:
-      - source-model
-      - source-embedding
+      source-model:
+        condition: service_healthy
+      source-embedding:
+        condition: service_healthy
     # Source advertises its LAN address with mDNS, which needs the host network.
     network_mode: host
     command: ["-listen", "${SOURCE_LAN_ADDRESS:?}:8443", "-setup", "127.0.0.1:8081", "-data", "/data/pairing"]

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -16,12 +17,15 @@ import (
 )
 
 type testEmbedder struct {
-	mu         sync.Mutex
-	id         string
-	revision   string
-	dimensions int
-	calls      int
-	failure    error
+	mu                sync.Mutex
+	id                string
+	revision          string
+	dimensions        int
+	calls             int
+	failure           error
+	panicValue        any
+	transientFailures int
+	successDelay      time.Duration
 }
 
 func (e *testEmbedder) Identity() ModelIdentity {
@@ -33,9 +37,22 @@ func (e *testEmbedder) Dimensions() int { return e.dimensions }
 func (e *testEmbedder) Embed(_ context.Context, input []string) ([][]float32, error) {
 	e.mu.Lock()
 	e.calls++
+	transientFailure := e.transientFailures > 0
+	if transientFailure {
+		e.transientFailures--
+	}
 	e.mu.Unlock()
+	if e.panicValue != nil {
+		panic(e.panicValue)
+	}
 	if e.failure != nil {
 		return nil, e.failure
+	}
+	if transientFailure {
+		return nil, errors.New("transient runtime failure")
+	}
+	if e.successDelay > 0 {
+		time.Sleep(e.successDelay)
 	}
 	result := make([][]float32, len(input))
 	for index, text := range input {
@@ -52,6 +69,68 @@ func (e *testEmbedder) Embed(_ context.Context, input []string) ([][]float32, er
 		result[index] = vector[:e.dimensions]
 	}
 	return result, nil
+}
+
+func TestRetrievalWorkerMarksRetryAsRebuilding(t *testing.T) {
+	root := t.TempDir()
+	_, silver, _ := publishedRetrievalFixture(t, root)
+	embedder := &testEmbedder{
+		id: "embedding", revision: "retry", dimensions: 3, transientFailures: 1, successDelay: 250 * time.Millisecond,
+	}
+	retrieval, err := newRetrievalService(root+"/silver", silver, embedder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer retrieval.close()
+	retrieval.start(ctx)
+
+	sawRetryBuilding := false
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		status := retrieval.currentStatus()
+		if embedder.callCount() >= 2 && status.State == "rebuilding" && status.Error == "" {
+			sawRetryBuilding = true
+		}
+		if status.State == "ready" {
+			if !sawRetryBuilding {
+				t.Fatal("retry kept stale failed state until completion")
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("retrieval retry did not become ready: %+v", retrieval.currentStatus())
+}
+
+func TestRetrievalWorkerContainsRepresentationPanics(t *testing.T) {
+	root := t.TempDir()
+	_, silver, _ := publishedRetrievalFixture(t, root)
+	retrieval, err := newRetrievalService(root+"/silver", silver, &testEmbedder{
+		id: "embedding", revision: "panic", dimensions: 3, panicValue: "runtime exploded",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer retrieval.close()
+	retrieval.start(ctx)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status := retrieval.currentStatus()
+		if status.State == "failed" && strings.Contains(status.Error, "runtime exploded") {
+			rows, err := retrieval.lexicalSearch(context.Background(), "Apollo", 2)
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("contained panic damaged lexical retrieval: rows=%+v err=%v", rows, err)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("retrieval worker did not expose contained panic: %+v", retrieval.currentStatus())
 }
 
 func (e *testEmbedder) callCount() int {
@@ -77,6 +156,25 @@ func publishedRetrievalFixture(t *testing.T, root string) (*bronzeStore, *silver
 		t.Fatal("Silver fixture was not published")
 	}
 	return bronze, silver, item
+}
+
+func TestRetrievalKeepsDistinctObservationsThatShareEvidence(t *testing.T) {
+	snapshot := silverSnapshot{
+		Sources:  []silverSource{{BronzeSourceID: "source", BronzeContentSHA256: "hash", Title: "Shared", Mime: "text/plain"}},
+		Evidence: []silverEvidence{{ID: "evidence", BronzeSourceID: "source", BronzeContentSHA256: "hash"}},
+		Observations: []silverObservation{
+			{ID: "observation-a", Kind: "text-block", Payload: json.RawMessage(`{"text":"alpha"}`), EvidenceIDs: []string{"evidence"}, Producer: silverProducer{ProcessorID: silverExtractionID, ProcessorVersion: silverExtractionVersion}},
+			{ID: "observation-b", Kind: "markdown-heading", Payload: json.RawMessage(`{"text":"beta"}`), EvidenceIDs: []string{"evidence"}, Producer: silverProducer{ProcessorID: silverExtractionID, ProcessorVersion: silverExtractionVersion}},
+		},
+	}
+	chunks, err := retrievalChunksFromSnapshot(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := chunks["source"]
+	if len(values) != 2 || values[0].ID == values[1].ID || values[0].ObservationID == values[1].ObservationID {
+		t.Fatalf("shared Evidence collapsed distinct observations: %+v", values)
+	}
 }
 
 func TestRetrievalIndexesSilverEvidenceAndSearchesLexicalVectorAndHybrid(t *testing.T) {
@@ -164,6 +262,11 @@ func TestRetrievalEmbeddingModelChangeRebuildsOnlyVectorsAndPersistsAcrossRestar
 	if err := retrieval.close(); err != nil {
 		t.Fatal(err)
 	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if err := os.WriteFile(retrieval.path+suffix, []byte("stale sidecar"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	second := &testEmbedder{id: "embedding", revision: "two", dimensions: 3}
 	restarted, err := newRetrievalService(root+"/silver", silver, second)
@@ -173,6 +276,15 @@ func TestRetrievalEmbeddingModelChangeRebuildsOnlyVectorsAndPersistsAcrossRestar
 	defer restarted.close()
 	if err := restarted.reconcile(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if _, err := os.Stat(restarted.path + suffix); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stale SQLite sidecar %s survived restart: %v", suffix, err)
+		}
+	}
+	var journalMode string
+	if err := restarted.db.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode); err != nil || journalMode != "delete" {
+		t.Fatalf("retrieval SQLite journal mode = %q, err=%v", journalMode, err)
 	}
 	var nextChunkID string
 	var nextRowID int64
@@ -191,6 +303,48 @@ func TestRetrievalEmbeddingModelChangeRebuildsOnlyVectorsAndPersistsAcrossRestar
 	result, err := restarted.search(context.Background(), retrievalRequest{Query: "Apollo", Limit: 1})
 	if err != nil || len(result.Results) != 1 {
 		t.Fatalf("persistent retrieval failed after restart: result=%+v err=%v", result, err)
+	}
+}
+
+func TestRetrievalRebuildsDerivedDatabaseForSchemaChange(t *testing.T) {
+	root := t.TempDir()
+	_, silver, _ := publishedRetrievalFixture(t, root)
+	embedder := &testEmbedder{id: "embedding", revision: "one", dimensions: 3}
+	retrieval, err := newRetrievalService(root+"/silver", silver, embedder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := retrieval.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := retrieval.db.Exec(`UPDATE retrieval_schema SET version = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if err := retrieval.close(); err != nil {
+		t.Fatal(err)
+	}
+
+	rebuilt, err := newRetrievalService(root+"/silver", silver, embedder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rebuilt.close()
+	var version, chunks int
+	if err := rebuilt.db.QueryRow(`SELECT version FROM retrieval_schema`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := rebuilt.db.QueryRow(`SELECT count(*) FROM retrieval_chunks`).Scan(&chunks); err != nil {
+		t.Fatal(err)
+	}
+	if version != retrievalSchemaVersion || chunks != 0 {
+		t.Fatalf("derived schema was not rebuilt: version=%d chunks=%d", version, chunks)
+	}
+	if err := rebuilt.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	status, err := rebuilt.readStatus()
+	if err != nil || status.State != "ready" || status.Chunks == 0 {
+		t.Fatalf("rebuilt schema did not reconcile: status=%+v err=%v", status, err)
 	}
 }
 
@@ -338,7 +492,7 @@ func TestRetrievalEndpointRequiresPairedSelfAndReturnsDebuggableChannels(t *test
 		t.Fatal(err)
 	}
 	identity.state.SelfPin = fingerprint(leaf)
-	handler := identity.lanHandler()
+	handler := testLanHandler(t, identity)
 	body := []byte(`{"query":"anything","limit":5}`)
 
 	untrusted := httptest.NewRecorder()
@@ -359,6 +513,31 @@ func TestRetrievalEndpointRequiresPairedSelfAndReturnsDebuggableChannels(t *test
 	}
 	if result.Results == nil || result.SemanticState == "" || result.SemanticError == "" {
 		t.Fatalf("retrieval response lacks channel diagnostics: %+v", result)
+	}
+}
+
+func TestRetrievalSetupStatusDoesNotQuerySQLite(t *testing.T) {
+	t.Setenv("SOURCE_MODEL_URL", "")
+	t.Setenv("SOURCE_EMBEDDING_URL", "")
+	identity, err := loadIdentity(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	testLanHandler(t, identity)
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8081/retrieval/status", nil)
+	request.Host = "127.0.0.1:8081"
+	request.RemoteAddr = "127.0.0.1:12345"
+	response := httptest.NewRecorder()
+	identity.setupHandler("127.0.0.1:8081").ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("retrieval status: %d: %s", response.Code, response.Body.String())
+	}
+	var status retrievalStatus
+	if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.State == "" || status.ChunkProcessor.ProcessorID != retrievalChunkProcessorID {
+		t.Fatalf("incomplete retrieval status: %+v", status)
 	}
 }
 

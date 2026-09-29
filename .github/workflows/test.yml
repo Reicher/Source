@@ -11,11 +11,15 @@ permissions:
 jobs:
   source:
     runs-on: ubuntu-latest
+    env:
+      GOFLAGS: -tags=sqlite_fts5
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
           go-version-file: source/go.mod
+      - name: Install native SQLite headers
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
       - name: Check formatting
         run: test -z "$(gofmt -l source)"
       - name: Vet

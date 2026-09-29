@@ -457,6 +457,16 @@ func (i *identity) setupHandler(host string) http.Handler {
 	mux.HandleFunc("GET /jobs", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, i.jobSnapshot())
 	})
+	mux.HandleFunc("GET /retrieval/status", func(w http.ResponseWriter, _ *http.Request) {
+		i.mu.Lock()
+		retrieval := i.retrieval
+		i.mu.Unlock()
+		if retrieval == nil {
+			http.Error(w, "retrieval unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		writeJSON(w, retrieval.currentStatus())
+	})
 	mux.HandleFunc("GET /retrieval", func(w http.ResponseWriter, r *http.Request) {
 		i.mu.Lock()
 		retrieval := i.retrieval

@@ -44,7 +44,7 @@ def observation_text(observation):
 def select_private_query(silver_state):
     for source_id in sorted(silver_state.get("published", {})):
         dataset = silver_state["published"][source_id]
-        for observation in dataset.get("observations", []):
+        for observation in dataset.get("observations") or []:
             producer = observation.get("producer", {})
             if producer.get("processor_id") != "source.silver.format-extraction":
                 continue
@@ -52,6 +52,10 @@ def select_private_query(silver_state):
                 if word not in STOP_WORDS:
                     return word
     return "source"
+
+
+def count_published_records(published, key):
+    return sum(len(dataset.get(key) or []) for dataset in published.values())
 
 
 def get_text(url, timeout=10):
@@ -91,28 +95,32 @@ def main():
     live_bronze = sum(not item.get("deleted", False) for item in bronze_items)
     silver_state = read_json(pairing_root / "silver/state.json")
     published = silver_state.get("published", {})
-    entities = sum(len(dataset.get("entities", [])) for dataset in published.values())
-    claims = sum(len(dataset.get("claims", [])) for dataset in published.values())
+    entities = count_published_records(published, "entities")
+    claims = count_published_records(published, "claims")
     query = select_private_query(silver_state)
     query_hash = hashlib.sha256(query.encode("utf-8")).hexdigest()[:12]
 
     deadline = time.monotonic() + args.timeout_seconds
-    response = None
-    latency_ms = None
+    failed_since = None
     while time.monotonic() < deadline:
-        parameters = urllib.parse.urlencode({"q": query, "limit": 10})
-        started = time.perf_counter()
-        response = get_json(f"{base_url}/retrieval?{parameters}")
-        latency_ms = (time.perf_counter() - started) * 1000
-        representation = response["representation"]
+        representation = get_json(f"{base_url}/retrieval/status", timeout=10)
         if representation["state"] == "ready":
             break
         if representation["state"] == "failed":
-            raise RuntimeError(f"embedding representation failed: {representation.get('error', '')}")
+            if failed_since is None:
+                failed_since = time.monotonic()
+            elif time.monotonic() - failed_since >= 180:
+                raise RuntimeError(f"embedding representation failed: {representation.get('error', '')}")
+        else:
+            failed_since = None
         time.sleep(5)
     else:
         raise RuntimeError("retrieval representation did not become ready before timeout")
 
+    parameters = urllib.parse.urlencode({"q": query, "limit": 10})
+    started = time.perf_counter()
+    response = get_json(f"{base_url}/retrieval?{parameters}")
+    latency_ms = (time.perf_counter() - started) * 1000
     representation = response["representation"]
     if live_bronze and published and representation["chunks"] == 0:
         raise RuntimeError("published text-like Silver produced no retrieval chunks")

@@ -105,12 +105,12 @@ The current system assumes one person, one Self, and one Source. Remote access i
 
 ## Getting started
 
-For direct development, install Go 1.25 or newer. Start Source with an explicit private IPv4 address assigned to the machine:
+For direct development, install Go 1.25 or newer, a C compiler, and SQLite development headers (`libsqlite3-dev` on Debian/Ubuntu) for the embedded native SQLite/sqlite-vec build. Start Source with an explicit private IPv4 address assigned to the machine:
 
 ```sh
 cd source
-go test ./...
-go run . -listen 192.168.1.20:8080
+go test -tags sqlite_fts5 ./...
+go run -tags sqlite_fts5 . -listen 192.168.1.20:8080
 ```
 
 Replace the example address with Source's LAN address. This mode works without a model: it publishes deterministic extraction but omits semantic interpretation.
@@ -188,7 +188,7 @@ Run the same important checks as CI:
 
 ```sh
 test -z "$(gofmt -l source)"
-(cd source && go vet ./... && go test ./... && go build ./...)
+(cd source && go vet -tags sqlite_fts5 ./... && go test -tags sqlite_fts5 ./... && go build -tags sqlite_fts5 ./...)
 (cd self/android && ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:bundleDebug)
 python3 scripts/provision_models.py --check
 python3 -m unittest discover -s scripts

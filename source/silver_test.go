@@ -1111,7 +1111,7 @@ func TestSilverSnapshotRequiresPairedSelf(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity.state.SelfPin = fingerprint(leaf)
-	handler := identity.lanHandler()
+	handler := testLanHandler(t, identity)
 
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/silver", nil))
