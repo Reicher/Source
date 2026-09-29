@@ -65,11 +65,11 @@ In the current design Bronze objects are immutable: changing something creates n
 
 ### Silver
 
-Silver is Source's current, revisable understanding of Bronze. It can contain extracted structure, entities, observations, claims, relationships, and evidence that links a conclusion to the exact original material behind it.
+Silver is Source's current, revisable set of derived representations of Bronze. It can contain retrieval chunks and indexes, extracted structure, entities, observations, claims, relationships, and evidence that links every derived result to the exact original material behind it.
 
 Silver is not absolute truth. Source may later discover that two entities are the same, that one should be split into several, that an old claim was wrong, or that a better processor gives a better interpretation. Uncertain observations may remain unresolved instead of being forced into a rigid ontology.
 
-The essential requirement is that Source can explain what it currently believes and where that belief came from.
+The essential requirement is that Source can explain what it currently derives or believes and where it came from. Silver representations are independently versioned where practical: changing the embedding model rebuilds embeddings without making the chat LLM part of the retrieval identity.
 
 Source is the only authority for persistent Silver. It publishes complete generations atomically, keeps processing work durable across restarts, and mirrors the latest complete snapshot to Self. Partial processing is never presented as completed knowledge.
 
@@ -91,15 +91,15 @@ Interactive Self AI and heavier Source processing are separate roles and may use
 
 ## Current state
 
-Source is a Go service with local identity creation, QR pairing, mutual authentication, LAN discovery, content-addressed Bronze storage, durable sync-job visibility, and background Silver processing.
+Source is a Go service with local identity creation, QR pairing, mutual authentication, LAN discovery, content-addressed Bronze storage, durable sync-job visibility, background Silver processing, and native hybrid retrieval.
 
-It deterministically extracts useful structure from JSON, CSV, Markdown, and other UTF-8 text, and can use a local model to propose entities, attributes, and relationships. Validated results are resolved conservatively and published as complete Silver snapshots.
+It deterministically extracts useful structure from JSON, CSV, Markdown, and other UTF-8 text, and can use a local model to propose entities, attributes, and relationships. Validated results are resolved conservatively and published as complete Silver snapshots. The same deterministic Evidence is indexed in SQLite: FTS5 provides lexical retrieval and sqlite-vec provides local vector retrieval through a replaceable embedding model. A small reciprocal-rank fusion layer combines both channels while preserving Bronze and Evidence provenance.
 
 Self is a Kotlin Android app. It can pair with one Source, create notes, import files and images, preview supported content, organize shortcuts locally, delete Bronze, and synchronize in the foreground or through bounded background work.
 
 It retains Bronze and Silver for offline use, shows Source job state, and supports navigation from Bronze to derived observations and entities and back to supporting Bronze.
 
-This is still a foundation rather than the complete product. Interactive Self AI and chat are not implemented, despite model packaging being present. Search and Gold views are not implemented. Silver understanding is currently focused on text-like inputs.
+This is still a foundation rather than the complete product. Interactive Self AI, the Context Builder, a retrieval UI in Self, and Gold views are not implemented, despite model packaging being present. Silver understanding and retrieval are currently focused on text-like inputs.
 
 The current system assumes one person, one Self, and one Source. Remote access is not currently implemented.
 
@@ -132,13 +132,13 @@ Self opens the scanner on first launch. Scan the Source QR code while both devic
 
 They will authenticate, pair, and reconnect automatically when Source is discoverable.
 
-For the full Linux deployment with the pinned local model, install Docker Compose, Python 3, and `iproute2`, then run from the repository root:
+For the full Linux deployment with the pinned local models, install Docker Compose, Python 3, and `iproute2`, then run from the repository root:
 
 ```sh
 ./scripts/deploy.sh
 ```
 
-The script detects the private IPv4 address selected by the host's default route, verifies or downloads the model, builds the containers, starts them, and performs health checks. On a multi-homed host, or to override detection, set `SOURCE_LAN_ADDRESS` to an assigned private address before running it:
+The script detects the private IPv4 address selected by the host's default route, verifies or downloads the semantic and embedding models, builds the containers, starts them, and performs health checks. The default embedding runtime is a dedicated loopback-only llama.cpp server using the pinned Qwen3-Embedding-0.6B Q8_0 model; model identity, revision, dimensions, URL, and timeout are configuration rather than retrieval architecture. On a multi-homed host, or to override detection, set `SOURCE_LAN_ADDRESS` to an assigned private address before running it:
 
 ```sh
 export SOURCE_LAN_ADDRESS=192.168.1.20
@@ -147,6 +147,19 @@ export SOURCE_LAN_ADDRESS=192.168.1.20
 Persistent data defaults to `~/.local/share/source-v1/`; back it up. Set `SOURCE_DATA_ROOT` or `SOURCE_MODEL_ROOT` to other absolute paths when needed.
 
 Source groups Silver semantic work by encoded input size. The deployment defaults to a 4 KiB target through `SOURCE_SILVER_SEMANTIC_BATCH_TARGET_KIB`; Source also bounds requests against `SOURCE_MODEL_CONTEXT_TOKENS`, reserves `SOURCE_MODEL_MAX_OUTPUT_TOKENS` for the response, and allows each local inference up to `SOURCE_MODEL_REQUEST_TIMEOUT_MINUTES` (24 hours by default). These processing tunables are configuration only and are not exposed in Self yet.
+
+The paired API accepts `POST /v1/retrieval` with `{"query":"...","limit":10}`. Results expose lexical and semantic ranks separately, the final hybrid score, the exact Evidence selector, Bronze identity/hash, and the processors and models that produced each representation. If the embedding runtime is unavailable, lexical retrieval remains usable and the response reports the semantic failure explicitly.
+
+For repeatable manual checks on the Source machine, run several exact, paraphrased, and cross-file questions through the loopback-only debug route:
+
+```sh
+python3 scripts/retrieval_smoke.py \
+  "an exact phrase from a note" \
+  "a semantic paraphrase" \
+  "a fact that spans the archive"
+```
+
+The command prints latency, which channel returned each result, hybrid rank, source title, and Evidence ID. Persistent retrieval data lives beside the existing Silver state in `silver/retrieval.sqlite`; Bronze remains canonical and the index is reconciled after restart.
 
 From another computer, reach the loopback-only setup page through:
 

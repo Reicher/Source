@@ -19,6 +19,7 @@ Already completed:
 
 - ✅ Structured semantic input: preserve useful parser context such as CSV columns, JSON paths/selectors, and deterministic payloads when asking the semantic model to interpret a fragment.
 - ✅ Semantic batching: process multiple deterministic fragments in one model request while keeping fragment-level provenance and recovery semantics.
+- ✅ Native retrieval representation: reuse deterministic Evidence as chunks, persist FTS5 and sqlite-vec indexes in local SQLite, version embedding production independently, and expose provenance-backed hybrid retrieval.
 
 Remaining work includes improving failure handling, regression coverage, diagnostics, and other Silver correctness issues as they are discovered.
 
@@ -77,11 +78,13 @@ Whisper / whisper.cpp is the likely starting point for speech-to-text. Transcrip
 
 Later work may include speaker segmentation or speaker identification as separate processors.
 
-## 9. Retrieval / RAG — ○ Planned
+## 9. Retrieval / RAG — 🚧 In progress
 
 Retrieve the most relevant knowledge for a task or question without placing the entire personal knowledge base into the model context.
 
 Retrieval should be able to draw from Bronze, Silver, and Gold while retaining links back to original evidence.
+
+The first native baseline is complete for text-like Silver Evidence: FTS5 lexical retrieval and sqlite-vec semantic retrieval are combined through isolated reciprocal-rank fusion and exposed through Source's authenticated API. Future work includes retrieval over more modalities and representations, evaluation-driven ranking improvements, optional reranking, and integration with the Context Builder and Self UI.
 
 ## 10. Context Builder — ○ Planned
 
