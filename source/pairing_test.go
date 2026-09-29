@@ -43,12 +43,32 @@ func testServer(t *testing.T, i *identity) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := httptest.NewUnstartedServer(i.lanHandler())
+	s := httptest.NewUnstartedServer(testLanHandler(t, i))
 	s.TLS = i.tlsConfig()
 	s.TLS.Certificates = []tls.Certificate{cert}
 	s.StartTLS()
 	t.Cleanup(s.Close)
 	return s
+}
+
+func testLanHandler(t *testing.T, i *identity) http.Handler {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	handler, err := i.newLanHandler(ctx)
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		i.mu.Lock()
+		retrieval := i.retrieval
+		i.mu.Unlock()
+		if retrieval != nil {
+			_ = retrieval.close()
+		}
+	})
+	return handler
 }
 
 func testHTTPClient(cert tls.Certificate) *http.Client {

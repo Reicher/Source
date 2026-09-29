@@ -49,12 +49,17 @@ deadline=$(( $(date +%s) + 600 ))
 while :; do
     container_id=$(docker compose ps -q source)
     model_container_id=$(docker compose ps -q source-model)
+    embedding_container_id=$(docker compose ps -q source-embedding)
     if [ -n "$container_id" ] && \
         [ -n "$model_container_id" ] && \
+        [ -n "$embedding_container_id" ] && \
         [ "$(docker inspect --format '{{.State.Status}}' "$container_id")" = running ] && \
         [ "$(docker inspect --format '{{.State.Status}}' "$model_container_id")" = running ] && \
+        [ "$(docker inspect --format '{{.State.Status}}' "$embedding_container_id")" = running ] && \
         curl --fail --silent --output /dev/null --noproxy '*' \
             --connect-timeout 3 --max-time 10 http://127.0.0.1:8082/health && \
+        curl --fail --silent --output /dev/null --noproxy '*' \
+            --connect-timeout 3 --max-time 10 http://127.0.0.1:8083/health && \
         curl --fail --silent --output /dev/null --noproxy '*' \
             --connect-timeout 3 --max-time 10 http://127.0.0.1:8081/ && \
         curl --fail --silent --insecure --output /dev/null --noproxy '*' \
@@ -69,7 +74,7 @@ while :; do
     if [ "$(date +%s)" -ge "$deadline" ]; then
         printf '%s\n' "Source and its local model did not become healthy within 600 seconds." >&2
         docker compose ps >&2
-        docker compose logs --tail=80 source source-model >&2
+        docker compose logs --tail=80 source source-model source-embedding >&2
         exit 1
     fi
     sleep 2
