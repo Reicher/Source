@@ -1863,7 +1863,7 @@ func embeddedJSONUnits(value any, path string, depth int) []structuredScalarUnit
 		}
 		encoded, _ := json.Marshal(typed)
 		units = append(units, structuredScalarUnit{
-			Kind: "parsed-json-value", Selector: map[string]any{"kind": "json-pointer", "pointer": path},
+			Kind: "parsed-embedded-json-value", Selector: map[string]any{"kind": "json-pointer", "pointer": path},
 			Payload: map[string]any{"path": path, "value": typed}, Text: scalarText(typed),
 			Excerpt: path + ": " + string(encoded),
 		})
@@ -2043,7 +2043,8 @@ func trimmedSilverRange(text string, start, end int) (int, int, string) {
 func splitLargeFragments(input []parsedSilverFragment) []parsedSilverFragment {
 	var output []parsedSilverFragment
 	for _, fragment := range input {
-		if len(fragment.Text) <= silverMaximumBatchBytes {
+		if len(fragment.Text) <= silverMaximumBatchBytes ||
+			(fragment.Kind != "text-block" && fragment.Kind != "markdown-heading") {
 			output = append(output, fragment)
 			continue
 		}

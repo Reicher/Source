@@ -220,6 +220,52 @@ func TestRetrievalKeepsCompoundCSVContentAtRecordGranularity(t *testing.T) {
 	}
 }
 
+func TestRetrievalExcludesEmbeddedJSONAtomicChildren(t *testing.T) {
+	tests := []struct {
+		name, title, mime, content string
+		wantChunks                 int
+	}{
+		{"json string", "record.json", "application/json", `{"name":"Jonas","metadata":"{\"country\":\"Sweden\",\"active\":true}"}`, 2},
+		{"CSV cell", "record.csv", "text/csv", "Name,Metadata\nJonas,\"{\"\"country\"\":\"\"Sweden\"\",\"\"active\"\":true}\"\n", 2},
+		{"text block", "record.txt", "text/plain", `{"country":"Sweden","active":true}`, 1},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			bronze := newBronzeStore(root + "/bronze")
+			id := fmt.Sprintf("78787878-7878-4787-8787-7878787878%02d", index)
+			item := putSilverBronze(t, bronze, id, test.title, test.mime, 1, test.content)
+			silver, err := newSilverServiceWithModel(root+"/silver", bronze, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			silver.processNext(context.Background())
+			snapshot := silver.snapshot()
+			atomicObservationIDs := map[string]bool{}
+			for _, observation := range snapshot.Observations {
+				if observation.Kind == "parsed-embedded-json-value" {
+					atomicObservationIDs[observation.ID] = true
+				}
+			}
+			if len(atomicObservationIDs) == 0 {
+				t.Fatalf("fixture did not produce embedded JSON children: %+v", snapshot.Observations)
+			}
+			chunks, err := retrievalChunksFromSnapshot(snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(chunks[item.ID]) != test.wantChunks {
+				t.Fatalf("embedded JSON changed retrieval granularity: got=%+v want=%d", chunks[item.ID], test.wantChunks)
+			}
+			for _, chunk := range chunks[item.ID] {
+				if atomicObservationIDs[chunk.ObservationID] {
+					t.Fatalf("embedded JSON child became a retrieval chunk: %+v", chunk)
+				}
+			}
+		})
+	}
+}
+
 func TestRetrievalSplitsOversizedObservationsBeforeEmbedding(t *testing.T) {
 	root := t.TempDir()
 	_, silver, item := publishedRetrievalFixture(t, root)

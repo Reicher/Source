@@ -1042,7 +1042,7 @@ func TestSilverRecursivelyDecomposesStructuredJSONStrings(t *testing.T) {
 			encoded, _ := json.Marshal(fragment.Payload)
 			_ = json.Unmarshal(encoded, &payload)
 			found[fmt.Sprint(payload["key"])] = true
-		case "parsed-json-value":
+		case "parsed-json-value", "parsed-embedded-json-value":
 			if fragment.Selector["pointer"] == "/prose" && !fragment.SkipSemantic {
 				found["prose"] = true
 			}
@@ -1074,6 +1074,41 @@ func TestSilverKeyValueTextUsesExactRangesAndLeavesProseAlone(t *testing.T) {
 	prose := parseGenericFragments("Observation: Jonas arrived yesterday and then described the entire trip in prose.")
 	if len(prose) != 1 || prose[0].Kind != "text-block" || prose[0].SkipSemantic {
 		t.Fatalf("ordinary prose was over-decomposed: %+v", prose)
+	}
+}
+
+func TestSilverLongStructuredChildrenKeepPayloadAndSelector(t *testing.T) {
+	value := strings.Repeat("å", silverMaximumBatchBytes)
+	content := fmt.Sprintf(`{"value":%q}`, value)
+	fragments := parseGenericFragments(content)
+	structured := []parsedSilverFragment{}
+	for _, fragment := range fragments {
+		if fragment.Kind == "parsed-embedded-json-value" {
+			structured = append(structured, fragment)
+		}
+	}
+	if len(structured) != 1 {
+		t.Fatalf("long structured child was split or lost: %+v", fragments)
+	}
+	child := structured[0]
+	if child.Selector["kind"] != "text-block-child" || child.Selector["start_byte"] != 0 ||
+		child.Selector["end_byte"] != len(content) || child.Text != value {
+		t.Fatalf("long structured child lost parent-range provenance: %+v", child)
+	}
+	structure, ok := child.Selector["structure"].(map[string]any)
+	if !ok || structure["pointer"] != "/value" {
+		t.Fatalf("long structured child lost JSON pointer: %+v", child.Selector)
+	}
+	encoded, err := json.Marshal(child.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Path  string `json:"path"`
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(encoded, &payload); err != nil || payload.Path != "/value" || payload.Value != value {
+		t.Fatalf("long structured child payload changed: payload=%+v err=%v", payload, err)
 	}
 }
 
