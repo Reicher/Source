@@ -186,6 +186,40 @@ func TestRetrievalKeepsDistinctObservationsThatShareEvidence(t *testing.T) {
 	}
 }
 
+func TestRetrievalKeepsCompoundCSVContentAtRecordGranularity(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	content := "Name,Notes\nJonas Sandvall,\"Birthday: 1986-08-27\nPhone: 073-512 61 77\nCity: Stockholm\"\n"
+	item := putSilverBronze(t, bronze, "67676767-6767-4676-8676-676767676767", "contacts.csv", "text/csv", 1, content)
+	silver, err := newSilverServiceWithModel(root+"/silver", bronze, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	silver.processNext(context.Background())
+	chunks, err := retrievalChunksFromSnapshot(silver.snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := chunks[item.ID]
+	if len(values) != 2 {
+		t.Fatalf("atomic Evidence fragmented or duplicated retrieval chunks: %+v", values)
+	}
+	var row *retrievalChunk
+	for index := range values {
+		if values[index].Selector["row"] == 2 {
+			row = &values[index]
+		}
+	}
+	if row == nil || row.Selector["kind"] != "table-row" {
+		t.Fatalf("record retrieval chunk lost row provenance: %+v", values)
+	}
+	for _, expected := range []string{"Jonas Sandvall", "Birthday", "1986-08-27", "Phone", "073-512 61 77", "Stockholm"} {
+		if !strings.Contains(row.Text, expected) {
+			t.Fatalf("retrieval lost %q from compound CSV record: %q", expected, row.Text)
+		}
+	}
+}
+
 func TestRetrievalSplitsOversizedObservationsBeforeEmbedding(t *testing.T) {
 	root := t.TempDir()
 	_, silver, item := publishedRetrievalFixture(t, root)

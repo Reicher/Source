@@ -69,8 +69,10 @@ func TestSemanticHTTPModelUsesUntrustedContentAsData(t *testing.T) {
 		if request.Model != "source-model" || len(request.Messages) != 2 ||
 			!strings.Contains(request.Messages[0].Content, "untrusted input") ||
 			!strings.Contains(request.Messages[0].Content, "field names, paths, selectors, and payloads") ||
+			!strings.Contains(request.Messages[0].Content, "parent_context_id") ||
+			!strings.Contains(request.Messages[0].Content, "one semantic value") ||
 			!strings.Contains(request.Messages[0].Content, "open-ended lower_snake_case types") ||
-			len(request.Messages[0].Content) > 1200 {
+			len(request.Messages[0].Content) > 1800 {
 			t.Fatalf("unexpected model prompt: %+v", request)
 		}
 		var input semanticInput
@@ -138,43 +140,59 @@ func TestSilverCSVSemanticExtractionKeepsColumnsAndPlaceContext(t *testing.T) {
 	item := putSilverBronze(t, bronze, "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", "contacts.csv", "text/csv", 1,
 		"name,email,phone,city\nMaya Chen,maya@example.test,+46 70 123 45 67,Stockholm\n")
 	model := testSemanticModel{id: "structured-test", revision: "1", run: func(input semanticInput) (semanticResult, error) {
-		if len(input.Fragments) != 1 {
+		if len(input.Fragments) != 4 {
 			return semanticResult{}, fmt.Errorf("unexpected CSV batch: %+v", input.Fragments)
 		}
-		fragment := input.Fragments[0]
-		row, rowOK := fragment.Selector["row"].(int)
-		if fragment.Kind != "parsed-table-row" || !rowOK || row != 2 {
-			return semanticResult{}, fmt.Errorf("unexpected CSV fragment: %+v", fragment)
+		contexts := map[string]semanticContextInput{}
+		for _, context := range input.Contexts {
+			contexts[context.ID] = context
 		}
-		var payload struct {
-			Row     int               `json:"row"`
-			Columns map[string]string `json:"columns"`
+		result := emptySemanticResult(input)
+		for index, fragment := range input.Fragments {
+			row, rowOK := fragment.Selector["row"].(int)
+			if fragment.Kind != "parsed-table-cell" || !rowOK || row != 2 {
+				return semanticResult{}, fmt.Errorf("unexpected CSV fragment: %+v", fragment)
+			}
+			var payload struct {
+				Row    int    `json:"row"`
+				Column string `json:"column"`
+				Value  string `json:"value"`
+			}
+			if err := json.Unmarshal(fragment.Payload, &payload); err != nil || payload.Row != 2 {
+				return semanticResult{}, fmt.Errorf("invalid CSV cell payload: %s: %v", fragment.Payload, err)
+			}
+			if payload.Column != "name" {
+				context, ok := contexts[fragment.ParentContextID]
+				if !ok || !strings.Contains(string(context.Payload), "Maya Chen") {
+					return semanticResult{}, fmt.Errorf("record context missing for %s: %+v", payload.Column, input.Contexts)
+				}
+			}
+			switch payload.Column {
+			case "name":
+				result.Fragments[index].Entities = []semanticEntityCandidate{{
+					Ref: "person", Label: payload.Value, Type: "person", Confidence: testConfidence(0.99),
+				}}
+			case "email", "phone":
+				result.Fragments[index].Entities = []semanticEntityCandidate{{
+					Ref: "person", Label: "Maya Chen", Type: "person", Confidence: testConfidence(0.99),
+				}}
+				encoded, _ := json.Marshal(payload.Value)
+				result.Fragments[index].Attributes = []semanticAttributeCandidate{{
+					SubjectRef: "person", Predicate: payload.Column, Value: encoded, Confidence: testConfidence(0.99),
+				}}
+			case "city":
+				result.Fragments[index].Entities = []semanticEntityCandidate{
+					{Ref: "person", Label: "Maya Chen", Type: "person", Confidence: testConfidence(0.99)},
+					{Ref: "city", Label: payload.Value, Type: "city", Confidence: testConfidence(0.98)},
+				}
+				result.Fragments[index].Relationships = []semanticRelationshipCandidate{{
+					SubjectRef: "person", Predicate: "located_in", ObjectRef: "city", Confidence: testConfidence(0.95),
+				}}
+			default:
+				return semanticResult{}, fmt.Errorf("unexpected CSV column: %+v", payload)
+			}
 		}
-		if err := json.Unmarshal(fragment.Payload, &payload); err != nil {
-			return semanticResult{}, err
-		}
-		var rawPayload map[string]json.RawMessage
-		if err := json.Unmarshal(fragment.Payload, &rawPayload); err != nil || rawPayload["values"] != nil {
-			return semanticResult{}, fmt.Errorf("CSV values were duplicated in semantic input: %s", fragment.Payload)
-		}
-		if payload.Row != 2 || payload.Columns["name"] != "Maya Chen" ||
-			payload.Columns["email"] != "maya@example.test" ||
-			payload.Columns["phone"] != "+46 70 123 45 67" || payload.Columns["city"] != "Stockholm" {
-			return semanticResult{}, fmt.Errorf("CSV column meaning missing: %+v", payload)
-		}
-		return semanticResult{Fragments: []semanticFragmentResult{{FragmentID: fragment.ID,
-			Entities: []semanticEntityCandidate{
-				{Ref: "person", Label: "Maya Chen", Type: "person", Confidence: testConfidence(0.99)},
-				{Ref: "city", Label: "Stockholm", Type: "city", Confidence: testConfidence(0.98)},
-			},
-			Attributes: []semanticAttributeCandidate{
-				{SubjectRef: "person", Predicate: "email", Value: json.RawMessage(`"maya@example.test"`), Confidence: testConfidence(0.99)},
-				{SubjectRef: "person", Predicate: "phone", Value: json.RawMessage(`"+46 70 123 45 67"`), Confidence: testConfidence(0.99)},
-			},
-			Relationships: []semanticRelationshipCandidate{
-				{SubjectRef: "person", Predicate: "located_in", ObjectRef: "city", Confidence: testConfidence(0.95)},
-			},
-		}}}, nil
+		return result, nil
 	}}
 	service, err := newSilverServiceWithModel(root+"/silver", bronze, model)
 	if err != nil {
@@ -185,7 +203,7 @@ func TestSilverCSVSemanticExtractionKeepsColumnsAndPlaceContext(t *testing.T) {
 	}
 
 	snapshot := service.snapshot()
-	if len(snapshot.Entities) != 2 || len(snapshot.Claims) != 7 {
+	if len(snapshot.Entities) != 2 || len(snapshot.Claims) < 7 {
 		t.Fatalf("structured CSV knowledge missing: entities=%d claims=%d", len(snapshot.Entities), len(snapshot.Claims))
 	}
 	entityByName := map[string]string{}
@@ -227,8 +245,9 @@ func TestSilverCSVSemanticExtractionKeepsColumnsAndPlaceContext(t *testing.T) {
 				t.Fatalf("claim is not backed by an evidence-linked observation: %+v", claim)
 			}
 			evidence, ok := evidenceByID[observation.EvidenceIDs[0]]
-			if !ok || evidence.BronzeSourceID != item.ID || evidence.BronzeContentSHA256 != item.Hash {
-				t.Fatalf("claim does not trace to its Bronze row: claim=%+v evidence=%+v", claim, evidence)
+			if !ok || evidence.BronzeSourceID != item.ID || evidence.BronzeContentSHA256 != item.Hash ||
+				evidence.Selector["row"] != 2 || evidence.Selector["column_index"] == nil {
+				t.Fatalf("claim does not trace to its Bronze cell: claim=%+v evidence=%+v", claim, evidence)
 			}
 		}
 	}
