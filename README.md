@@ -93,7 +93,7 @@ Interactive Self AI and heavier Source processing are separate roles and may use
 
 Source is a Go service with local identity creation, QR pairing, mutual authentication, LAN discovery, content-addressed Bronze storage, durable sync-job visibility, background Silver processing, and native hybrid retrieval.
 
-It deterministically extracts useful structure from JSON, CSV, Markdown, and other UTF-8 text, and can use a local model to propose entities, attributes, and relationships. Validated results are resolved conservatively and published as complete Silver snapshots. The same deterministic Evidence is indexed in SQLite: FTS5 provides lexical retrieval and sqlite-vec provides local vector retrieval through a replaceable embedding model. A small reciprocal-rank fusion layer combines both channels while preserving Bronze and Evidence provenance.
+It deterministically extracts useful structure from JSON, CSV, Markdown, and other UTF-8 text and publishes that provenance-backed Core Silver before optional model work begins. Retrieval and semantic knowledge independently consume the same Evidence. The local semantic model proposes entities, attributes, and relationships which Source validates and resolves conservatively; FTS5 and sqlite-vec provide hybrid retrieval through a separately versioned embedding model. A small reciprocal-rank fusion layer combines both retrieval channels while preserving Bronze and Evidence provenance.
 
 Self is a Kotlin Android app. It can pair with one Source, create notes, import files and images, preview supported content, organize shortcuts locally, delete Bronze, and synchronize in the foreground or through bounded background work.
 

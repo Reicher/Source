@@ -265,7 +265,7 @@ func (i *identity) newLanHandler(ctx context.Context) (http.Handler, <-chan stru
 		}
 		return err
 	}
-	silver.onPublish = retrieval.signal
+	silver.onDeterministicPublish = retrieval.signal
 	silver.start(ctx)
 	retrieval.start(ctx)
 	shutdownDone := make(chan struct{})

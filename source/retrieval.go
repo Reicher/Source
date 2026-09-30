@@ -349,7 +349,7 @@ func (s *retrievalService) reconcile(ctx context.Context) error {
 	if s.embedder != nil && s.currentStatus().State != "ready" {
 		s.setRuntimeRebuilding()
 	}
-	snapshot := s.silver.snapshot()
+	snapshot := s.silver.deterministicSnapshot()
 	chunksBySource, err := retrievalChunksFromSnapshot(snapshot)
 	if err != nil {
 		return err

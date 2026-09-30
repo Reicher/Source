@@ -111,7 +111,9 @@ func TestSilverDataRevisionChangesOnlyWithAuthoritativeSnapshot(t *testing.T) {
 	if !service.processNext(context.Background()) {
 		t.Fatal("Silver worker unexpectedly stopped")
 	}
-	if snapshot := service.snapshot(); snapshot.Revision != 1 || len(snapshot.Sources) != 1 {
+	if snapshot := service.snapshot(); snapshot.Revision != 2 || len(snapshot.Sources) != 1 ||
+		snapshot.Sources[0].Representations.Deterministic.State != silverRepresentationReady ||
+		snapshot.Sources[0].Representations.Knowledge.State != silverRepresentationReady {
 		t.Fatalf("published data did not advance authoritative revision: %+v", snapshot)
 	}
 }
@@ -164,8 +166,10 @@ func TestSilverQueueAndCheckpointsSurviveRestart(t *testing.T) {
 	if service.processNext(ctx) {
 		t.Fatal("cancelled processing unexpectedly reported more work")
 	}
-	if got := service.snapshot(); len(got.Sources) != 0 || len(got.Evidence) != 0 {
-		t.Fatalf("partial checkpoints became authoritative: %+v", got)
+	if got := service.snapshot(); len(got.Sources) != 1 || len(got.Evidence) != 2 || len(got.Entities) != 0 ||
+		got.Sources[0].Representations.Deterministic.State != silverRepresentationReady ||
+		got.Sources[0].Representations.Knowledge.State != silverRepresentationProcessing {
+		t.Fatalf("deterministic Silver was not independently published before knowledge completed: %+v", got)
 	}
 	if len(service.state.Jobs[0].Checkpoints) != 1 {
 		t.Fatalf("checkpoint was not persisted: %+v", service.state.Jobs[0])
@@ -177,6 +181,12 @@ func TestSilverQueueAndCheckpointsSurviveRestart(t *testing.T) {
 	}
 	if restarted.state.Jobs[0].State != "queued" || len(restarted.state.Jobs[0].Checkpoints) != 1 {
 		t.Fatalf("restart did not recover queued checkpoint: %+v", restarted.state.Jobs[0])
+	}
+	restartedSnapshot := restarted.snapshot()
+	if len(restartedSnapshot.Sources) != 1 ||
+		restartedSnapshot.Sources[0].Representations.Deterministic.State != silverRepresentationReady ||
+		restartedSnapshot.Sources[0].Representations.Knowledge.State != silverRepresentationProcessing {
+		t.Fatalf("restart did not preserve independent processor states: %+v", restartedSnapshot)
 	}
 	processed := 0
 	restarted.afterCheckpoint = func(_ string, _ int) { processed++ }
@@ -195,6 +205,114 @@ func TestSilverQueueAndCheckpointsSurviveRestart(t *testing.T) {
 	}
 	if len(snapshot.Entities) != 2 || len(snapshot.Claims) != 2 {
 		t.Fatalf("model candidate resolution missing: entities=%d claims=%d", len(snapshot.Entities), len(snapshot.Claims))
+	}
+}
+
+func TestSilverInterruptedKnowledgeBecomesUnavailableWhenModelIsRemoved(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	putSilverBronze(t, bronze, "13131313-1313-4131-8131-131313131313", "people.txt", "text/plain", 1,
+		"Ada Lovelace designed a machine.\n\nGrace Hopper built compilers.")
+	firstModel := namedPeopleTestModel().(testSemanticModel)
+	service, err := newSilverServiceWithConfiguration(root+"/silver", bronze, firstModel, silverConfiguration{SemanticBatchTargetBytes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.processNext(context.Background())
+	completed := service.snapshot()
+	if len(completed.Sources) != 1 || completed.Sources[0].Representations.Knowledge.State != silverRepresentationReady ||
+		len(completed.Entities) == 0 {
+		t.Fatalf("initial knowledge did not complete: %+v", completed)
+	}
+
+	secondModel := firstModel
+	secondModel.revision = "2"
+	rebuilding, err := newSilverServiceWithConfiguration(root+"/silver", bronze, secondModel, silverConfiguration{SemanticBatchTargetBytes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	rebuilding.afterCheckpoint = func(_ string, batch int) {
+		if batch == 0 {
+			cancel()
+		}
+	}
+	rebuilding.processNext(ctx)
+	interrupted := rebuilding.snapshot()
+	if len(interrupted.Sources) != 1 ||
+		interrupted.Sources[0].Representations.Knowledge.State != silverRepresentationProcessing ||
+		interrupted.Sources[0].Coverage.SemanticState != silverSemanticCompleted || len(interrupted.Entities) == 0 {
+		t.Fatalf("knowledge was not interrupted in processing: %+v", interrupted)
+	}
+
+	restarted, err := newSilverServiceWithConfiguration(root+"/silver", bronze, nil, silverConfiguration{SemanticBatchTargetBytes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !restarted.processNext(context.Background()) {
+		t.Fatal("model-less reconciliation job did not run")
+	}
+	snapshot := restarted.snapshot()
+	if len(snapshot.Sources) != 1 {
+		t.Fatalf("source missing after restart: %+v", snapshot)
+	}
+	source := snapshot.Sources[0]
+	if source.Representations.Deterministic.State != silverRepresentationReady ||
+		source.Representations.Knowledge.State != silverRepresentationUnavailable ||
+		source.Coverage.SemanticState != silverSemanticSkipped ||
+		source.Coverage.SemanticSkipReason != silverSkipModelUnavailable ||
+		source.ModelID != "" || source.ModelRevision != "" || source.SemanticInputLimit != 0 {
+		t.Fatalf("interrupted knowledge was not made unavailable: %+v", source)
+	}
+	if len(snapshot.Entities) != 0 || len(snapshot.Claims) != 0 {
+		t.Fatalf("unavailable knowledge retained semantic output: entities=%d claims=%d", len(snapshot.Entities), len(snapshot.Claims))
+	}
+	for _, observation := range snapshot.Observations {
+		if observation.Producer.ProcessorID != silverExtractionID {
+			t.Fatalf("unavailable knowledge retained semantic observation: %+v", observation)
+		}
+	}
+	item, err := bronze.load("13131313-1313-4131-8131-131313131313")
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted.mu.Lock()
+	needsReconcile := restarted.needsReconcileLocked(item)
+	restarted.mu.Unlock()
+	if needsReconcile {
+		t.Fatal("model-less unavailable representation was not considered current")
+	}
+}
+
+func TestSilverCompletedKnowledgeIsPreservedWhenModelIsRemoved(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	putSilverBronze(t, bronze, "14141414-1414-4141-8141-141414141414", "person.txt", "text/plain", 1,
+		"Ada Lovelace designed a machine.")
+	service, err := newSilverServiceWithModel(root+"/silver", bronze, namedPeopleTestModel())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.processNext(context.Background())
+	before := service.snapshot()
+	if len(before.Sources) != 1 || before.Sources[0].Representations.Knowledge.State != silverRepresentationReady ||
+		len(before.Entities) == 0 || len(before.Claims) == 0 {
+		t.Fatalf("knowledge did not complete before model removal: %+v", before)
+	}
+
+	restarted, err := newSilverServiceWithModel(root+"/silver", bronze, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := restarted.snapshot()
+	if len(after.Sources) != 1 || after.Sources[0].Representations.Knowledge.State != silverRepresentationReady ||
+		after.Sources[0].ModelID == "" || len(after.Entities) != len(before.Entities) || len(after.Claims) != len(before.Claims) {
+		t.Fatalf("completed knowledge was not preserved after model removal: before=%+v after=%+v", before, after)
+	}
+	for _, job := range restarted.state.Jobs {
+		if job.State == "queued" || job.State == "running" {
+			t.Fatalf("completed knowledge was needlessly requeued without a model: %+v", job)
+		}
 	}
 }
 
@@ -371,7 +489,7 @@ func TestSilverOversizedTextPublishesExplicitSkippedCoverage(t *testing.T) {
 	root := t.TempDir()
 	bronze := newBronzeStore(root + "/bronze")
 	content := strings.Repeat("x", silverMaximumInputBytes+1)
-	putSilverBronze(t, bronze, "16161616-1616-4161-8161-161616161616", "oversized.txt", "text/plain", 1, content)
+	item := putSilverBronze(t, bronze, "16161616-1616-4161-8161-161616161616", "oversized.txt", "text/plain", 1, content)
 	modelCalls := 0
 	model := testSemanticModel{id: "model", revision: "1", run: func(input semanticInput) (semanticResult, error) {
 		modelCalls++
@@ -392,6 +510,12 @@ func TestSilverOversizedTextPublishesExplicitSkippedCoverage(t *testing.T) {
 	if coverage.ExtractionState != silverExtractionSkipped || coverage.SemanticState != silverSemanticSkipped ||
 		coverage.SemanticSkipReason != silverSkipSourceTooLarge {
 		t.Fatalf("oversized source coverage: %+v", coverage)
+	}
+	service.mu.Lock()
+	needed := service.needsReconcileLocked(item)
+	service.mu.Unlock()
+	if needed {
+		t.Fatal("unsupported deterministic input was needlessly requeued for knowledge")
 	}
 }
 
@@ -417,7 +541,8 @@ func TestSilverInputLimitChangeRequeuesPartialSemanticCoverage(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := expanded.snapshot()
-	if len(before.Sources) != 1 || !before.Sources[0].Stale || len(before.Processing) != 1 {
+	if len(before.Sources) != 1 || before.Sources[0].Stale || len(before.Processing) != 1 ||
+		before.Processing[0].Representation != "knowledge" {
 		t.Fatalf("input-limit change did not queue replacement work: %+v", before)
 	}
 	expanded.processNext(context.Background())
@@ -793,7 +918,7 @@ func TestSilverFailedSaveDoesNotExposeUnpublishedGeneration(t *testing.T) {
 	root := t.TempDir()
 	bronze := newBronzeStore(filepath.Join(root, "bronze"))
 	putSilverBronze(t, bronze, "77777777-7777-4777-8777-777777777777", "note.txt", "text/plain", 1, "Ada Lovelace wrote notes.")
-	service, err := newSilverService(filepath.Join(root, "silver"), bronze)
+	service, err := newSilverServiceWithModel(filepath.Join(root, "silver"), bronze, namedPeopleTestModel())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -806,11 +931,12 @@ func TestSilverFailedSaveDoesNotExposeUnpublishedGeneration(t *testing.T) {
 		service.path = filepath.Join(blocker, "state.json")
 	}
 	service.processNext(context.Background())
-	if snapshot := service.snapshot(); len(snapshot.Sources) != 0 || len(snapshot.Evidence) != 0 {
-		t.Fatalf("failed publication became authoritative: %+v", snapshot)
+	if snapshot := service.snapshot(); len(snapshot.Sources) != 1 || len(snapshot.Evidence) != 1 ||
+		len(snapshot.Entities) != 0 || snapshot.Sources[0].Representations.Deterministic.State != silverRepresentationReady {
+		t.Fatalf("failed knowledge publication damaged deterministic Silver: %+v", snapshot)
 	}
 	service.path = originalPath
-	restarted, err := newSilverService(filepath.Join(root, "silver"), bronze)
+	restarted, err := newSilverServiceWithModel(filepath.Join(root, "silver"), bronze, namedPeopleTestModel())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1043,7 +1169,7 @@ func TestSilverRecursivelyDecomposesStructuredJSONStrings(t *testing.T) {
 			_ = json.Unmarshal(encoded, &payload)
 			found[fmt.Sprint(payload["key"])] = true
 		case "parsed-json-value", "parsed-embedded-json-value":
-			if fragment.Selector["pointer"] == "/prose" && !fragment.SkipSemantic {
+			if fragment.Selector["pointer"] == "/prose" && !fragment.StructuralOnly {
 				found["prose"] = true
 			}
 			if structure, ok := fragment.Selector["structure"].(map[string]any); ok && structure["pointer"] == "/country" {
@@ -1061,7 +1187,7 @@ func TestSilverRecursivelyDecomposesStructuredJSONStrings(t *testing.T) {
 func TestSilverKeyValueTextUsesExactRangesAndLeavesProseAlone(t *testing.T) {
 	content := "  Birthday: 1986-08-27\nCity: Stockholm\nCountry: Sweden  "
 	fragments := parseGenericFragments(content)
-	if len(fragments) != 4 || !fragments[0].SkipSemantic {
+	if len(fragments) != 4 || !fragments[0].StructuralOnly {
 		t.Fatalf("key/value text was not decomposed conservatively: %+v", fragments)
 	}
 	for _, fragment := range fragments[1:] {
@@ -1072,7 +1198,7 @@ func TestSilverKeyValueTextUsesExactRangesAndLeavesProseAlone(t *testing.T) {
 		}
 	}
 	prose := parseGenericFragments("Observation: Jonas arrived yesterday and then described the entire trip in prose.")
-	if len(prose) != 1 || prose[0].Kind != "text-block" || prose[0].SkipSemantic {
+	if len(prose) != 1 || prose[0].Kind != "text-block" || prose[0].StructuralOnly {
 		t.Fatalf("ordinary prose was over-decomposed: %+v", prose)
 	}
 }
@@ -1162,9 +1288,11 @@ func TestSilverModelChangePreservesDeterministicRepresentation(t *testing.T) {
 	root := t.TempDir()
 	bronze := newBronzeStore(root + "/bronze")
 	putSilverBronze(t, bronze, "68686868-6868-4686-8686-686868686868", "contacts.csv", "text/csv", 1,
-		"Name,City\nJonas Sandvall,Stockholm\n")
+		"Name,Notes\nJonas Sandvall,\"Birthday: 1986-08-27\nCity: Stockholm\"\n")
+	inputs := map[string][]semanticInput{}
 	emptyModel := func(revision string) semanticModel {
 		return testSemanticModel{id: "replaceable-model", revision: revision, run: func(input semanticInput) (semanticResult, error) {
+			inputs[revision] = append(inputs[revision], input)
 			return emptySemanticResult(input), nil
 		}}
 	}
@@ -1199,6 +1327,18 @@ func TestSilverModelChangePreservesDeterministicRepresentation(t *testing.T) {
 	}
 	if ids(before) != ids(after) {
 		t.Fatalf("model change altered deterministic Evidence/observations: before=%s after=%s", ids(before), ids(after))
+	}
+	if len(inputs["two"]) != 1 || len(inputs["two"][0].Contexts) != 1 {
+		t.Fatalf("model change did not rebuild knowledge from persisted structural context: %+v", inputs["two"])
+	}
+	contextID := inputs["two"][0].Contexts[0].ID
+	for _, fragment := range inputs["two"][0].Fragments {
+		if fragment.Kind == "parsed-table-row" {
+			t.Fatalf("structural-only parent leaked into rebuilt semantic input: %+v", fragment)
+		}
+		if fragment.Kind == "parsed-key-value" && fragment.ParentContextID != contextID {
+			t.Fatalf("rebuilt atomic fragment lost its persisted parent context: %+v", fragment)
+		}
 	}
 }
 
@@ -1294,6 +1434,20 @@ func TestSilverEntityAggregatesSourcesAndDeletionRemovesDerivedData(t *testing.T
 	snapshot = service.snapshot()
 	if len(snapshot.Sources) != 1 || snapshot.Sources[0].BronzeSourceID != second.ID || len(snapshot.Claims) != 1 {
 		t.Fatalf("deletion left authoritative derived records: %+v", snapshot)
+	}
+	deleted = second
+	deleted.Revision = 2
+	deleted.Modified = 2
+	deleted.Deleted = true
+	deleted.Hash = ""
+	deleted.Size = 0
+	if response := bronzeRequest(t, bronze, http.MethodDelete, deleted, nil); response.Code != http.StatusOK {
+		t.Fatalf("delete final Bronze: %d", response.Code)
+	}
+	snapshot = service.snapshot()
+	if len(snapshot.Sources) != 0 || len(snapshot.Evidence) != 0 || len(snapshot.Observations) != 0 ||
+		len(snapshot.Entities) != 0 || len(snapshot.Claims) != 0 {
+		t.Fatalf("final deletion left Silver representations behind: %+v", snapshot)
 	}
 }
 

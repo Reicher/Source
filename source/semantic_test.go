@@ -60,8 +60,9 @@ func TestSemanticHTTPModelUsesUntrustedContentAsData(t *testing.T) {
 			t.Fatalf("unexpected model request: %s %s", r.Method, r.URL.Path)
 		}
 		var request struct {
-			Model    string            `json:"model"`
-			Messages []semanticMessage `json:"messages"`
+			Model          string            `json:"model"`
+			Messages       []semanticMessage `json:"messages"`
+			ResponseFormat map[string]any    `json:"response_format"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Fatal(err)
@@ -74,6 +75,13 @@ func TestSemanticHTTPModelUsesUntrustedContentAsData(t *testing.T) {
 			!strings.Contains(request.Messages[0].Content, "open-ended lower_snake_case types") ||
 			len(request.Messages[0].Content) > 1800 {
 			t.Fatalf("unexpected model prompt: %+v", request)
+		}
+		if request.ResponseFormat["type"] != "json_schema" {
+			t.Fatalf("semantic generation was not schema-constrained: %+v", request.ResponseFormat)
+		}
+		schema, ok := request.ResponseFormat["schema"].(map[string]any)
+		if !ok || schema["type"] != "object" || schema["properties"] == nil {
+			t.Fatalf("semantic response schema is incomplete: %+v", request.ResponseFormat)
 		}
 		var input semanticInput
 		if err := json.Unmarshal([]byte(request.Messages[1].Content), &input); err != nil {
@@ -107,6 +115,49 @@ func TestSemanticHTTPModelUsesUntrustedContentAsData(t *testing.T) {
 	})
 	if err != nil || len(result.Fragments) != 1 || len(result.Fragments[0].Entities) != 0 {
 		t.Fatalf("model extraction failed: result=%+v err=%v", result, err)
+	}
+}
+
+func TestSemanticHTTPModelFallsBackWhenRuntimeRejectsJSONSchema(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var request struct {
+			Messages       []semanticMessage `json:"messages"`
+			ResponseFormat map[string]any    `json:"response_format"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if requests == 1 {
+			if request.ResponseFormat["type"] != "json_schema" {
+				t.Fatalf("first request did not use JSON Schema: %+v", request.ResponseFormat)
+			}
+			http.Error(w, "unsupported response_format", http.StatusBadRequest)
+			return
+		}
+		if request.ResponseFormat["type"] != "json_object" {
+			t.Fatalf("fallback did not use plain JSON mode: %+v", request.ResponseFormat)
+		}
+		var input semanticInput
+		if err := json.Unmarshal([]byte(request.Messages[1].Content), &input); err != nil {
+			t.Fatal(err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{
+			"role": "assistant", "content": fmt.Sprintf(`{"fragments":[{"fragment_id":%q,"entities":[],"attributes":[],"relationships":[]}]}`, input.Fragments[0].ID),
+		}}}})
+	}))
+	defer server.Close()
+	model, err := newHTTPSemanticModel(server.URL, "source-model", "revision-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(map[string]any{"text": "Ada wrote notes."})
+	result, err := model.extract(context.Background(), semanticInput{Fragments: []semanticFragmentInput{{
+		ID: "fragment-1", Kind: "text-block", Payload: payload,
+	}}})
+	if err != nil || requests != 2 || len(result.Fragments) != 1 {
+		t.Fatalf("schema fallback failed: requests=%d result=%+v err=%v", requests, result, err)
 	}
 }
 
@@ -501,8 +552,19 @@ func TestSilverModelRevisionQueuesReplacementAndKeepsPriorVisible(t *testing.T) 
 		t.Fatal(err)
 	}
 	snapshot := second.snapshot()
-	if len(snapshot.Sources) != 1 || !snapshot.Sources[0].Stale || len(snapshot.Processing) != 1 || snapshot.Processing[0].State != "queued" {
+	if len(snapshot.Sources) != 1 || snapshot.Sources[0].Stale || len(snapshot.Processing) != 1 ||
+		snapshot.Processing[0].State != "queued" || snapshot.Processing[0].Representation != "knowledge" {
 		t.Fatalf("model revision did not queue a safe replacement: %+v", snapshot)
+	}
+	if snapshot.Sources[0].Representations.Deterministic.State != silverRepresentationReady ||
+		snapshot.Sources[0].ModelRevision != "1" {
+		t.Fatalf("knowledge replacement invalidated deterministic Silver or prior knowledge: %+v", snapshot.Sources[0])
+	}
+	beforeEvidence := append([]string(nil), snapshot.Sources[0].EvidenceIDs...)
+	second.processNext(context.Background())
+	after := second.snapshot()
+	if after.Sources[0].ModelRevision != "2" || strings.Join(after.Sources[0].EvidenceIDs, ",") != strings.Join(beforeEvidence, ",") {
+		t.Fatalf("semantic model rebuild changed deterministic evidence: before=%v after=%+v", beforeEvidence, after.Sources[0])
 	}
 }
 

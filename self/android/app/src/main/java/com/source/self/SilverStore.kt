@@ -20,12 +20,27 @@ data class SilverSource(
     val modelId: String? = null,
     val modelRevision: String? = null,
     val coverage: SilverCoverage? = null,
+    val representations: SilverRepresentations? = null,
 )
 
 data class SilverCoverage(
     val extractionState: String,
     val semanticState: String,
     val semanticSkipReason: String?,
+)
+
+data class SilverRepresentation(
+    val state: String,
+    val processorId: String,
+    val processorVersion: String,
+    val modelId: String? = null,
+    val modelRevision: String? = null,
+    val error: String? = null,
+)
+
+data class SilverRepresentations(
+    val deterministic: SilverRepresentation,
+    val knowledge: SilverRepresentation,
 )
 
 data class SilverEvidence(
@@ -79,6 +94,7 @@ data class SilverProcessing(
     val totalBatches: Int,
     val error: String? = null,
     val retryable: Boolean = false,
+    val representation: String? = null,
 ) {
     companion object {
         fun list(values: JSONArray): List<SilverProcessing> = values.objects().map { processing -> SilverProcessing(
@@ -86,6 +102,7 @@ data class SilverProcessing(
             processing.getInt("completed_batches"), processing.getInt("total_batches"),
             processing.optString("error").takeIf(String::isNotEmpty),
             processing.optBoolean("retryable", false),
+            processing.optString("representation").takeIf(String::isNotEmpty),
         ) }
     }
 }
@@ -151,6 +168,7 @@ private fun SilverProcessing.persistenceJson(): JSONObject = JSONObject()
     .put("completed_batches", completedBatches)
     .put("total_batches", totalBatches)
     .put("retryable", retryable)
+    .also { value -> representation?.let { value.put("representation", it) } }
     .also { value -> error?.let { value.put("error", it) } }
 
 internal fun SourceStatus.persistenceJson(): JSONObject {
@@ -345,6 +363,10 @@ data class SilverSnapshot(
                         coverage.optString("semantic_state"),
                         coverage.optString("semantic_skip_reason").takeIf(String::isNotEmpty),
                     ) },
+                    source.optJSONObject("representations")?.let { representations -> SilverRepresentations(
+                        parseRepresentation(representations.getJSONObject("deterministic")),
+                        parseRepresentation(representations.getJSONObject("knowledge")),
+                    ) },
                 ) },
                 value.array("evidence").objects().map { evidence -> SilverEvidence(
                     evidence.getString("id"), evidence.getString("bronze_source_id"),
@@ -441,6 +463,16 @@ class SilverStore(context: Context) {
             throw error
         }
     }
+}
+
+private fun parseRepresentation(value: JSONObject): SilverRepresentation {
+    val producer = value.getJSONObject("producer")
+    return SilverRepresentation(
+        value.getString("state"), producer.getString("processor_id"), producer.getString("processor_version"),
+        producer.optString("model_id").takeIf(String::isNotEmpty),
+        producer.optString("model_revision").takeIf(String::isNotEmpty),
+        value.optString("error").takeIf(String::isNotEmpty),
+    )
 }
 
 private fun JSONObject.array(name: String): JSONArray = optJSONArray(name) ?: JSONArray()

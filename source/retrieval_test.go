@@ -161,10 +161,104 @@ func publishedRetrievalFixture(t *testing.T, root string) (*bronzeStore, *silver
 	if !silver.processNext(context.Background()) {
 		t.Fatal("Silver did not process retrieval fixture")
 	}
-	if len(silver.snapshot().Sources) != 1 {
+	snapshot := silver.snapshot()
+	if len(snapshot.Sources) != 1 ||
+		snapshot.Sources[0].Representations.Deterministic.State != silverRepresentationReady ||
+		snapshot.Sources[0].Representations.Knowledge.State != silverRepresentationUnavailable {
 		t.Fatal("Silver fixture was not published")
 	}
 	return bronze, silver, item
+}
+
+func TestRetrievalBecomesReadyWhileKnowledgeIsStillProcessing(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	putSilverBronze(t, bronze, "10101010-1010-4010-8010-101010101010", "slow.txt", "text/plain", 1,
+		"Apollo reached the Moon while knowledge is still processing.")
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	model := testSemanticModel{id: "slow-model", revision: "1", run: func(input semanticInput) (semanticResult, error) {
+		started <- struct{}{}
+		<-release
+		return emptySemanticResult(input), nil
+	}}
+	silver, err := newSilverServiceWithModel(root+"/silver", bronze, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		silver.processNext(context.Background())
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("semantic model was not called")
+	}
+
+	snapshot := silver.snapshot()
+	if len(snapshot.Sources) != 1 || len(snapshot.Evidence) != 1 || len(snapshot.Entities) != 0 ||
+		snapshot.Sources[0].Representations.Deterministic.State != silverRepresentationReady ||
+		snapshot.Sources[0].Representations.Knowledge.State != silverRepresentationProcessing {
+		t.Fatalf("deterministic Silver did not publish ahead of knowledge: %+v", snapshot)
+	}
+	retrieval, err := newRetrievalService(root+"/silver", silver, &testEmbedder{id: "embedding", revision: "1", dimensions: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer retrieval.close()
+	if err := retrieval.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	status, err := retrieval.readStatus()
+	if err != nil || status.State != "ready" || status.Chunks != 1 || status.Embeddings != 1 {
+		t.Fatalf("retrieval waited for knowledge: status=%+v err=%v", status, err)
+	}
+	rows, err := retrieval.lexicalSearch(context.Background(), "Apollo", 2)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("lexical retrieval unavailable during knowledge processing: rows=%+v err=%v", rows, err)
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("knowledge processing did not finish")
+	}
+}
+
+func TestKnowledgeFailureLeavesDeterministicRetrievalReady(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	putSilverBronze(t, bronze, "20202020-2020-4020-8020-202020202020", "failure.txt", "text/plain", 1,
+		"Apollo remains lexically retrievable.")
+	silver, err := newSilverServiceWithModel(root+"/silver", bronze, testSemanticModel{
+		id: "failed-model", revision: "1", run: func(semanticInput) (semanticResult, error) {
+			return semanticResult{}, errors.New("semantic runtime unavailable")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	silver.processNext(context.Background())
+	snapshot := silver.snapshot()
+	if len(snapshot.Sources) != 1 || snapshot.Sources[0].Representations.Knowledge.State != silverRepresentationFailed ||
+		snapshot.Sources[0].Representations.Deterministic.State != silverRepresentationReady {
+		t.Fatalf("knowledge failure leaked into deterministic Silver: %+v", snapshot)
+	}
+	retrieval, err := newRetrievalService(root+"/silver", silver, &testEmbedder{id: "embedding", revision: "1", dimensions: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer retrieval.close()
+	if err := retrieval.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	status, err := retrieval.readStatus()
+	rows, lexicalErr := retrieval.lexicalSearch(context.Background(), "Apollo", 2)
+	if err != nil || lexicalErr != nil || status.State != "ready" || len(rows) != 1 {
+		t.Fatalf("knowledge failure blocked retrieval: status=%+v rows=%+v err=%v lexical=%v", status, rows, err, lexicalErr)
+	}
 }
 
 func TestRetrievalKeepsDistinctObservationsThatShareEvidence(t *testing.T) {
@@ -629,6 +723,34 @@ func TestRetrievalKeepsLexicalIndexWhenEmbeddingUnavailableOrFails(t *testing.T)
 	lexical, err := retrieval.lexicalSearch(context.Background(), "Apollo", 2)
 	if err != nil || len(lexical) != 1 {
 		t.Fatalf("embedding failure damaged FTS: rows=%+v err=%v", lexical, err)
+	}
+}
+
+func TestEmbeddingUnavailableDoesNotBlockKnowledge(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	putSilverBronze(t, bronze, "30303030-3030-4030-8030-303030303030", "knowledge.txt", "text/plain", 1,
+		"Ada Lovelace documented Apollo.")
+	silver, err := newSilverServiceWithModel(root+"/silver", bronze, namedPeopleTestModel())
+	if err != nil {
+		t.Fatal(err)
+	}
+	silver.processNext(context.Background())
+	snapshot := silver.snapshot()
+	if len(snapshot.Claims) == 0 || snapshot.Sources[0].Representations.Knowledge.State != silverRepresentationReady {
+		t.Fatalf("semantic knowledge was not ready before retrieval: %+v", snapshot)
+	}
+	retrieval, err := newRetrievalService(root+"/silver", silver, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer retrieval.close()
+	if err := retrieval.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	result, err := retrieval.search(context.Background(), retrievalRequest{Query: "Apollo", Limit: 2})
+	if err != nil || len(result.Results) != 1 || result.SemanticState != silverRepresentationUnavailable {
+		t.Fatalf("embedding outage blocked knowledge or lexical retrieval: result=%+v err=%v", result, err)
 	}
 }
 
