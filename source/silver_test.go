@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -218,13 +219,20 @@ func TestSilverSemanticBatchesPreserveFragmentEvidenceMapping(t *testing.T) {
 		result := emptySemanticResult(input)
 		for index, fragment := range input.Fragments {
 			var payload struct {
-				Columns map[string]string `json:"columns"`
+				Column string `json:"column"`
+				Value  string `json:"value"`
 			}
 			if err := json.Unmarshal(fragment.Payload, &payload); err != nil {
 				return semanticResult{}, err
 			}
+			if fragment.Kind != "parsed-table-cell" {
+				return semanticResult{}, fmt.Errorf("unexpected fragment kind: %+v", fragment)
+			}
+			if payload.Column != "name" {
+				continue
+			}
 			result.Fragments[index].Entities = []semanticEntityCandidate{{
-				Ref: "person", Label: payload.Columns["name"], Type: "person", Confidence: testConfidence(0.99),
+				Ref: "person", Label: payload.Value, Type: "person", Confidence: testConfidence(0.99),
 			}}
 		}
 		return result, nil
@@ -933,6 +941,264 @@ func TestSilverFormatAwareParsingAndGenericFallback(t *testing.T) {
 				t.Fatalf("missing %s in %+v", test.kind, fragments)
 			}
 		})
+	}
+}
+
+func TestSilverCSVStandardLibraryFixtures(t *testing.T) {
+	tests := []struct {
+		name        string
+		content     string
+		want        []string
+		wantLine    int
+		wantColumns int
+	}{
+		{"ordinary", "name,city\nAda,London\n", []string{"Ada", "London"}, 2, 2},
+		{"quoted comma", "name,note\n\"Lovelace, Ada\",\"engine, analytical\"\n", []string{"Lovelace, Ada", "engine, analytical"}, 2, 2},
+		{"quoted multiline and empty", "name,note,empty\r\nJonas,\"first line\r\nsecond line\",\r\n", []string{"Jonas", "first line\nsecond line", ""}, 2, 3},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			records, ok := parseCSVRecords(test.content)
+			if !ok || len(records) != 2 {
+				t.Fatalf("parseCSVRecords: ok=%v records=%+v", ok, records)
+			}
+			got := records[1]
+			if strings.Join(got.Values, "|") != strings.Join(test.want, "|") ||
+				got.SourceLine != test.wantLine || len(got.Positions) != test.wantColumns {
+				t.Fatalf("record=%+v want values=%q line=%d columns=%d", got, test.want, test.wantLine, test.wantColumns)
+			}
+			fragments, ok := parseCSVFragments(test.content)
+			if !ok || len(fragments) < 2 || fragments[1].Kind != "parsed-table-row" ||
+				fragments[1].Selector["source_line"] != test.wantLine {
+				t.Fatalf("CSV fragments lost logical or physical provenance: %+v", fragments)
+			}
+		})
+	}
+	if _, ok := parseCSVRecords("name,note\nAda,\"unterminated"); ok {
+		t.Fatal("malformed CSV was accepted")
+	}
+}
+
+func TestSilverCSVCompoundCellBecomesAtomicEvidenceWithRecordContext(t *testing.T) {
+	content := "Name,Notes\nJonas Sandvall,\"Birthday: 1986-08-27\nNotes: 2543\nPhone 1 - Value: 073-512 61 77\nAddress 1 - City: Stockholm\nAddress 1 - State: Stockholms Lan\nAddress 1 - Country: Sweden\"\n"
+	fragments, supported, err := parseSilverText(bronzeItem{Title: "contacts.csv", Mime: "text/csv"}, []byte(content))
+	if err != nil || !supported {
+		t.Fatalf("parse: supported=%v err=%v", supported, err)
+	}
+	keys := []string{}
+	for _, fragment := range fragments {
+		if fragment.Kind != "parsed-key-value" {
+			continue
+		}
+		if fragment.Selector["row"] != 2 || fragment.Selector["column"] != "Notes" ||
+			fragment.Selector["child"] == nil || fragment.Context == nil {
+			t.Fatalf("compound child lost cell provenance or record context: %+v", fragment)
+		}
+		var payload struct {
+			Key   string `json:"key"`
+			Value string `json:"value"`
+		}
+		encoded, _ := json.Marshal(fragment.Payload)
+		if err := json.Unmarshal(encoded, &payload); err != nil || payload.Value == "" {
+			t.Fatalf("invalid atomic payload: %s: %v", encoded, err)
+		}
+		keys = append(keys, payload.Key)
+	}
+	wantKeys := []string{"Birthday", "Notes", "Phone 1 - Value", "Address 1 - City", "Address 1 - State", "Address 1 - Country"}
+	if strings.Join(keys, "|") != strings.Join(wantKeys, "|") {
+		t.Fatalf("compound cell was not atomized: got=%q want=%q fragments=%+v", keys, wantKeys, fragments)
+	}
+
+	job := silverJob{BronzeSourceID: "source", BronzeContentSHA256: hashBytes([]byte(content)), Title: "contacts.csv", Mime: "text/csv"}
+	input, err := semanticInputForFragments(job, fragments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(input.Fragments) != 1+len(wantKeys) || len(input.Contexts) != 1 {
+		t.Fatalf("semantic units/context: fragments=%d contexts=%d input=%+v", len(input.Fragments), len(input.Contexts), input)
+	}
+	if !strings.Contains(string(input.Contexts[0].Payload), "Jonas Sandvall") ||
+		strings.Contains(string(input.Contexts[0].Payload), "Birthday") {
+		t.Fatalf("record context did not isolate the compound source field: %s", input.Contexts[0].Payload)
+	}
+	for _, fragment := range input.Fragments {
+		if fragment.Kind == "parsed-table-row" || strings.Contains(string(fragment.Payload), "Phone 1 - Value: 073") {
+			t.Fatalf("compound row/cell leaked into semantic local evidence: %+v", fragment)
+		}
+	}
+}
+
+func TestSilverRecursivelyDecomposesStructuredJSONStrings(t *testing.T) {
+	content := `{"name":"Jonas Sandvall","notes":"Birthday: 1986-08-27\nCity: Stockholm","metadata":"{\"country\":\"Sweden\",\"active\":true}","prose":"Jonas likes long walks."}`
+	fragments, ok := parseJSONFragments(content)
+	if !ok {
+		t.Fatal("valid JSON was rejected")
+	}
+	found := map[string]bool{}
+	for _, fragment := range fragments {
+		switch fragment.Kind {
+		case "parsed-key-value":
+			var payload map[string]any
+			encoded, _ := json.Marshal(fragment.Payload)
+			_ = json.Unmarshal(encoded, &payload)
+			found[fmt.Sprint(payload["key"])] = true
+		case "parsed-json-value", "parsed-embedded-json-value":
+			if fragment.Selector["pointer"] == "/prose" && !fragment.SkipSemantic {
+				found["prose"] = true
+			}
+			if structure, ok := fragment.Selector["structure"].(map[string]any); ok && structure["pointer"] == "/country" {
+				found["country"] = true
+			}
+		}
+	}
+	for _, key := range []string{"Birthday", "City", "country", "prose"} {
+		if !found[key] {
+			t.Fatalf("missing recursively parsed unit %q: %+v", key, fragments)
+		}
+	}
+}
+
+func TestSilverKeyValueTextUsesExactRangesAndLeavesProseAlone(t *testing.T) {
+	content := "  Birthday: 1986-08-27\nCity: Stockholm\nCountry: Sweden  "
+	fragments := parseGenericFragments(content)
+	if len(fragments) != 4 || !fragments[0].SkipSemantic {
+		t.Fatalf("key/value text was not decomposed conservatively: %+v", fragments)
+	}
+	for _, fragment := range fragments[1:] {
+		start := fragment.Selector["start_byte"].(int)
+		end := fragment.Selector["end_byte"].(int)
+		if content[start:end] != fragment.Text || fragment.Kind != "parsed-key-value" {
+			t.Fatalf("atomic text range %d:%d selected %q for %+v", start, end, content[start:end], fragment)
+		}
+	}
+	prose := parseGenericFragments("Observation: Jonas arrived yesterday and then described the entire trip in prose.")
+	if len(prose) != 1 || prose[0].Kind != "text-block" || prose[0].SkipSemantic {
+		t.Fatalf("ordinary prose was over-decomposed: %+v", prose)
+	}
+}
+
+func TestSilverLongStructuredChildrenKeepPayloadAndSelector(t *testing.T) {
+	value := strings.Repeat("å", silverMaximumBatchBytes)
+	content := fmt.Sprintf(`{"value":%q}`, value)
+	fragments := parseGenericFragments(content)
+	structured := []parsedSilverFragment{}
+	for _, fragment := range fragments {
+		if fragment.Kind == "parsed-embedded-json-value" {
+			structured = append(structured, fragment)
+		}
+	}
+	if len(structured) != 1 {
+		t.Fatalf("long structured child was split or lost: %+v", fragments)
+	}
+	child := structured[0]
+	if child.Selector["kind"] != "text-block-child" || child.Selector["start_byte"] != 0 ||
+		child.Selector["end_byte"] != len(content) || child.Text != value {
+		t.Fatalf("long structured child lost parent-range provenance: %+v", child)
+	}
+	structure, ok := child.Selector["structure"].(map[string]any)
+	if !ok || structure["pointer"] != "/value" {
+		t.Fatalf("long structured child lost JSON pointer: %+v", child.Selector)
+	}
+	encoded, err := json.Marshal(child.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Path  string `json:"path"`
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(encoded, &payload); err != nil || payload.Path != "/value" || payload.Value != value {
+		t.Fatalf("long structured child payload changed: payload=%+v err=%v", payload, err)
+	}
+}
+
+func TestSilverAtomicEvidenceIsDeterministicAcrossRestartWithoutModel(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	content := "Name,Notes\nJonas Sandvall,\"Birthday: 1986-08-27\nCity: Stockholm\"\n"
+	item := putSilverBronze(t, bronze, "56565656-5656-4565-8565-565656565656", "contacts.csv", "text/csv", 1, content)
+	service, err := newSilverServiceWithModel(root+"/silver", bronze, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.processNext(context.Background())
+	first := service.snapshot()
+	if len(first.Sources) != 1 || first.Sources[0].Coverage.SemanticSkipReason != silverSkipModelUnavailable {
+		t.Fatalf("deterministic Silver did not publish without a model: %+v", first)
+	}
+	ids := make([]string, 0, len(first.Evidence))
+	for _, evidence := range first.Evidence {
+		if evidence.BronzeSourceID != item.ID || evidence.BronzeContentSHA256 != item.Hash {
+			t.Fatalf("evidence does not trace to existing Bronze: %+v", evidence)
+		}
+		ids = append(ids, evidence.ID)
+	}
+	sort.Strings(ids)
+
+	restarted, err := newSilverServiceWithModel(root+"/silver", bronze, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartedIDs := make([]string, 0, len(restarted.snapshot().Evidence))
+	for _, evidence := range restarted.snapshot().Evidence {
+		restartedIDs = append(restartedIDs, evidence.ID)
+	}
+	sort.Strings(restartedIDs)
+	if strings.Join(ids, "|") != strings.Join(restartedIDs, "|") {
+		t.Fatalf("restart changed deterministic evidence IDs: before=%q after=%q", ids, restartedIDs)
+	}
+	_, reader, err := bronze.openContent(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil || closeErr != nil || string(stored) != content {
+		t.Fatalf("parsing changed canonical Bronze: content=%q read=%v close=%v", stored, readErr, closeErr)
+	}
+}
+
+func TestSilverModelChangePreservesDeterministicRepresentation(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	putSilverBronze(t, bronze, "68686868-6868-4686-8686-686868686868", "contacts.csv", "text/csv", 1,
+		"Name,City\nJonas Sandvall,Stockholm\n")
+	emptyModel := func(revision string) semanticModel {
+		return testSemanticModel{id: "replaceable-model", revision: revision, run: func(input semanticInput) (semanticResult, error) {
+			return emptySemanticResult(input), nil
+		}}
+	}
+	first, err := newSilverServiceWithModel(root+"/silver", bronze, emptyModel("one"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.processNext(context.Background())
+	before := first.snapshot()
+
+	second, err := newSilverServiceWithModel(root+"/silver", bronze, emptyModel("two"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second.processNext(context.Background())
+	after := second.snapshot()
+	if len(after.Sources) != 1 || after.Sources[0].ModelRevision != "two" {
+		t.Fatalf("model-dependent generation did not change: %+v", after.Sources)
+	}
+	ids := func(snapshot silverSnapshot) string {
+		values := make([]string, 0)
+		for _, evidence := range snapshot.Evidence {
+			values = append(values, "e:"+evidence.ID)
+		}
+		for _, observation := range snapshot.Observations {
+			if observation.Producer.ProcessorID == silverExtractionID {
+				values = append(values, "o:"+observation.ID)
+			}
+		}
+		sort.Strings(values)
+		return strings.Join(values, "|")
+	}
+	if ids(before) != ids(after) {
+		t.Fatalf("model change altered deterministic Evidence/observations: before=%s after=%s", ids(before), ids(after))
 	}
 }
 
