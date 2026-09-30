@@ -54,23 +54,14 @@ func testServer(t *testing.T, i *identity) *httptest.Server {
 func testLanHandler(t *testing.T, i *identity) http.Handler {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	handler, err := i.newLanHandler(ctx)
+	handler, shutdownDone, err := i.newLanHandler(ctx)
 	if err != nil {
 		cancel()
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		cancel()
-		i.mu.Lock()
-		jobs := i.jobs
-		retrieval := i.retrieval
-		i.mu.Unlock()
-		if jobs != nil && jobs.silver != nil {
-			jobs.silver.wait()
-		}
-		if retrieval != nil {
-			_ = retrieval.close()
-		}
+		<-shutdownDone
 	})
 	return handler
 }
@@ -223,11 +214,15 @@ func TestTrustedSyncJobsAppearInSilverAndLocalOverview(t *testing.T) {
 	i.state.SelfPin = fingerprint(client)
 	i.state.PersonID = "person"
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	handler, err := i.newLanHandler(ctx)
+	handler, shutdownDone, err := i.newLanHandler(ctx)
 	if err != nil {
+		cancel()
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		cancel()
+		<-shutdownDone
+	})
 	request := httptest.NewRequest(http.MethodPost, "/v1/jobs/sync", strings.NewReader(
 		`{"jobs":[{"key":"item:1:to_source","title":"note.txt","direction":"to_source"}]}`))
 	request.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{client}}

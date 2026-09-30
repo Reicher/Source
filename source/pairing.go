@@ -225,33 +225,33 @@ func (i *identity) token() (string, time.Time, error) {
 }
 
 func (i *identity) lanHandler() http.Handler {
-	handler, err := i.newLanHandler(context.Background())
+	handler, _, err := i.newLanHandler(context.Background())
 	if err != nil {
 		panic(err)
 	}
 	return handler
 }
 
-func (i *identity) newLanHandler(ctx context.Context) (http.Handler, error) {
+func (i *identity) newLanHandler(ctx context.Context) (http.Handler, <-chan struct{}, error) {
 	mux := http.NewServeMux()
 	dataDir := filepath.Dir(i.statePath)
 	bronze := newBronzeStore(filepath.Join(dataDir, "bronze"))
 	silver, err := newSilverService(filepath.Join(dataDir, "silver"), bronze)
 	if err != nil {
-		return nil, fmt.Errorf("load Silver processing state: %w", err)
+		return nil, nil, fmt.Errorf("load Silver processing state: %w", err)
 	}
 	embedder, err := embedderFromEnvironment()
 	if err != nil {
-		return nil, fmt.Errorf("load embedding model configuration: %w", err)
+		return nil, nil, fmt.Errorf("load embedding model configuration: %w", err)
 	}
 	retrieval, err := newRetrievalService(filepath.Join(dataDir, "silver"), silver, embedder)
 	if err != nil {
-		return nil, fmt.Errorf("load Silver retrieval index: %w", err)
+		return nil, nil, fmt.Errorf("load Silver retrieval index: %w", err)
 	}
 	syncJobs, err := newSyncJobStore(filepath.Join(dataDir, "jobs"))
 	if err != nil {
 		_ = retrieval.close()
-		return nil, fmt.Errorf("load sync job state: %w", err)
+		return nil, nil, fmt.Errorf("load sync job state: %w", err)
 	}
 	jobs := &sourceJobs{sync: syncJobs, silver: silver}
 	i.mu.Lock()
@@ -268,7 +268,9 @@ func (i *identity) newLanHandler(ctx context.Context) (http.Handler, error) {
 	silver.onPublish = retrieval.signal
 	silver.start(ctx)
 	retrieval.start(ctx)
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		silver.wait()
 		_ = retrieval.close()
@@ -392,7 +394,7 @@ func (i *identity) newLanHandler(ctx context.Context) (http.Handler, error) {
 		}
 		writeJSON(w, map[string]string{"status": "completed"})
 	})))
-	return mux, nil
+	return mux, shutdownDone, nil
 }
 
 func (i *identity) jobSnapshot() sourceJobSnapshot {
