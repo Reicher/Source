@@ -208,6 +208,114 @@ func TestSilverQueueAndCheckpointsSurviveRestart(t *testing.T) {
 	}
 }
 
+func TestSilverInterruptedKnowledgeBecomesUnavailableWhenModelIsRemoved(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	putSilverBronze(t, bronze, "13131313-1313-4131-8131-131313131313", "people.txt", "text/plain", 1,
+		"Ada Lovelace designed a machine.\n\nGrace Hopper built compilers.")
+	firstModel := namedPeopleTestModel().(testSemanticModel)
+	service, err := newSilverServiceWithConfiguration(root+"/silver", bronze, firstModel, silverConfiguration{SemanticBatchTargetBytes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.processNext(context.Background())
+	completed := service.snapshot()
+	if len(completed.Sources) != 1 || completed.Sources[0].Representations.Knowledge.State != silverRepresentationReady ||
+		len(completed.Entities) == 0 {
+		t.Fatalf("initial knowledge did not complete: %+v", completed)
+	}
+
+	secondModel := firstModel
+	secondModel.revision = "2"
+	rebuilding, err := newSilverServiceWithConfiguration(root+"/silver", bronze, secondModel, silverConfiguration{SemanticBatchTargetBytes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	rebuilding.afterCheckpoint = func(_ string, batch int) {
+		if batch == 0 {
+			cancel()
+		}
+	}
+	rebuilding.processNext(ctx)
+	interrupted := rebuilding.snapshot()
+	if len(interrupted.Sources) != 1 ||
+		interrupted.Sources[0].Representations.Knowledge.State != silverRepresentationProcessing ||
+		interrupted.Sources[0].Coverage.SemanticState != silverSemanticCompleted || len(interrupted.Entities) == 0 {
+		t.Fatalf("knowledge was not interrupted in processing: %+v", interrupted)
+	}
+
+	restarted, err := newSilverServiceWithConfiguration(root+"/silver", bronze, nil, silverConfiguration{SemanticBatchTargetBytes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !restarted.processNext(context.Background()) {
+		t.Fatal("model-less reconciliation job did not run")
+	}
+	snapshot := restarted.snapshot()
+	if len(snapshot.Sources) != 1 {
+		t.Fatalf("source missing after restart: %+v", snapshot)
+	}
+	source := snapshot.Sources[0]
+	if source.Representations.Deterministic.State != silverRepresentationReady ||
+		source.Representations.Knowledge.State != silverRepresentationUnavailable ||
+		source.Coverage.SemanticState != silverSemanticSkipped ||
+		source.Coverage.SemanticSkipReason != silverSkipModelUnavailable ||
+		source.ModelID != "" || source.ModelRevision != "" || source.SemanticInputLimit != 0 {
+		t.Fatalf("interrupted knowledge was not made unavailable: %+v", source)
+	}
+	if len(snapshot.Entities) != 0 || len(snapshot.Claims) != 0 {
+		t.Fatalf("unavailable knowledge retained semantic output: entities=%d claims=%d", len(snapshot.Entities), len(snapshot.Claims))
+	}
+	for _, observation := range snapshot.Observations {
+		if observation.Producer.ProcessorID != silverExtractionID {
+			t.Fatalf("unavailable knowledge retained semantic observation: %+v", observation)
+		}
+	}
+	item, err := bronze.load("13131313-1313-4131-8131-131313131313")
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted.mu.Lock()
+	needsReconcile := restarted.needsReconcileLocked(item)
+	restarted.mu.Unlock()
+	if needsReconcile {
+		t.Fatal("model-less unavailable representation was not considered current")
+	}
+}
+
+func TestSilverCompletedKnowledgeIsPreservedWhenModelIsRemoved(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	putSilverBronze(t, bronze, "14141414-1414-4141-8141-141414141414", "person.txt", "text/plain", 1,
+		"Ada Lovelace designed a machine.")
+	service, err := newSilverServiceWithModel(root+"/silver", bronze, namedPeopleTestModel())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.processNext(context.Background())
+	before := service.snapshot()
+	if len(before.Sources) != 1 || before.Sources[0].Representations.Knowledge.State != silverRepresentationReady ||
+		len(before.Entities) == 0 || len(before.Claims) == 0 {
+		t.Fatalf("knowledge did not complete before model removal: %+v", before)
+	}
+
+	restarted, err := newSilverServiceWithModel(root+"/silver", bronze, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := restarted.snapshot()
+	if len(after.Sources) != 1 || after.Sources[0].Representations.Knowledge.State != silverRepresentationReady ||
+		after.Sources[0].ModelID == "" || len(after.Entities) != len(before.Entities) || len(after.Claims) != len(before.Claims) {
+		t.Fatalf("completed knowledge was not preserved after model removal: before=%+v after=%+v", before, after)
+	}
+	for _, job := range restarted.state.Jobs {
+		if job.State == "queued" || job.State == "running" {
+			t.Fatalf("completed knowledge was needlessly requeued without a model: %+v", job)
+		}
+	}
+}
+
 func TestSilverSemanticBatchesPreserveFragmentEvidenceMapping(t *testing.T) {
 	root := t.TempDir()
 	bronze := newBronzeStore(root + "/bronze")

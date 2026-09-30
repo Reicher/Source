@@ -529,8 +529,7 @@ func (s *silverService) knowledgeMatchesCurrent(source silverSource, modelID, mo
 		return true
 	}
 	if s.semantic == nil {
-		return source.ModelID != "" || source.Representations.Knowledge.State == silverRepresentationUnavailable ||
-			source.Coverage.SemanticSkipReason == silverSkipModelUnavailable
+		return knowledgeCompleted(source) || knowledgeUnavailableWithoutModel(source)
 	}
 	producer := source.Representations.Knowledge.Producer
 	state := source.Representations.Knowledge.State
@@ -538,6 +537,39 @@ func (s *silverService) knowledgeMatchesCurrent(source silverSource, modelID, mo
 		source.SemanticInputLimit == semanticInputLimit && producer.ProcessorID == silverKnowledgeID &&
 		producer.ProcessorVersion == silverKnowledgeVersion && producer.ModelID == modelID && producer.ModelRevision == modelRevision &&
 		(state == silverRepresentationReady || state == silverRepresentationPartial || state == silverRepresentationSkipped)
+}
+
+func knowledgeCompleted(source silverSource) bool {
+	switch source.Representations.Knowledge.State {
+	case silverRepresentationReady, silverRepresentationPartial, silverRepresentationSkipped:
+		return true
+	case silverRepresentationProcessing, silverRepresentationUnavailable, silverRepresentationFailed:
+		return false
+	case "":
+		// Fall through to the legacy coverage fields below.
+	default:
+		return false
+	}
+	// Preserve completed knowledge written before representation states were
+	// introduced. In-progress and failed states must still be reconciled.
+	switch source.Coverage.SemanticState {
+	case silverSemanticCompleted, silverSemanticPartial:
+		return true
+	case silverSemanticSkipped:
+		return source.Coverage.SemanticSkipReason != silverSkipModelUnavailable
+	default:
+		return false
+	}
+}
+
+func knowledgeUnavailableWithoutModel(source silverSource) bool {
+	producer := source.Representations.Knowledge.Producer
+	return source.Representations.Knowledge.State == silverRepresentationUnavailable &&
+		source.Coverage.SemanticState == silverSemanticSkipped &&
+		source.Coverage.SemanticSkipReason == silverSkipModelUnavailable &&
+		source.ModelID == "" && source.ModelRevision == "" && source.SemanticInputLimit == 0 &&
+		producer.ProcessorID == silverKnowledgeID && producer.ProcessorVersion == silverKnowledgeVersion &&
+		producer.ModelID == "" && producer.ModelRevision == ""
 }
 
 func silverSourceMatchesBronze(source silverSource, item bronzeItem) bool {
@@ -1022,6 +1054,40 @@ func (s *silverService) completeWithoutKnowledge(jobID string) error {
 	if job == nil || job.State != "running" {
 		return context.Canceled
 	}
+	dataChanged := false
+	if s.semantic == nil {
+		if dataset, ok := s.state.Published[job.BronzeSourceID]; ok &&
+			dataset.Source.Coverage.ExtractionState == silverExtractionCompleted &&
+			!knowledgeCompleted(dataset.Source) && !knowledgeUnavailableWithoutModel(dataset.Source) {
+			deterministic := dataset.Observations[:0]
+			for _, observation := range dataset.Observations {
+				if observation.Producer.ProcessorID == silverExtractionID {
+					deterministic = append(deterministic, observation)
+				}
+			}
+			dataset.Observations = deterministic
+			dataset.Entities = nil
+			dataset.Claims = nil
+			dataset.Source.ModelID = ""
+			dataset.Source.ModelRevision = ""
+			dataset.Source.SemanticInputLimit = 0
+			dataset.Source.Coverage.SemanticState = silverSemanticSkipped
+			dataset.Source.Coverage.SemanticSkipReason = silverSkipModelUnavailable
+			dataset.Source.Representations.Knowledge = silverRepresentation{
+				State: silverRepresentationUnavailable,
+				Producer: silverProducer{
+					ProcessorID: silverKnowledgeID, ProcessorVersion: silverKnowledgeVersion,
+				},
+				Error: "semantic model is not configured",
+			}
+			dataset.PublishedAt = time.Now().UnixMilli()
+			refreshSilverSourceIDs(&dataset)
+			s.state.Published[job.BronzeSourceID] = dataset
+			job.Coverage = dataset.Source.Coverage
+			s.pruneEntitiesLocked()
+			dataChanged = true
+		}
+	}
 	job.State = "completed"
 	job.Checkpoints = nil
 	job.Error = ""
@@ -1030,6 +1096,9 @@ func (s *silverService) completeWithoutKnowledge(jobID string) error {
 	job.Retryable = false
 	job.UpdatedAt = time.Now().UnixMilli()
 	s.state.Revision++
+	if dataChanged {
+		s.state.DataRevision++
+	}
 	return s.saveLocked()
 }
 
