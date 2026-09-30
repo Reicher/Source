@@ -12,7 +12,7 @@ Bronze
        -> semantic knowledge -> observations, entities, claims, relationships
 ```
 
-Core Silver is published before semantic inference starts. The retrieval chunk processor reads its dedicated deterministic snapshot rather than parsing Bronze again or inspecting semantic observations. Text blocks and Markdown headings retain UTF-8 byte-range selectors; JSON values retain JSON pointers; CSV rows retain row selectors and column-aware text. This avoids a competing chunking model and gives retrieval the same Evidence IDs used by knowledge Silver.
+Core Silver is published before semantic inference starts. The retrieval chunk processor reads its dedicated deterministic snapshot rather than parsing Bronze again or inspecting semantic observations. Text blocks and Markdown headings retain UTF-8 byte-range selectors; JSON values retain JSON pointers; CSV rows retain row selectors and column-aware text. Structured scalar values may also produce finer cell or child Evidence for semantic extraction, but their parent text block, JSON value, or CSV row remains the retrieval chunk so search does not become needlessly fragmented. This avoids a competing chunking model while preserving exact Bronze and Evidence provenance at both granularities.
 
 Retrieval and semantic knowledge reconcile independently from that common base. A slow, failed, disabled, or restarted semantic model does not delay FTS or embeddings. Semantic model changes rebuild knowledge without replacing deterministic Evidence; embedding model changes rebuild vectors without replacing knowledge.
 

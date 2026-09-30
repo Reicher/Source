@@ -3,8 +3,10 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"sort"
 	"strconv"
@@ -13,15 +15,24 @@ import (
 	"unicode/utf8"
 )
 
-// parsedSilverFragment is the small, neutral structural unit shared by
-// deterministic Silver processors. Text is natural-language content when the
-// unit has any; structural-only units such as table headers leave it empty.
+// parsedSilverFragment is the neutral structural unit shared by deterministic
+// Silver processors. StructuralOnly marks a parent retained for provenance and
+// retrieval while more precise children carry the content for knowledge extraction.
 type parsedSilverFragment struct {
+	Kind           string
+	Selector       map[string]any
+	Excerpt        string
+	Payload        any
+	Text           string
+	Context        *parsedSilverContext
+	StructuralOnly bool
+}
+
+type parsedSilverContext struct {
+	ID       string
 	Kind     string
 	Selector map[string]any
-	Excerpt  string
 	Payload  any
-	Text     string
 }
 
 type silverParseResult struct {
@@ -180,9 +191,6 @@ func offsetSilverFragments(fragments []parsedSilverFragment, byteOffset int) []p
 		return fragments
 	}
 	for index := range fragments {
-		if fragments[index].Selector["kind"] != "utf8-byte-range" {
-			continue
-		}
 		if start, ok := fragments[index].Selector["start_byte"].(int); ok {
 			fragments[index].Selector["start_byte"] = start + byteOffset
 		}
@@ -204,8 +212,8 @@ func parseJSONFragments(text string) ([]parsedSilverFragment, bool) {
 		return nil, false
 	}
 	var fragments []parsedSilverFragment
-	var visit func(any, string)
-	visit = func(node any, path string) {
+	var visit func(any, string, *parsedSilverContext)
+	visit = func(node any, path string, context *parsedSilverContext) {
 		switch typed := node.(type) {
 		case map[string]any:
 			keys := make([]string, 0, len(typed))
@@ -214,18 +222,32 @@ func parseJSONFragments(text string) ([]parsedSilverFragment, bool) {
 			}
 			sort.Strings(keys)
 			for _, key := range keys {
-				visit(typed[key], path+"/"+strings.ReplaceAll(strings.ReplaceAll(key, "~", "~0"), "/", "~1"))
+				childPath := path + "/" + jsonPointerEscape(key)
+				visit(typed[key], childPath, jsonObjectContext(typed, keys, path, key))
 			}
 		case []any:
 			for index, child := range typed {
-				visit(child, path+"/"+strconv.Itoa(index))
+				visit(child, path+"/"+strconv.Itoa(index), context)
 			}
 		default:
 			encoded, _ := json.Marshal(typed)
-			fragments = append(fragments, parsedSilverFragment{Kind: "parsed-json-value", Selector: map[string]any{"kind": "json-pointer", "pointer": path}, Excerpt: path + ": " + string(encoded), Payload: map[string]any{"path": path, "value": typed}, Text: scalarText(typed)})
+			fragment := parsedSilverFragment{
+				Kind: "parsed-json-value", Selector: map[string]any{"kind": "json-pointer", "pointer": path},
+				Excerpt: path + ": " + string(encoded), Payload: map[string]any{"path": path, "value": typed},
+				Text: scalarText(typed), Context: context,
+			}
+			if value, ok := typed.(string); ok {
+				if children, structured := structuredChildren(value, map[string]any{"kind": "json-string-child", "pointer": path}, context); structured {
+					fragment.StructuralOnly = true
+					fragments = append(fragments, fragment)
+					fragments = append(fragments, children...)
+					return
+				}
+			}
+			fragments = append(fragments, fragment)
 		}
 	}
-	visit(value, "")
+	visit(value, "", nil)
 	return fragments, true
 }
 
@@ -234,14 +256,16 @@ func parseCSVFragments(text string) ([]parsedSilverFragment, bool) {
 	if !ok || len(records) == 0 {
 		return nil, false
 	}
-	headers := records[0]
-	fragments := make([]parsedSilverFragment, 0, len(records))
+	headers := records[0].Values
+	fragments := make([]parsedSilverFragment, 0, len(records)*2)
 	fragments = append(fragments, parsedSilverFragment{
-		Kind: "parsed-table-header", Selector: map[string]any{"kind": "table-row", "row": 1},
+		Kind: "parsed-table-header", Selector: map[string]any{"kind": "table-row", "row": 1, "source_line": records[0].SourceLine},
 		Excerpt: strings.Join(headers, ", "), Payload: map[string]any{"row": 1, "values": headers},
 	})
-	for index, record := range records[1:] {
-		payload := map[string]any{"row": index + 2, "values": record}
+	for index, csvRecord := range records[1:] {
+		record := csvRecord.Values
+		row := index + 2
+		payload := map[string]any{"row": row, "values": record}
 		if len(headers) == len(record) {
 			columns := map[string]string{}
 			unique := true
@@ -260,67 +284,346 @@ func parseCSVFragments(text string) ([]parsedSilverFragment, bool) {
 				payload["columns"] = columns
 			}
 		}
-		fragments = append(fragments, parsedSilverFragment{Kind: "parsed-table-row", Selector: map[string]any{"kind": "table-row", "row": index + 2}, Excerpt: strings.Join(record, ", "), Payload: payload, Text: strings.Join(record, " ")})
+		fragments = append(fragments, parsedSilverFragment{
+			Kind: "parsed-table-row", Selector: map[string]any{"kind": "table-row", "row": row, "source_line": csvRecord.SourceLine},
+			Excerpt: strings.Join(record, ", "), Payload: payload, Text: strings.Join(record, " "), StructuralOnly: true,
+		})
+		for columnIndex, value := range record {
+			if strings.TrimSpace(value) == "" {
+				continue
+			}
+			header := ""
+			if columnIndex < len(headers) {
+				header = headers[columnIndex]
+			}
+			selector := map[string]any{
+				"kind": "table-cell", "row": row, "column_index": columnIndex + 1,
+			}
+			if header != "" {
+				selector["column"] = header
+			}
+			if columnIndex < len(csvRecord.Positions) {
+				selector["source_line"] = csvRecord.Positions[columnIndex].Line
+				selector["source_column"] = csvRecord.Positions[columnIndex].Column
+			}
+			context := csvRecordContext(row, headers, record, columnIndex)
+			if children, structured := structuredChildren(value, selector, context); structured {
+				fragments = append(fragments, children...)
+				continue
+			}
+			fragments = append(fragments, parsedSilverFragment{
+				Kind: "parsed-table-cell", Selector: selector,
+				Excerpt: tableCellExcerpt(header, columnIndex, value),
+				Payload: map[string]any{"row": row, "column": header, "column_index": columnIndex + 1, "value": value},
+				Text:    value, Context: context,
+			})
+		}
 	}
 	return fragments, true
 }
 
-// parseCSVRecords is a small RFC 4180 reader used here to keep deterministic
-// ingestion dependency-free. It handles quoted fields, escaped quotes, CRLF
-// and newlines inside quoted fields. Malformed CSV falls back to generic text.
-func parseCSVRecords(text string) ([][]string, bool) {
-	var records [][]string
-	var record []string
-	var field strings.Builder
-	inQuotes := false
-	quoted := false
-	for index := 0; index < len(text); index++ {
-		character := text[index]
-		if inQuotes {
-			if character == '"' {
-				if index+1 < len(text) && text[index+1] == '"' {
-					field.WriteByte('"')
-					index++
-				} else {
-					inQuotes = false
-					quoted = true
-				}
-			} else {
-				field.WriteByte(character)
-			}
-			continue
+type csvSilverFieldPosition struct {
+	Line   int
+	Column int
+}
+
+type csvSilverRecord struct {
+	Values     []string
+	Positions  []csvSilverFieldPosition
+	SourceLine int
+}
+
+// parseCSVRecords delegates RFC 4180 details, including escaped quotes and
+// quoted newlines, to Go's standard library. Logical row numbers remain stable
+// while FieldPos adds physical source locations for more precise selectors.
+func parseCSVRecords(text string) ([]csvSilverRecord, bool) {
+	reader := csv.NewReader(strings.NewReader(text))
+	reader.FieldsPerRecord = 0
+	var records []csvSilverRecord
+	for {
+		values, err := reader.Read()
+		if errors.Is(err, io.EOF) {
+			break
 		}
-		switch character {
-		case '"':
-			if field.Len() != 0 || quoted {
-				return nil, false
-			}
-			inQuotes = true
-		case ',':
-			record = append(record, field.String())
-			field.Reset()
-			quoted = false
-		case '\n':
-			record = append(record, strings.TrimSuffix(field.String(), "\r"))
-			field.Reset()
-			quoted = false
-			records = append(records, record)
-			record = nil
-		default:
-			if quoted && character != '\r' {
-				return nil, false
-			}
-			field.WriteByte(character)
+		if err != nil {
+			return nil, false
 		}
-	}
-	if inQuotes {
-		return nil, false
-	}
-	if field.Len() > 0 || quoted || len(record) > 0 {
-		record = append(record, strings.TrimSuffix(field.String(), "\r"))
+		record := csvSilverRecord{Values: append([]string(nil), values...)}
+		for index := range values {
+			line, column := reader.FieldPos(index)
+			if index == 0 {
+				record.SourceLine = line
+			}
+			record.Positions = append(record.Positions, csvSilverFieldPosition{Line: line, Column: column})
+		}
 		records = append(records, record)
 	}
 	return records, true
+}
+
+type structuredScalarUnit struct {
+	Kind     string
+	Selector map[string]any
+	Payload  any
+	Text     string
+	Excerpt  string
+	Start    int
+	End      int
+}
+
+func jsonPointerEscape(value string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(value, "~", "~0"), "/", "~1")
+}
+
+func newParsedSilverContext(kind string, selector map[string]any, payload any) *parsedSilverContext {
+	context := &parsedSilverContext{Kind: kind, Selector: selector, Payload: payload}
+	context.ID = stableID("source-silver-parent-context", struct {
+		Kind     string         `json:"kind"`
+		Selector map[string]any `json:"selector"`
+		Payload  any            `json:"payload"`
+	}{kind, selector, payload})
+	return context
+}
+
+func boundedContextString(value string) string {
+	return truncate(value, silverMaximumContextRunes)
+}
+
+func contextStringFits(value string) bool {
+	return len(value) <= silverMaximumContextRunes*utf8.UTFMax &&
+		utf8.RuneCountInString(value) <= silverMaximumContextRunes
+}
+
+func jsonObjectContext(object map[string]any, keys []string, path, excludedKey string) *parsedSilverContext {
+	fields := make([]map[string]any, 0, min(len(keys), silverMaximumContextFields))
+	inspected := 0
+	for _, key := range keys {
+		if key == excludedKey {
+			continue
+		}
+		inspected++
+		if inspected > silverMaximumContextCandidates {
+			break
+		}
+		if len(fields) >= silverMaximumContextFields {
+			break
+		}
+		value := object[key]
+		switch typed := value.(type) {
+		case string:
+			if !contextStringFits(typed) {
+				continue
+			}
+			if _, structured := decomposeStructuredString(typed, 0); structured {
+				continue
+			}
+			value = boundedContextString(typed)
+		case json.Number, bool:
+		default:
+			continue
+		}
+		fields = append(fields, map[string]any{
+			"name": key, "path": path + "/" + jsonPointerEscape(key), "value": value,
+		})
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	selector := map[string]any{"kind": "json-object-context", "pointer": path, "excluded_key": excludedKey}
+	return newParsedSilverContext("json-object", selector, map[string]any{"path": path, "fields": fields})
+}
+
+func csvRecordContext(row int, headers, values []string, excludedColumn int) *parsedSilverContext {
+	fields := make([]map[string]any, 0, min(len(values), silverMaximumContextFields))
+	inspected := 0
+	for columnIndex, value := range values {
+		if columnIndex == excludedColumn || strings.TrimSpace(value) == "" {
+			continue
+		}
+		inspected++
+		if inspected > silverMaximumContextCandidates {
+			break
+		}
+		if !contextStringFits(value) {
+			continue
+		}
+		if _, structured := decomposeStructuredString(value, 0); structured {
+			continue
+		}
+		if len(fields) >= silverMaximumContextFields {
+			break
+		}
+		header := ""
+		if columnIndex < len(headers) {
+			header = headers[columnIndex]
+		}
+		fields = append(fields, map[string]any{
+			"column": header, "column_index": columnIndex + 1, "value": boundedContextString(value),
+		})
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	selector := map[string]any{"kind": "table-record-context", "row": row, "excluded_column_index": excludedColumn + 1}
+	return newParsedSilverContext("table-record", selector, map[string]any{"row": row, "fields": fields})
+}
+
+func tableCellExcerpt(header string, columnIndex int, value string) string {
+	label := header
+	if label == "" {
+		label = fmt.Sprintf("column %d", columnIndex+1)
+	}
+	return truncate(label+": "+value, 240)
+}
+
+func structuredChildren(value string, baseSelector map[string]any, context *parsedSilverContext) ([]parsedSilverFragment, bool) {
+	units, ok := decomposeStructuredString(value, 0)
+	if !ok {
+		return nil, false
+	}
+	fragments := make([]parsedSilverFragment, 0, len(units))
+	for index, unit := range units {
+		selector := make(map[string]any, len(baseSelector)+2)
+		for key, item := range baseSelector {
+			selector[key] = item
+		}
+		if selector["kind"] == "table-cell" {
+			selector["kind"] = "table-cell-child"
+		}
+		selector["child"] = index + 1
+		selector["structure"] = unit.Selector
+		fragments = append(fragments, parsedSilverFragment{
+			Kind: unit.Kind, Selector: selector, Excerpt: truncate(unit.Excerpt, 240),
+			Payload: unit.Payload, Text: unit.Text, Context: context,
+		})
+	}
+	return fragments, true
+}
+
+func decomposeStructuredString(value string, depth int) ([]structuredScalarUnit, bool) {
+	if depth >= silverMaximumStructureDepth {
+		return nil, false
+	}
+	trimmed := strings.TrimSpace(value)
+	if len(trimmed) > 1 && (trimmed[0] == '{' || trimmed[0] == '[') {
+		decoder := json.NewDecoder(strings.NewReader(trimmed))
+		decoder.UseNumber()
+		var decoded any
+		if decoder.Decode(&decoded) == nil && decoder.Decode(&struct{}{}) == io.EOF {
+			units := embeddedJSONUnits(decoded, "", depth+1)
+			if len(units) > 0 {
+				return units, true
+			}
+		}
+	}
+	return keyValueLineUnits(value, depth)
+}
+
+func embeddedJSONUnits(value any, path string, depth int) []structuredScalarUnit {
+	var units []structuredScalarUnit
+	switch typed := value.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			units = append(units, embeddedJSONUnits(typed[key], path+"/"+jsonPointerEscape(key), depth)...)
+		}
+	case []any:
+		for index, child := range typed {
+			units = append(units, embeddedJSONUnits(child, path+"/"+strconv.Itoa(index), depth)...)
+		}
+	default:
+		if text, ok := typed.(string); ok {
+			if children, structured := decomposeStructuredString(text, depth); structured {
+				for _, child := range children {
+					child.Selector = map[string]any{"kind": "json-value-child", "pointer": path, "structure": child.Selector}
+					child.Payload = map[string]any{"path": path, "value": child.Payload}
+					units = append(units, child)
+				}
+				return units
+			}
+		}
+		encoded, _ := json.Marshal(typed)
+		units = append(units, structuredScalarUnit{
+			Kind: "parsed-embedded-json-value", Selector: map[string]any{"kind": "json-pointer", "pointer": path},
+			Payload: map[string]any{"path": path, "value": typed}, Text: scalarText(typed),
+			Excerpt: path + ": " + string(encoded),
+		})
+	}
+	return units
+}
+
+func keyValueLineUnits(value string, depth int) ([]structuredScalarUnit, bool) {
+	type parsedLine struct {
+		key, value, text string
+		start, end       int
+	}
+	var lines []parsedLine
+	offset := 0
+	for _, withNewline := range strings.SplitAfter(value, "\n") {
+		line := strings.TrimSuffix(withNewline, "\n")
+		line = strings.TrimSuffix(line, "\r")
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			colon := strings.IndexByte(trimmed, ':')
+			if colon <= 0 {
+				return nil, false
+			}
+			key := strings.TrimSpace(trimmed[:colon])
+			item := strings.TrimSpace(trimmed[colon+1:])
+			if !validStructuredKey(key) || item == "" {
+				return nil, false
+			}
+			start := offset + strings.Index(line, trimmed)
+			lines = append(lines, parsedLine{key: key, value: item, text: trimmed, start: start, end: start + len(trimmed)})
+		}
+		offset += len(withNewline)
+	}
+	if len(lines) < 2 {
+		return nil, false
+	}
+	units := make([]structuredScalarUnit, 0, len(lines))
+	for _, line := range lines {
+		if children, structured := decomposeStructuredString(line.value, depth+1); structured {
+			for _, child := range children {
+				child.Selector = map[string]any{"kind": "key-value-child", "key": line.key, "structure": child.Selector}
+				child.Payload = map[string]any{"key": line.key, "value": child.Payload}
+				child.Text = line.key + ": " + child.Text
+				child.Excerpt = line.key + ": " + child.Excerpt
+				child.Start, child.End = line.start, line.end
+				units = append(units, child)
+			}
+			continue
+		}
+		units = append(units, structuredScalarUnit{
+			Kind: "parsed-key-value", Selector: map[string]any{"kind": "key-value", "key": line.key},
+			Payload: map[string]any{"key": line.key, "value": line.value}, Text: line.text,
+			Excerpt: line.text, Start: line.start, End: line.end,
+		})
+	}
+	return units, true
+}
+
+func validStructuredKey(value string) bool {
+	if value == "" || len([]rune(value)) > 120 {
+		return false
+	}
+	hasLetterOrDigit := false
+	for _, character := range value {
+		if unicode.IsLetter(character) || unicode.IsDigit(character) {
+			hasLetterOrDigit = true
+			continue
+		}
+		switch character {
+		case ' ', '\t', '-', '_', '.', '/', '(', ')', '#':
+		default:
+			return false
+		}
+	}
+	return hasLetterOrDigit
 }
 
 func parseMarkdownFragments(text string) []parsedSilverFragment {
@@ -333,7 +636,8 @@ func parseMarkdownFragments(text string) []parsedSilverFragment {
 			return
 		}
 		start, trimmedEnd, value := trimmedSilverRange(text, paragraphStart, end)
-		fragments = append(fragments, fragmentWithTextRange("text-block", start, trimmedEnd, value, map[string]any{"text": value}))
+		fragment := fragmentWithTextRange("text-block", start, trimmedEnd, value, map[string]any{"text": value})
+		fragments = append(fragments, expandStructuredTextFragment(fragment)...)
 		paragraph = nil
 		paragraphStart = -1
 	}
@@ -378,7 +682,8 @@ func parseGenericFragments(text string) []parsedSilverFragment {
 		}
 		trimmedStart, trimmedEnd, value := trimmedSilverRange(text, start, end)
 		if value != "" {
-			fragments = append(fragments, fragmentWithTextRange("text-block", trimmedStart, trimmedEnd, value, map[string]any{"text": value}))
+			fragment := fragmentWithTextRange("text-block", trimmedStart, trimmedEnd, value, map[string]any{"text": value})
+			fragments = append(fragments, expandStructuredTextFragment(fragment)...)
 		}
 		if end == len(text) {
 			break
@@ -386,6 +691,30 @@ func parseGenericFragments(text string) []parsedSilverFragment {
 		start = end + 2
 	}
 	return splitLargeFragments(fragments)
+}
+
+func expandStructuredTextFragment(fragment parsedSilverFragment) []parsedSilverFragment {
+	units, ok := decomposeStructuredString(fragment.Text, 0)
+	if !ok {
+		return []parsedSilverFragment{fragment}
+	}
+	fragment.StructuralOnly = true
+	fragments := []parsedSilverFragment{fragment}
+	start, _ := fragment.Selector["start_byte"].(int)
+	end, _ := fragment.Selector["end_byte"].(int)
+	for index, unit := range units {
+		selector := map[string]any{"kind": "text-block-child", "start_byte": start, "end_byte": end, "child": index + 1, "structure": unit.Selector}
+		if unit.End > unit.Start {
+			selector["kind"] = "utf8-byte-range"
+			selector["start_byte"] = start + unit.Start
+			selector["end_byte"] = start + unit.End
+		}
+		fragments = append(fragments, parsedSilverFragment{
+			Kind: unit.Kind, Selector: selector, Excerpt: truncate(unit.Excerpt, 240),
+			Payload: unit.Payload, Text: unit.Text,
+		})
+	}
+	return fragments
 }
 
 func trimmedSilverRange(text string, start, end int) (int, int, string) {
@@ -399,7 +728,8 @@ func trimmedSilverRange(text string, start, end int) (int, int, string) {
 func splitLargeFragments(input []parsedSilverFragment) []parsedSilverFragment {
 	var output []parsedSilverFragment
 	for _, fragment := range input {
-		if len(fragment.Text) <= silverMaximumBatchBytes {
+		if len(fragment.Text) <= silverMaximumBatchBytes ||
+			(fragment.Kind != "text-block" && fragment.Kind != "markdown-heading") {
 			output = append(output, fragment)
 			continue
 		}
@@ -416,7 +746,10 @@ func splitLargeFragments(input []parsedSilverFragment) []parsedSilverFragment {
 				end = size
 			}
 			part := remaining[:end]
-			output = append(output, fragmentWithTextRange(fragment.Kind, base+consumed, base+consumed+len(part), part, map[string]any{"text": part}))
+			partFragment := fragmentWithTextRange(fragment.Kind, base+consumed, base+consumed+len(part), part, map[string]any{"text": part})
+			partFragment.Context = fragment.Context
+			partFragment.StructuralOnly = fragment.StructuralOnly
+			output = append(output, partFragment)
 			remaining = remaining[end:]
 			consumed += end
 		}

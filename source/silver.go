@@ -20,22 +20,26 @@ import (
 )
 
 const (
-	silverSchemaVersion     = 1
-	silverProcessorID       = "source.silver.deterministic-ingestion"
-	silverExtractionID      = "source.silver.format-extraction"
-	silverExtractionVersion = "1"
-	silverResolverID        = "source.silver.candidate-resolver"
-	silverResolverVersion   = "2"
-	silverProcessorVersion  = "1-" + silverExtractionVersion
-	silverKnowledgeID       = "source.silver.knowledge"
-	silverKnowledgeVersion  = "1-" + semanticProcessorVersion + "-" + silverResolverVersion
-	silverJobProcessorID    = "source.silver.processing"
-	silverJobVersion        = silverProcessorVersion + "-" + silverKnowledgeVersion
-	silverResolutionMinimum = 0.70
-	silverMaximumBatchBytes = 4096
-	silverInspectionBytes   = 8192
-	silverMaximumInputBytes = 8 * 1024 * 1024
-	silverReconcileInterval = time.Second
+	silverSchemaVersion            = 1
+	silverProcessorID              = "source.silver.deterministic-ingestion"
+	silverExtractionID             = "source.silver.format-extraction"
+	silverExtractionVersion        = "2"
+	silverResolverID               = "source.silver.candidate-resolver"
+	silverResolverVersion          = "2"
+	silverProcessorVersion         = "1-" + silverExtractionVersion
+	silverKnowledgeID              = "source.silver.knowledge"
+	silverKnowledgeVersion         = "1-" + semanticProcessorVersion + "-" + silverResolverVersion
+	silverJobProcessorID           = "source.silver.processing"
+	silverJobVersion               = silverProcessorVersion + "-" + silverKnowledgeVersion
+	silverResolutionMinimum        = 0.70
+	silverMaximumBatchBytes        = 4096
+	silverInspectionBytes          = 8192
+	silverMaximumInputBytes        = 8 * 1024 * 1024
+	silverMaximumContextFields     = 8
+	silverMaximumContextCandidates = 32
+	silverMaximumContextRunes      = 128
+	silverMaximumStructureDepth    = 4
+	silverReconcileInterval        = time.Second
 
 	silverExtractionCompleted = "completed"
 	silverExtractionSkipped   = "skipped"
@@ -73,12 +77,15 @@ type silverEvidence struct {
 }
 
 type silverObservation struct {
-	ID          string          `json:"id"`
-	Kind        string          `json:"kind"`
-	Payload     json.RawMessage `json:"payload"`
-	EvidenceIDs []string        `json:"evidence_ids"`
-	Confidence  *float64        `json:"confidence,omitempty"`
-	Producer    silverProducer  `json:"producer"`
+	ID             string               `json:"id"`
+	Kind           string               `json:"kind"`
+	Payload        json.RawMessage      `json:"payload"`
+	EvidenceIDs    []string             `json:"evidence_ids"`
+	Text           string               `json:"text,omitempty"`
+	Context        *parsedSilverContext `json:"context,omitempty"`
+	StructuralOnly bool                 `json:"structural_only,omitempty"`
+	Confidence     *float64             `json:"confidence,omitempty"`
+	Producer       silverProducer       `json:"producer"`
 }
 
 type silverEntity struct {
@@ -925,7 +932,10 @@ func deterministicSilverDataset(job silverJob, parsed silverParseResult, model s
 		if err != nil {
 			return silverDataset{}, err
 		}
-		observation := silverObservation{Kind: fragment.Kind, Payload: payload, EvidenceIDs: []string{evidence.ID}, Producer: producer}
+		observation := silverObservation{
+			Kind: fragment.Kind, Payload: payload, EvidenceIDs: []string{evidence.ID}, Text: fragment.Text,
+			Context: fragment.Context, StructuralOnly: fragment.StructuralOnly, Producer: producer,
+		}
 		observation.ID = observationID(observation)
 		dataset.Evidence = append(dataset.Evidence, evidence)
 		dataset.Observations = append(dataset.Observations, observation)
@@ -954,12 +964,13 @@ func parsedFragmentsFromDataset(dataset silverDataset) ([]parsedSilverFragment, 
 		if err := decoder.Decode(&payload); err != nil || requireJSONEOF(decoder) != nil {
 			return nil, fmt.Errorf("decode deterministic observation %s", observation.ID)
 		}
-		text := ""
-		if observation.Kind != "parsed-table-header" {
+		text := observation.Text
+		if text == "" && !observation.StructuralOnly && observation.Kind != "parsed-table-header" {
 			text = deterministicFragmentText(observation.Kind, payload)
 		}
 		fragments = append(fragments, parsedSilverFragment{
 			Kind: observation.Kind, Selector: item.Selector, Excerpt: item.Excerpt, Payload: payload, Text: text,
+			Context: observation.Context, StructuralOnly: observation.StructuralOnly,
 		})
 	}
 	return fragments, nil
@@ -1419,12 +1430,18 @@ func appendSortedValues[T any](values map[string]T, destination *[]T) {
 
 func observationID(observation silverObservation) string {
 	return stableID("source-silver-observation", struct {
-		Kind       string          `json:"kind"`
-		Payload    json.RawMessage `json:"payload"`
-		Evidence   []string        `json:"evidence"`
-		Confidence *float64        `json:"confidence,omitempty"`
-		Producer   silverProducer  `json:"producer"`
-	}{observation.Kind, observation.Payload, observation.EvidenceIDs, observation.Confidence, observation.Producer})
+		Kind           string               `json:"kind"`
+		Payload        json.RawMessage      `json:"payload"`
+		Evidence       []string             `json:"evidence"`
+		Text           string               `json:"text,omitempty"`
+		Context        *parsedSilverContext `json:"context,omitempty"`
+		StructuralOnly bool                 `json:"structural_only,omitempty"`
+		Confidence     *float64             `json:"confidence,omitempty"`
+		Producer       silverProducer       `json:"producer"`
+	}{
+		observation.Kind, observation.Payload, observation.EvidenceIDs, observation.Text, observation.Context,
+		observation.StructuralOnly, observation.Confidence, observation.Producer,
+	})
 }
 
 func stableID(prefix string, value any) string {

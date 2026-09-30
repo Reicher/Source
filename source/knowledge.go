@@ -16,10 +16,12 @@ type silverSemanticBatch struct {
 
 func (f parsedSilverFragment) identity() string {
 	value, _ := json.Marshal(struct {
-		Kind     string         `json:"kind"`
-		Selector map[string]any `json:"selector"`
-		Payload  any            `json:"payload"`
-	}{f.Kind, f.Selector, f.Payload})
+		Kind           string               `json:"kind"`
+		Selector       map[string]any       `json:"selector"`
+		Payload        any                  `json:"payload"`
+		Context        *parsedSilverContext `json:"context,omitempty"`
+		StructuralOnly bool                 `json:"structural_only,omitempty"`
+	}{f.Kind, f.Selector, f.Payload, f.Context, f.StructuralOnly})
 	return string(value)
 }
 
@@ -64,7 +66,7 @@ func buildSilverBatches(job silverJob, fragments []parsedSilverFragment, targetB
 		if err != nil {
 			return nil, err
 		}
-		semanticFragment := strings.TrimSpace(fragment.Text) != ""
+		semanticFragment := !fragment.StructuralOnly && strings.TrimSpace(fragment.Text) != ""
 		if len(current) > 0 && semanticFragment && len(encoded) > targetBytes {
 			flush()
 			candidate = []parsedSilverFragment{fragment}
@@ -111,8 +113,9 @@ func silverEvidenceForFragment(job silverJob, fragment parsedSilverFragment) sil
 
 func semanticInputForFragments(job silverJob, fragments []parsedSilverFragment) (semanticInput, error) {
 	input := semanticInput{Title: job.Title, Mime: job.Mime, Fragments: []semanticFragmentInput{}}
+	contexts := map[string]bool{}
 	for _, fragment := range fragments {
-		if strings.TrimSpace(fragment.Text) == "" {
+		if fragment.StructuralOnly || strings.TrimSpace(fragment.Text) == "" {
 			continue
 		}
 		payload, err := json.Marshal(fragment.Payload)
@@ -123,9 +126,24 @@ func semanticInputForFragments(job silverJob, fragments []parsedSilverFragment) 
 		if err != nil {
 			return semanticInput{}, err
 		}
+		contextID := ""
+		if fragment.Context != nil {
+			contextID = fragment.Context.ID
+			if !contexts[contextID] {
+				contextPayload, err := json.Marshal(fragment.Context.Payload)
+				if err != nil {
+					return semanticInput{}, err
+				}
+				input.Contexts = append(input.Contexts, semanticContextInput{
+					ID: fragment.Context.ID, Kind: fragment.Context.Kind,
+					Selector: fragment.Context.Selector, Payload: contextPayload,
+				})
+				contexts[contextID] = true
+			}
+		}
 		input.Fragments = append(input.Fragments, semanticFragmentInput{
 			ID: silverEvidenceForFragment(job, fragment).ID, Kind: fragment.Kind,
-			Selector: fragment.Selector, Payload: payload,
+			Selector: fragment.Selector, ParentContextID: contextID, Payload: payload,
 		})
 	}
 	return input, nil
@@ -141,7 +159,10 @@ func extractSilverBatch(ctx context.Context, job silverJob, fragments []parsedSi
 		if err != nil {
 			return silverCheckpoint{}, err
 		}
-		observation := silverObservation{Kind: fragment.Kind, Payload: payload, EvidenceIDs: []string{evidence.ID}, Producer: producer}
+		observation := silverObservation{
+			Kind: fragment.Kind, Payload: payload, EvidenceIDs: []string{evidence.ID}, Text: fragment.Text,
+			Context: fragment.Context, StructuralOnly: fragment.StructuralOnly, Producer: producer,
+		}
 		observation.ID = observationID(observation)
 		checkpoint.Evidence = append(checkpoint.Evidence, evidence)
 		checkpoint.Observations = append(checkpoint.Observations, observation)
@@ -172,7 +193,7 @@ func extractSilverBatch(ctx context.Context, job silverJob, fragments []parsedSi
 	}
 	semanticFragments := make([]parsedSilverFragment, 0, len(fragments))
 	for _, fragment := range fragments {
-		if strings.TrimSpace(fragment.Text) != "" {
+		if !fragment.StructuralOnly && strings.TrimSpace(fragment.Text) != "" {
 			semanticFragments = append(semanticFragments, fragment)
 		}
 	}

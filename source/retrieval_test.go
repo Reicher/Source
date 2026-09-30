@@ -280,6 +280,86 @@ func TestRetrievalKeepsDistinctObservationsThatShareEvidence(t *testing.T) {
 	}
 }
 
+func TestRetrievalKeepsCompoundCSVContentAtRecordGranularity(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	content := "Name,Notes\nJonas Sandvall,\"Birthday: 1986-08-27\nPhone: 073-512 61 77\nCity: Stockholm\"\n"
+	item := putSilverBronze(t, bronze, "67676767-6767-4676-8676-676767676767", "contacts.csv", "text/csv", 1, content)
+	silver, err := newSilverServiceWithModel(root+"/silver", bronze, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	silver.processNext(context.Background())
+	chunks, err := retrievalChunksFromSnapshot(silver.snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := chunks[item.ID]
+	if len(values) != 2 {
+		t.Fatalf("atomic Evidence fragmented or duplicated retrieval chunks: %+v", values)
+	}
+	var row *retrievalChunk
+	for index := range values {
+		if values[index].Selector["row"] == 2 {
+			row = &values[index]
+		}
+	}
+	if row == nil || row.Selector["kind"] != "table-row" {
+		t.Fatalf("record retrieval chunk lost row provenance: %+v", values)
+	}
+	for _, expected := range []string{"Jonas Sandvall", "Birthday", "1986-08-27", "Phone", "073-512 61 77", "Stockholm"} {
+		if !strings.Contains(row.Text, expected) {
+			t.Fatalf("retrieval lost %q from compound CSV record: %q", expected, row.Text)
+		}
+	}
+}
+
+func TestRetrievalExcludesEmbeddedJSONAtomicChildren(t *testing.T) {
+	tests := []struct {
+		name, title, mime, content string
+		wantChunks                 int
+	}{
+		{"json string", "record.json", "application/json", `{"name":"Jonas","metadata":"{\"country\":\"Sweden\",\"active\":true}"}`, 2},
+		{"CSV cell", "record.csv", "text/csv", "Name,Metadata\nJonas,\"{\"\"country\"\":\"\"Sweden\"\",\"\"active\"\":true}\"\n", 2},
+		{"text block", "record.txt", "text/plain", `{"country":"Sweden","active":true}`, 1},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			bronze := newBronzeStore(root + "/bronze")
+			id := fmt.Sprintf("78787878-7878-4787-8787-7878787878%02d", index)
+			item := putSilverBronze(t, bronze, id, test.title, test.mime, 1, test.content)
+			silver, err := newSilverServiceWithModel(root+"/silver", bronze, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			silver.processNext(context.Background())
+			snapshot := silver.snapshot()
+			atomicObservationIDs := map[string]bool{}
+			for _, observation := range snapshot.Observations {
+				if observation.Kind == "parsed-embedded-json-value" {
+					atomicObservationIDs[observation.ID] = true
+				}
+			}
+			if len(atomicObservationIDs) == 0 {
+				t.Fatalf("fixture did not produce embedded JSON children: %+v", snapshot.Observations)
+			}
+			chunks, err := retrievalChunksFromSnapshot(snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(chunks[item.ID]) != test.wantChunks {
+				t.Fatalf("embedded JSON changed retrieval granularity: got=%+v want=%d", chunks[item.ID], test.wantChunks)
+			}
+			for _, chunk := range chunks[item.ID] {
+				if atomicObservationIDs[chunk.ObservationID] {
+					t.Fatalf("embedded JSON child became a retrieval chunk: %+v", chunk)
+				}
+			}
+		})
+	}
+}
+
 func TestRetrievalSplitsOversizedObservationsBeforeEmbedding(t *testing.T) {
 	root := t.TempDir()
 	_, silver, item := publishedRetrievalFixture(t, root)
