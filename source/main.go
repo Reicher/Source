@@ -102,7 +102,7 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	lanHandler, err := identity.newLanHandler(ctx)
+	lanHandler, workersDone, err := identity.newLanHandler(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -123,7 +123,10 @@ func main() {
 		}
 	}()
 	log.Printf("Source HTTPS on %s, advertised via mDNS", lan.Addr())
-	if err := lanServer.ServeTLS(lan, identity.certPath, identity.keyPath); !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal(err)
+	serveErr := lanServer.ServeTLS(lan, identity.certPath, identity.keyPath)
+	stop()
+	<-workersDone
+	if !errors.Is(serveErr, http.ErrServerClosed) {
+		log.Fatal(serveErr)
 	}
 }

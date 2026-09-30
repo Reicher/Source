@@ -87,8 +87,10 @@ func TestRetrievalWorkerMarksRetryAsRebuilding(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	defer retrieval.close()
+	defer func() {
+		cancel()
+		_ = retrieval.close()
+	}()
 	retrieval.start(ctx)
 
 	sawRetryBuilding := false
@@ -119,8 +121,10 @@ func TestRetrievalWorkerContainsRepresentationPanics(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	defer retrieval.close()
+	defer func() {
+		cancel()
+		_ = retrieval.close()
+	}()
 	retrieval.start(ctx)
 
 	deadline := time.Now().Add(2 * time.Second)

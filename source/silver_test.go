@@ -875,6 +875,7 @@ func TestSilverReconcilesCommitAfterImmediateEnqueueFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	service.start(ctx)
+	t.Cleanup(service.wait)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if snapshot := service.snapshot(); len(snapshot.Sources) == 1 && snapshot.Sources[0].BronzeSourceID == item.ID {
@@ -1146,6 +1147,7 @@ func TestSilverWorkerContinuesWithoutSelfConnection(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	service.start(ctx)
+	t.Cleanup(service.wait)
 	putSilverBronze(t, bronze, "55555555-5555-4555-8555-555555555555", "background.txt", "text/plain", 1, "Ada Lovelace worked while Self was absent.")
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {

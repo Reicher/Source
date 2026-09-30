@@ -233,6 +233,7 @@ type silverService struct {
 	state              silverDiskState
 	persisted          []byte
 	wake               chan struct{}
+	worker             sync.WaitGroup
 	semantic           semanticModel
 	afterCheckpoint    func(string, int)
 	onPublish          func()
@@ -348,7 +349,9 @@ func newSilverServiceWithConfiguration(dir string, bronze *bronzeStore, model se
 }
 
 func (s *silverService) start(ctx context.Context) {
+	s.worker.Add(1)
 	go func() {
+		defer s.worker.Done()
 		ticker := time.NewTicker(silverReconcileInterval)
 		defer ticker.Stop()
 		for {
@@ -367,6 +370,8 @@ func (s *silverService) start(ctx context.Context) {
 	}()
 	s.signal()
 }
+
+func (s *silverService) wait() { s.worker.Wait() }
 
 func (s *silverService) signal() {
 	select {
