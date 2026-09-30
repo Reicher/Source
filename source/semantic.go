@@ -264,6 +264,10 @@ func (m *httpSemanticModel) identity() (string, string) { return m.modelID, m.re
 func (m *httpSemanticModel) maximumInputBytes() int     { return m.maximumInput }
 
 func (m *httpSemanticModel) extract(ctx context.Context, input semanticInput) (semanticResult, error) {
+	return m.extractWithResponseFormat(ctx, input, true)
+}
+
+func (m *httpSemanticModel) extractWithResponseFormat(ctx context.Context, input semanticInput, constrained bool) (semanticResult, error) {
 	content, err := json.Marshal(input)
 	if err != nil {
 		return semanticResult{}, err
@@ -286,7 +290,7 @@ func (m *httpSemanticModel) extract(ctx context.Context, input semanticInput) (s
 		},
 		Temperature:        0,
 		MaxTokens:          m.maximumOutput,
-		ResponseFormat:     map[string]any{"type": "json_object"},
+		ResponseFormat:     semanticResponseFormat(constrained),
 		ChatTemplateKwargs: map[string]any{"enable_thinking": false},
 	}
 	encoded, err := json.Marshal(requestBody)
@@ -313,6 +317,9 @@ func (m *httpSemanticModel) extract(ctx context.Context, input semanticInput) (s
 		)
 	}
 	if response.StatusCode != http.StatusOK {
+		if constrained && semanticSchemaUnsupported(response.StatusCode, body) {
+			return m.extractWithResponseFormat(ctx, input, false)
+		}
 		err := fmt.Errorf("Source model returned HTTP %d: %s", response.StatusCode, truncate(strings.TrimSpace(string(body)), 240))
 		if response.StatusCode != http.StatusRequestTimeout && response.StatusCode != http.StatusTooEarly &&
 			response.StatusCode != http.StatusTooManyRequests && response.StatusCode < 500 {
@@ -339,6 +346,66 @@ func (m *httpSemanticModel) extract(ctx context.Context, input semanticInput) (s
 	result.responseHash = responseHash
 	return result, nil
 }
+
+func semanticSchemaUnsupported(status int, body []byte) bool {
+	if status == http.StatusBadRequest || status == http.StatusUnprocessableEntity {
+		return true
+	}
+	message := strings.ToLower(string(body))
+	return status >= 500 && (strings.Contains(message, "response_format") ||
+		strings.Contains(message, "json_schema") || strings.Contains(message, "grammar"))
+}
+
+func semanticResponseFormat(constrained bool) map[string]any {
+	if !constrained {
+		return map[string]any{"type": "json_object"}
+	}
+	return map[string]any{"type": "json_schema", "schema": semanticResultJSONSchema}
+}
+
+var semanticResultJSONSchema = map[string]any{
+	"type":                 "object",
+	"additionalProperties": false,
+	"required":             []string{"fragments"},
+	"properties": map[string]any{
+		"fragments": map[string]any{
+			"type": "array", "maxItems": semanticMaximumFragments,
+			"items": map[string]any{
+				"type": "object", "additionalProperties": false,
+				"required": []string{"fragment_id", "entities", "attributes", "relationships"},
+				"properties": map[string]any{
+					"fragment_id": map[string]any{"type": "string"},
+					"entities": map[string]any{"type": "array", "maxItems": semanticMaximumCandidates, "items": map[string]any{
+						"type": "object", "additionalProperties": false,
+						"required": []string{"ref", "label", "confidence"},
+						"properties": map[string]any{
+							"ref": map[string]any{"type": "string"}, "label": map[string]any{"type": "string"},
+							"type": map[string]any{"type": "string"}, "confidence": semanticConfidenceJSONSchema,
+						},
+					}},
+					"attributes": map[string]any{"type": "array", "maxItems": semanticMaximumCandidates, "items": map[string]any{
+						"type": "object", "additionalProperties": false,
+						"required": []string{"subject_ref", "predicate", "value", "confidence"},
+						"properties": map[string]any{
+							"subject_ref": map[string]any{"type": "string"}, "predicate": map[string]any{"type": "string"},
+							"value": map[string]any{"type": []string{"string", "number", "boolean"}}, "confidence": semanticConfidenceJSONSchema,
+						},
+					}},
+					"relationships": map[string]any{"type": "array", "maxItems": semanticMaximumCandidates, "items": map[string]any{
+						"type": "object", "additionalProperties": false,
+						"required": []string{"subject_ref", "predicate", "object_ref", "confidence"},
+						"properties": map[string]any{
+							"subject_ref": map[string]any{"type": "string"}, "predicate": map[string]any{"type": "string"},
+							"object_ref": map[string]any{"type": "string"}, "confidence": semanticConfidenceJSONSchema,
+						},
+					}},
+				},
+			},
+		},
+	},
+}
+
+var semanticConfidenceJSONSchema = map[string]any{"type": "number", "minimum": 0, "maximum": 1}
 
 type semanticMessage struct {
 	Role    string `json:"role"`

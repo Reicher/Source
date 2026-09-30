@@ -110,7 +110,9 @@ func TestSilverDataRevisionChangesOnlyWithAuthoritativeSnapshot(t *testing.T) {
 	if !service.processNext(context.Background()) {
 		t.Fatal("Silver worker unexpectedly stopped")
 	}
-	if snapshot := service.snapshot(); snapshot.Revision != 1 || len(snapshot.Sources) != 1 {
+	if snapshot := service.snapshot(); snapshot.Revision != 2 || len(snapshot.Sources) != 1 ||
+		snapshot.Sources[0].Representations.Deterministic.State != silverRepresentationReady ||
+		snapshot.Sources[0].Representations.Knowledge.State != silverRepresentationReady {
 		t.Fatalf("published data did not advance authoritative revision: %+v", snapshot)
 	}
 }
@@ -163,8 +165,10 @@ func TestSilverQueueAndCheckpointsSurviveRestart(t *testing.T) {
 	if service.processNext(ctx) {
 		t.Fatal("cancelled processing unexpectedly reported more work")
 	}
-	if got := service.snapshot(); len(got.Sources) != 0 || len(got.Evidence) != 0 {
-		t.Fatalf("partial checkpoints became authoritative: %+v", got)
+	if got := service.snapshot(); len(got.Sources) != 1 || len(got.Evidence) != 2 || len(got.Entities) != 0 ||
+		got.Sources[0].Representations.Deterministic.State != silverRepresentationReady ||
+		got.Sources[0].Representations.Knowledge.State != silverRepresentationProcessing {
+		t.Fatalf("deterministic Silver was not independently published before knowledge completed: %+v", got)
 	}
 	if len(service.state.Jobs[0].Checkpoints) != 1 {
 		t.Fatalf("checkpoint was not persisted: %+v", service.state.Jobs[0])
@@ -176,6 +180,12 @@ func TestSilverQueueAndCheckpointsSurviveRestart(t *testing.T) {
 	}
 	if restarted.state.Jobs[0].State != "queued" || len(restarted.state.Jobs[0].Checkpoints) != 1 {
 		t.Fatalf("restart did not recover queued checkpoint: %+v", restarted.state.Jobs[0])
+	}
+	restartedSnapshot := restarted.snapshot()
+	if len(restartedSnapshot.Sources) != 1 ||
+		restartedSnapshot.Sources[0].Representations.Deterministic.State != silverRepresentationReady ||
+		restartedSnapshot.Sources[0].Representations.Knowledge.State != silverRepresentationProcessing {
+		t.Fatalf("restart did not preserve independent processor states: %+v", restartedSnapshot)
 	}
 	processed := 0
 	restarted.afterCheckpoint = func(_ string, _ int) { processed++ }
@@ -363,7 +373,7 @@ func TestSilverOversizedTextPublishesExplicitSkippedCoverage(t *testing.T) {
 	root := t.TempDir()
 	bronze := newBronzeStore(root + "/bronze")
 	content := strings.Repeat("x", silverMaximumInputBytes+1)
-	putSilverBronze(t, bronze, "16161616-1616-4161-8161-161616161616", "oversized.txt", "text/plain", 1, content)
+	item := putSilverBronze(t, bronze, "16161616-1616-4161-8161-161616161616", "oversized.txt", "text/plain", 1, content)
 	modelCalls := 0
 	model := testSemanticModel{id: "model", revision: "1", run: func(input semanticInput) (semanticResult, error) {
 		modelCalls++
@@ -384,6 +394,12 @@ func TestSilverOversizedTextPublishesExplicitSkippedCoverage(t *testing.T) {
 	if coverage.ExtractionState != silverExtractionSkipped || coverage.SemanticState != silverSemanticSkipped ||
 		coverage.SemanticSkipReason != silverSkipSourceTooLarge {
 		t.Fatalf("oversized source coverage: %+v", coverage)
+	}
+	service.mu.Lock()
+	needed := service.needsReconcileLocked(item)
+	service.mu.Unlock()
+	if needed {
+		t.Fatal("unsupported deterministic input was needlessly requeued for knowledge")
 	}
 }
 
@@ -409,7 +425,8 @@ func TestSilverInputLimitChangeRequeuesPartialSemanticCoverage(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := expanded.snapshot()
-	if len(before.Sources) != 1 || !before.Sources[0].Stale || len(before.Processing) != 1 {
+	if len(before.Sources) != 1 || before.Sources[0].Stale || len(before.Processing) != 1 ||
+		before.Processing[0].Representation != "knowledge" {
 		t.Fatalf("input-limit change did not queue replacement work: %+v", before)
 	}
 	expanded.processNext(context.Background())
@@ -785,7 +802,7 @@ func TestSilverFailedSaveDoesNotExposeUnpublishedGeneration(t *testing.T) {
 	root := t.TempDir()
 	bronze := newBronzeStore(filepath.Join(root, "bronze"))
 	putSilverBronze(t, bronze, "77777777-7777-4777-8777-777777777777", "note.txt", "text/plain", 1, "Ada Lovelace wrote notes.")
-	service, err := newSilverService(filepath.Join(root, "silver"), bronze)
+	service, err := newSilverServiceWithModel(filepath.Join(root, "silver"), bronze, namedPeopleTestModel())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -798,11 +815,12 @@ func TestSilverFailedSaveDoesNotExposeUnpublishedGeneration(t *testing.T) {
 		service.path = filepath.Join(blocker, "state.json")
 	}
 	service.processNext(context.Background())
-	if snapshot := service.snapshot(); len(snapshot.Sources) != 0 || len(snapshot.Evidence) != 0 {
-		t.Fatalf("failed publication became authoritative: %+v", snapshot)
+	if snapshot := service.snapshot(); len(snapshot.Sources) != 1 || len(snapshot.Evidence) != 1 ||
+		len(snapshot.Entities) != 0 || snapshot.Sources[0].Representations.Deterministic.State != silverRepresentationReady {
+		t.Fatalf("failed knowledge publication damaged deterministic Silver: %+v", snapshot)
 	}
 	service.path = originalPath
-	restarted, err := newSilverService(filepath.Join(root, "silver"), bronze)
+	restarted, err := newSilverServiceWithModel(filepath.Join(root, "silver"), bronze, namedPeopleTestModel())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1028,6 +1046,20 @@ func TestSilverEntityAggregatesSourcesAndDeletionRemovesDerivedData(t *testing.T
 	snapshot = service.snapshot()
 	if len(snapshot.Sources) != 1 || snapshot.Sources[0].BronzeSourceID != second.ID || len(snapshot.Claims) != 1 {
 		t.Fatalf("deletion left authoritative derived records: %+v", snapshot)
+	}
+	deleted = second
+	deleted.Revision = 2
+	deleted.Modified = 2
+	deleted.Deleted = true
+	deleted.Hash = ""
+	deleted.Size = 0
+	if response := bronzeRequest(t, bronze, http.MethodDelete, deleted, nil); response.Code != http.StatusOK {
+		t.Fatalf("delete final Bronze: %d", response.Code)
+	}
+	snapshot = service.snapshot()
+	if len(snapshot.Sources) != 0 || len(snapshot.Evidence) != 0 || len(snapshot.Observations) != 0 ||
+		len(snapshot.Entities) != 0 || len(snapshot.Claims) != 0 {
+		t.Fatalf("final deletion left Silver representations behind: %+v", snapshot)
 	}
 }
 
