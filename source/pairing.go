@@ -270,6 +270,7 @@ func (i *identity) newLanHandler(ctx context.Context) (http.Handler, error) {
 	retrieval.start(ctx)
 	go func() {
 		<-ctx.Done()
+		silver.wait()
 		_ = retrieval.close()
 	}()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })

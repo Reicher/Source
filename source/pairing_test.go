@@ -62,8 +62,12 @@ func testLanHandler(t *testing.T, i *identity) http.Handler {
 	t.Cleanup(func() {
 		cancel()
 		i.mu.Lock()
+		jobs := i.jobs
 		retrieval := i.retrieval
 		i.mu.Unlock()
+		if jobs != nil && jobs.silver != nil {
+			jobs.silver.wait()
+		}
 		if retrieval != nil {
 			_ = retrieval.close()
 		}

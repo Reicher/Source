@@ -42,13 +42,16 @@ const (
 var errRetrievalSchemaMismatch = errors.New("retrieval SQLite schema mismatch")
 
 type retrievalService struct {
-	db       *sql.DB
-	path     string
-	silver   *silverService
-	embedder Embedder
-	wake     chan struct{}
-	mu       sync.Mutex
-	status   retrievalStatus
+	db        *sql.DB
+	path      string
+	silver    *silverService
+	embedder  Embedder
+	wake      chan struct{}
+	worker    sync.WaitGroup
+	closeOnce sync.Once
+	closeErr  error
+	mu        sync.Mutex
+	status    retrievalStatus
 }
 
 type retrievalStatus struct {
@@ -276,10 +279,16 @@ func (s *retrievalService) initialize() error {
 	return nil
 }
 
-func (s *retrievalService) close() error { return s.db.Close() }
+func (s *retrievalService) close() error {
+	s.worker.Wait()
+	s.closeOnce.Do(func() { s.closeErr = s.db.Close() })
+	return s.closeErr
+}
 
 func (s *retrievalService) start(ctx context.Context) {
+	s.worker.Add(1)
 	go func() {
+		defer s.worker.Done()
 		ticker := time.NewTicker(retrievalReconcileInterval)
 		defer ticker.Stop()
 		for {
