@@ -522,8 +522,7 @@ func (s *silverService) knowledgeMatchesCurrent(source silverSource, item bronze
 	deterministic := source.Representations.Deterministic
 	knowledge := source.Representations.Knowledge
 	if deterministic.State == silverRepresentationSkipped {
-		return knowledge.State == silverRepresentationSkipped && knowledge.Producer == s.knowledgeProducer() &&
-			knowledge.InputIdentity == s.knowledgeInputIdentity(item)
+		return knowledge.State == silverRepresentationSkipped
 	}
 	if s.semantic == nil {
 		return representationComplete(knowledge.State) ||
@@ -676,12 +675,21 @@ func (s *silverService) enqueue(item bronzeItem) (bool, error) {
 }
 
 func (s *silverService) processNext(ctx context.Context) bool {
+	for {
+		processed, followUp := s.processOne(ctx)
+		if !processed || !followUp {
+			return processed
+		}
+	}
+}
+
+func (s *silverService) processOne(ctx context.Context) (bool, bool) {
 	s.mu.Lock()
 	if s.pendingPersistence {
 		if err := s.persistCurrentLocked(); err != nil {
 			s.statusError = "Silver pending job state storage failed: " + err.Error()
 			s.mu.Unlock()
-			return false
+			return false, false
 		}
 		s.pendingPersistence = false
 	}
@@ -694,7 +702,7 @@ func (s *silverService) processNext(ctx context.Context) bool {
 	}
 	if index < 0 {
 		s.mu.Unlock()
-		return false
+		return false, false
 	}
 	s.state.Jobs[index].State = "running"
 	s.state.Jobs[index].UpdatedAt = time.Now().UnixMilli()
@@ -703,7 +711,7 @@ func (s *silverService) processNext(ctx context.Context) bool {
 	if err := s.saveLocked(); err != nil {
 		s.statusError = "Silver job state storage failed: " + err.Error()
 		s.mu.Unlock()
-		return false
+		return false, false
 	}
 	s.mu.Unlock()
 
@@ -738,7 +746,7 @@ func (s *silverService) processNext(ctx context.Context) bool {
 	}
 	if err == nil && job.Representation == silverDeterministicRepresentation {
 		if reconcileErr := s.reconcile(); reconcileErr != nil {
-			return false
+			return false, false
 		}
 		s.mu.Lock()
 		knowledgeQueued := false
@@ -749,11 +757,9 @@ func (s *silverService) processNext(ctx context.Context) bool {
 			}
 		}
 		s.mu.Unlock()
-		if knowledgeQueued {
-			return s.processNext(ctx)
-		}
+		return ctx.Err() == nil, knowledgeQueued
 	}
-	return ctx.Err() == nil
+	return ctx.Err() == nil, false
 }
 
 func silverRetryDelay(attempt int) time.Duration {

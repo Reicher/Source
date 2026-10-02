@@ -539,6 +539,24 @@ func TestSilverOversizedTextPublishesExplicitSkippedCoverage(t *testing.T) {
 	if needed {
 		t.Fatal("unsupported deterministic input was needlessly requeued for knowledge")
 	}
+
+	changedModel, err := newSilverServiceWithModel(root+"/silver", bronze,
+		testSemanticModel{id: "replacement-model", revision: "2", maximum: 2048, run: func(input semanticInput) (semanticResult, error) {
+			modelCalls++
+			return emptySemanticResult(input), nil
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedModel.mu.Lock()
+	needed = changedModel.needsReconcileLocked(item)
+	changedModel.mu.Unlock()
+	if needed || changedModel.processNext(context.Background()) {
+		t.Fatal("semantic model change requeued deterministically skipped source")
+	}
+	if modelCalls != 0 {
+		t.Fatalf("semantic model received deterministically skipped source: calls=%d", modelCalls)
+	}
 }
 
 func TestSilverInputLimitChangeRequeuesPartialSemanticCoverage(t *testing.T) {
