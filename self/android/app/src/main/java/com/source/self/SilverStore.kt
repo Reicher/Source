@@ -17,22 +17,14 @@ data class SilverSource(
     val entityIds: List<String>,
     val claimIds: List<String>,
     val stale: Boolean = false,
-    val modelId: String? = null,
-    val modelRevision: String? = null,
-    val coverage: SilverCoverage? = null,
-    val representations: SilverRepresentations? = null,
-)
-
-data class SilverCoverage(
-    val extractionState: String,
-    val semanticState: String,
-    val semanticSkipReason: String?,
+    val representations: SilverRepresentations,
 )
 
 data class SilverRepresentation(
     val state: String,
     val processorId: String,
     val processorVersion: String,
+    val inputIdentity: String,
     val modelId: String? = null,
     val modelRevision: String? = null,
     val error: String? = null,
@@ -94,7 +86,7 @@ data class SilverProcessing(
     val totalBatches: Int,
     val error: String? = null,
     val retryable: Boolean = false,
-    val representation: String? = null,
+    val representation: String,
 ) {
     companion object {
         fun list(values: JSONArray): List<SilverProcessing> = values.objects().map { processing -> SilverProcessing(
@@ -102,7 +94,7 @@ data class SilverProcessing(
             processing.getInt("completed_batches"), processing.getInt("total_batches"),
             processing.optString("error").takeIf(String::isNotEmpty),
             processing.optBoolean("retryable", false),
-            processing.optString("representation").takeIf(String::isNotEmpty),
+            processing.getString("representation"),
         ) }
     }
 }
@@ -168,7 +160,7 @@ private fun SilverProcessing.persistenceJson(): JSONObject = JSONObject()
     .put("completed_batches", completedBatches)
     .put("total_batches", totalBatches)
     .put("retryable", retryable)
-    .also { value -> representation?.let { value.put("representation", it) } }
+    .put("representation", representation)
     .also { value -> error?.let { value.put("error", it) } }
 
 internal fun SourceStatus.persistenceJson(): JSONObject {
@@ -347,7 +339,7 @@ data class SilverSnapshot(
         val EMPTY = SilverSnapshot(0, emptyList(), emptyList(), emptyList(), emptyList(), emptyList(), emptyList())
 
         fun fromJson(value: JSONObject): SilverSnapshot {
-            require(value.getInt("schema_version") == 1) { "Unsupported Silver schema" }
+            require(value.getInt("schema_version") == 2) { "Unsupported Silver schema" }
             val jobs = value.optJSONObject("jobs")
             return SilverSnapshot(
                 value.getLong("revision"),
@@ -356,14 +348,7 @@ data class SilverSnapshot(
                     source.getString("title"), source.getString("mime"), source.strings("evidence_ids"),
                     source.strings("observation_ids"), source.strings("entity_ids"), source.strings("claim_ids"),
                     source.optBoolean("stale", false),
-                    source.optString("model_id").takeIf(String::isNotEmpty),
-                    source.optString("model_revision").takeIf(String::isNotEmpty),
-                    source.optJSONObject("coverage")?.let { coverage -> SilverCoverage(
-                        coverage.optString("extraction_state"),
-                        coverage.optString("semantic_state"),
-                        coverage.optString("semantic_skip_reason").takeIf(String::isNotEmpty),
-                    ) },
-                    source.optJSONObject("representations")?.let { representations -> SilverRepresentations(
+                    source.getJSONObject("representations").let { representations -> SilverRepresentations(
                         parseRepresentation(representations.getJSONObject("deterministic")),
                         parseRepresentation(representations.getJSONObject("knowledge")),
                     ) },
@@ -441,13 +426,13 @@ class SilverStore(context: Context) {
 
     private fun load(): SilverSnapshot {
         val snapshot = try {
-            SilverSnapshot.fromJson(JSONObject(file.openRead().bufferedReader().use { it.readText() }))
+            silverSnapshotFromPersistence(file.openRead().bufferedReader().use { it.readText() })
         } catch (_: FileNotFoundException) {
             SilverSnapshot.EMPTY
         }
         val status = try {
             sourceStatusFromPersistenceJson(JSONObject(statusFile.openRead().bufferedReader().use { it.readText() }))
-        } catch (_: FileNotFoundException) {
+        } catch (_: Exception) {
             return snapshot
         }
         return snapshot.withStatus(status)
@@ -465,10 +450,17 @@ class SilverStore(context: Context) {
     }
 }
 
+internal fun silverSnapshotFromPersistence(value: String): SilverSnapshot = try {
+    SilverSnapshot.fromJson(JSONObject(value))
+} catch (_: Exception) {
+    SilverSnapshot.EMPTY
+}
+
 private fun parseRepresentation(value: JSONObject): SilverRepresentation {
     val producer = value.getJSONObject("producer")
     return SilverRepresentation(
         value.getString("state"), producer.getString("processor_id"), producer.getString("processor_version"),
+        value.getString("input_identity"),
         producer.optString("model_id").takeIf(String::isNotEmpty),
         producer.optString("model_revision").takeIf(String::isNotEmpty),
         value.optString("error").takeIf(String::isNotEmpty),

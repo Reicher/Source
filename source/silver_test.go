@@ -41,6 +41,18 @@ func attachSilverQueue(service *silverService, bronze *bronzeStore) {
 	}
 }
 
+func requireSilverJob(t *testing.T, service *silverService, sourceID, representation string) *silverProcessorJob {
+	t.Helper()
+	for index := len(service.state.Jobs) - 1; index >= 0; index-- {
+		job := &service.state.Jobs[index]
+		if job.BronzeSourceID == sourceID && job.Representation == representation {
+			return job
+		}
+	}
+	t.Fatalf("missing %s job for %s: %+v", representation, sourceID, service.state.Jobs)
+	return nil
+}
+
 type testSemanticModel struct {
 	id, revision string
 	maximum      int
@@ -111,16 +123,18 @@ func TestSilverDataRevisionChangesOnlyWithAuthoritativeSnapshot(t *testing.T) {
 	if !service.processNext(context.Background()) {
 		t.Fatal("Silver worker unexpectedly stopped")
 	}
-	if snapshot := service.snapshot(); snapshot.Revision != 2 || len(snapshot.Sources) != 1 ||
+	if snapshot := service.snapshot(); snapshot.Revision != 3 || len(snapshot.Sources) != 1 ||
 		snapshot.Sources[0].Representations.Deterministic.State != silverRepresentationReady ||
 		snapshot.Sources[0].Representations.Knowledge.State != silverRepresentationReady {
 		t.Fatalf("published data did not advance authoritative revision: %+v", snapshot)
 	}
 }
 
-func TestSilverDataRevisionMigratesFromExistingState(t *testing.T) {
+func TestSilverObsoleteDiskSchemaRebuildsWithoutTouchingBronze(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "silver")
+	bronze := newBronzeStore(filepath.Join(root, "bronze"))
+	item := putSilverBronze(t, bronze, "10101010-1010-4010-8010-101010101010", "kept.txt", "text/plain", 1, "Bronze survives.")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -128,19 +142,26 @@ func TestSilverDataRevisionMigratesFromExistingState(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(legacy), 0600); err != nil {
 		t.Fatal(err)
 	}
-	service, err := newSilverServiceWithModel(dir, newBronzeStore(filepath.Join(root, "bronze")), nil)
+	service, err := newSilverServiceWithModel(dir, bronze, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := service.snapshot().Revision; got != 9 {
-		t.Fatalf("migrated data revision: got %d, want 9", got)
+	if got := service.snapshot().Revision; got != 10 {
+		t.Fatalf("rebuilt data revision: got %d, want 10", got)
 	}
 	value, err := os.ReadFile(filepath.Join(dir, "state.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(value), `"data_revision":9`) || !strings.Contains(string(value), `"revision_model":1`) {
-		t.Fatalf("revision migration was not persisted: %s", value)
+	if !strings.Contains(string(value), `"schema_version":2`) || !strings.Contains(string(value), `"data_revision":10`) ||
+		strings.Contains(string(value), `"history"`) || strings.Contains(string(value), `"entities"`) {
+		t.Fatalf("obsolete derived state was not cleanly rebuilt: %s", value)
+	}
+	if current, err := bronze.load(item.ID); err != nil || current.Hash != item.Hash {
+		t.Fatalf("Silver rebuild changed Bronze: item=%+v err=%v", current, err)
+	}
+	if !service.processNext(context.Background()) || len(service.snapshot().Sources) != 1 {
+		t.Fatal("Silver was not rebuilt from preserved Bronze")
 	}
 }
 
@@ -171,16 +192,18 @@ func TestSilverQueueAndCheckpointsSurviveRestart(t *testing.T) {
 		got.Sources[0].Representations.Knowledge.State != silverRepresentationProcessing {
 		t.Fatalf("deterministic Silver was not independently published before knowledge completed: %+v", got)
 	}
-	if len(service.state.Jobs[0].Checkpoints) != 1 {
-		t.Fatalf("checkpoint was not persisted: %+v", service.state.Jobs[0])
+	knowledgeJob := requireSilverJob(t, service, item.ID, silverKnowledgeRepresentation)
+	if len(knowledgeJob.Checkpoints) != 1 {
+		t.Fatalf("checkpoint was not persisted: %+v", knowledgeJob)
 	}
 
 	restarted, err := newSilverServiceWithConfiguration(root+"/silver", bronze, namedPeopleTestModel(), silverConfiguration{SemanticBatchTargetBytes: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if restarted.state.Jobs[0].State != "queued" || len(restarted.state.Jobs[0].Checkpoints) != 1 {
-		t.Fatalf("restart did not recover queued checkpoint: %+v", restarted.state.Jobs[0])
+	restartedKnowledgeJob := requireSilverJob(t, restarted, item.ID, silverKnowledgeRepresentation)
+	if restartedKnowledgeJob.State != "queued" || len(restartedKnowledgeJob.Checkpoints) != 1 {
+		t.Fatalf("restart did not recover queued checkpoint: %+v", restartedKnowledgeJob)
 	}
 	restartedSnapshot := restarted.snapshot()
 	if len(restartedSnapshot.Sources) != 1 ||
@@ -241,16 +264,13 @@ func TestSilverInterruptedKnowledgeBecomesUnavailableWhenModelIsRemoved(t *testi
 	interrupted := rebuilding.snapshot()
 	if len(interrupted.Sources) != 1 ||
 		interrupted.Sources[0].Representations.Knowledge.State != silverRepresentationProcessing ||
-		interrupted.Sources[0].Coverage.SemanticState != silverSemanticCompleted || len(interrupted.Entities) == 0 {
+		len(interrupted.Entities) == 0 {
 		t.Fatalf("knowledge was not interrupted in processing: %+v", interrupted)
 	}
 
 	restarted, err := newSilverServiceWithConfiguration(root+"/silver", bronze, nil, silverConfiguration{SemanticBatchTargetBytes: 1})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if !restarted.processNext(context.Background()) {
-		t.Fatal("model-less reconciliation job did not run")
 	}
 	snapshot := restarted.snapshot()
 	if len(snapshot.Sources) != 1 {
@@ -259,9 +279,8 @@ func TestSilverInterruptedKnowledgeBecomesUnavailableWhenModelIsRemoved(t *testi
 	source := snapshot.Sources[0]
 	if source.Representations.Deterministic.State != silverRepresentationReady ||
 		source.Representations.Knowledge.State != silverRepresentationUnavailable ||
-		source.Coverage.SemanticState != silverSemanticSkipped ||
-		source.Coverage.SemanticSkipReason != silverSkipModelUnavailable ||
-		source.ModelID != "" || source.ModelRevision != "" || source.SemanticInputLimit != 0 {
+		source.Representations.Knowledge.Producer.ModelID != "" ||
+		source.Representations.Knowledge.Producer.ModelRevision != "" {
 		t.Fatalf("interrupted knowledge was not made unavailable: %+v", source)
 	}
 	if len(snapshot.Entities) != 0 || len(snapshot.Claims) != 0 {
@@ -306,7 +325,8 @@ func TestSilverCompletedKnowledgeIsPreservedWhenModelIsRemoved(t *testing.T) {
 	}
 	after := restarted.snapshot()
 	if len(after.Sources) != 1 || after.Sources[0].Representations.Knowledge.State != silverRepresentationReady ||
-		after.Sources[0].ModelID == "" || len(after.Entities) != len(before.Entities) || len(after.Claims) != len(before.Claims) {
+		after.Sources[0].Representations.Knowledge.Producer.ModelID == "" ||
+		len(after.Entities) != len(before.Entities) || len(after.Claims) != len(before.Claims) {
 		t.Fatalf("completed knowledge was not preserved after model removal: before=%+v after=%+v", before, after)
 	}
 	for _, job := range restarted.state.Jobs {
@@ -398,7 +418,7 @@ func TestSilverSemanticBatchesPreserveFragmentEvidenceMapping(t *testing.T) {
 }
 
 func TestSilverSemanticBatchBoundariesUseEncodedInputSize(t *testing.T) {
-	job := silverJob{BronzeSourceID: "source", BronzeContentSHA256: "hash", Title: "note.txt", Mime: "text/plain"}
+	job := silverProcessorJob{BronzeSourceID: "source", BronzeContentSHA256: "hash", Title: "note.txt", Mime: "text/plain"}
 	fragment := func(text string, start int) parsedSilverFragment {
 		return fragmentWithTextRange("text-block", start, start+len(text), text, map[string]any{"text": text})
 	}
@@ -426,7 +446,7 @@ func TestSilverSemanticBatchBoundariesUseEncodedInputSize(t *testing.T) {
 }
 
 func TestSilverSemanticBatchBoundariesRespectModelInputLimit(t *testing.T) {
-	job := silverJob{BronzeSourceID: "source", BronzeContentSHA256: "hash", Title: "note.txt", Mime: "text/plain"}
+	job := silverProcessorJob{BronzeSourceID: "source", BronzeContentSHA256: "hash", Title: "note.txt", Mime: "text/plain"}
 	first := fragmentWithTextRange("text-block", 0, 10, "fragment-a", map[string]any{"text": "fragment-a"})
 	second := fragmentWithTextRange("text-block", 1, 11, "fragment-b", map[string]any{"text": "fragment-b"})
 	single, err := semanticInputForFragments(job, []parsedSilverFragment{first})
@@ -470,7 +490,7 @@ func TestSilverOversizedSemanticFragmentKeepsDeterministicExtraction(t *testing.
 	if !service.processNext(context.Background()) {
 		t.Fatal("Silver job did not run")
 	}
-	job := service.state.Jobs[0]
+	job := *requireSilverJob(t, service, "15151515-1515-4151-8151-151515151515", silverKnowledgeRepresentation)
 	if job.State != "completed" || job.Attempts != 0 || modelCalls != 1 {
 		t.Fatalf("oversized fragment caused a retry or blocked later semantics: job=%+v calls=%d", job, modelCalls)
 	}
@@ -478,10 +498,11 @@ func TestSilverOversizedSemanticFragmentKeepsDeterministicExtraction(t *testing.
 	if len(snapshot.Sources) != 1 || len(snapshot.Evidence) != 2 || len(snapshot.Observations) != 2 {
 		t.Fatalf("deterministic Silver was not published for every fragment: %+v", snapshot)
 	}
-	coverage := snapshot.Sources[0].Coverage
-	if coverage.ExtractionState != silverExtractionCompleted || coverage.SemanticState != silverSemanticPartial ||
-		coverage.SemanticSkipReason != silverSkipFragmentTooLarge {
-		t.Fatalf("oversized fragment coverage was reported as complete: %+v", coverage)
+	representations := snapshot.Sources[0].Representations
+	if representations.Deterministic.State != silverRepresentationReady ||
+		representations.Knowledge.State != silverRepresentationPartial ||
+		representations.Knowledge.Error != silverSkipFragmentTooLarge {
+		t.Fatalf("oversized fragment representation was reported as complete: %+v", representations)
 	}
 }
 
@@ -506,10 +527,11 @@ func TestSilverOversizedTextPublishesExplicitSkippedCoverage(t *testing.T) {
 	if len(snapshot.Sources) != 1 || modelCalls != 0 {
 		t.Fatalf("oversized source was not published without semantic inference: sources=%+v calls=%d", snapshot.Sources, modelCalls)
 	}
-	coverage := snapshot.Sources[0].Coverage
-	if coverage.ExtractionState != silverExtractionSkipped || coverage.SemanticState != silverSemanticSkipped ||
-		coverage.SemanticSkipReason != silverSkipSourceTooLarge {
-		t.Fatalf("oversized source coverage: %+v", coverage)
+	representations := snapshot.Sources[0].Representations
+	if representations.Deterministic.State != silverRepresentationSkipped ||
+		representations.Deterministic.Error != silverSkipSourceTooLarge ||
+		representations.Knowledge.State != silverRepresentationSkipped {
+		t.Fatalf("oversized source representations: %+v", representations)
 	}
 	service.mu.Lock()
 	needed := service.needsReconcileLocked(item)
@@ -531,7 +553,7 @@ func TestSilverInputLimitChangeRequeuesPartialSemanticCoverage(t *testing.T) {
 		t.Fatal(err)
 	}
 	limited.processNext(context.Background())
-	if got := limited.snapshot().Sources[0].Coverage.SemanticState; got != silverSemanticPartial {
+	if got := limited.snapshot().Sources[0].Representations.Knowledge.State; got != silverRepresentationPartial {
 		t.Fatalf("limited model coverage = %q, want partial", got)
 	}
 
@@ -548,7 +570,7 @@ func TestSilverInputLimitChangeRequeuesPartialSemanticCoverage(t *testing.T) {
 	expanded.processNext(context.Background())
 	after := expanded.snapshot()
 	if len(after.Sources) != 1 || after.Sources[0].Stale ||
-		after.Sources[0].Coverage.SemanticState != silverSemanticCompleted {
+		after.Sources[0].Representations.Knowledge.State != silverRepresentationReady {
 		t.Fatalf("expanded model did not complete semantic coverage: %+v", after.Sources)
 	}
 }
@@ -581,7 +603,7 @@ func TestSilverSemanticBatchRetryKeepsCompletedCheckpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	service.processNext(context.Background())
-	job := &service.state.Jobs[0]
+	job := requireSilverJob(t, service, "14141414-1414-4141-8141-141414141414", silverKnowledgeRepresentation)
 	if job.State != "failed" || len(job.Checkpoints) != 1 {
 		t.Fatalf("failure did not retain the completed batch: %+v", job)
 	}
@@ -620,12 +642,13 @@ func TestSilverSemanticContractFailureRetriesBeforeSplitting(t *testing.T) {
 		t.Fatal(err)
 	}
 	service.processNext(context.Background())
-	if calls != semanticContractMaximumAttempts || service.state.Jobs[0].State != "completed" {
-		t.Fatalf("contract failure was not retried in place: calls=%d job=%+v", calls, service.state.Jobs[0])
+	job := requireSilverJob(t, service, "18181818-1818-4181-8181-181818181818", silverKnowledgeRepresentation)
+	if calls != semanticContractMaximumAttempts || job.State != "completed" {
+		t.Fatalf("contract failure was not retried in place: calls=%d job=%+v", calls, job)
 	}
-	coverage := service.snapshot().Sources[0].Coverage
-	if coverage.SemanticState != silverSemanticCompleted || coverage.SemanticSkipReason != "" {
-		t.Fatalf("successful contract retry lost complete coverage: %+v", coverage)
+	representation := service.snapshot().Sources[0].Representations.Knowledge
+	if representation.State != silverRepresentationReady || representation.Error != "" {
+		t.Fatalf("successful contract retry lost complete state: %+v", representation)
 	}
 }
 
@@ -665,7 +688,7 @@ func TestSilverSemanticContractFailureSplitsAndSourceOwnsSingleIdentity(t *testi
 	}
 	snapshot := service.snapshot()
 	if len(snapshot.Sources) != 1 || len(snapshot.Entities) != 4 ||
-		snapshot.Sources[0].Coverage.SemanticState != silverSemanticCompleted {
+		snapshot.Sources[0].Representations.Knowledge.State != silverRepresentationReady {
 		t.Fatalf("split contract recovery did not publish complete semantics: %+v", snapshot)
 	}
 	for _, evidence := range snapshot.Evidence {
@@ -716,9 +739,9 @@ func TestSilverSemanticContractRecoverySharesCandidateBudgetAcrossSplits(t *test
 	if len(snapshot.Entities) != semanticMaximumCandidates {
 		t.Fatalf("split recovery exceeded its aggregate candidate bound: entities=%d", len(snapshot.Entities))
 	}
-	coverage := snapshot.Sources[0].Coverage
-	if coverage.SemanticState != silverSemanticPartial || coverage.SemanticSkipReason != silverSkipModelContract {
-		t.Fatalf("candidate budget exhaustion did not preserve partial coverage: %+v", coverage)
+	representation := snapshot.Sources[0].Representations.Knowledge
+	if representation.State != silverRepresentationPartial || representation.Error != silverSkipModelContract {
+		t.Fatalf("candidate budget exhaustion did not preserve partial state: %+v", representation)
 	}
 }
 
@@ -756,14 +779,14 @@ func TestSilverSemanticContractFailureSkipsOnlyIrrecoverableFragment(t *testing.
 		calls["Bad fragment."] != semanticContractMaximumAttempts {
 		t.Fatalf("unexpected partial recovery calls: %+v", calls)
 	}
-	job := service.state.Jobs[0]
+	job := *requireSilverJob(t, service, "29292929-2929-4292-8292-292929292929", silverKnowledgeRepresentation)
 	snapshot := service.snapshot()
 	if job.State != "completed" || job.Attempts != 0 || len(snapshot.Processing) != 0 || len(snapshot.Sources) != 1 {
 		t.Fatalf("isolated contract failure blocked publication: job=%+v snapshot=%+v", job, snapshot)
 	}
-	coverage := snapshot.Sources[0].Coverage
-	if coverage.SemanticState != silverSemanticPartial || coverage.SemanticSkipReason != silverSkipModelContract {
-		t.Fatalf("omitted fragment was mistaken for successful empty semantics: %+v", coverage)
+	representation := snapshot.Sources[0].Representations.Knowledge
+	if representation.State != silverRepresentationPartial || representation.Error != silverSkipModelContract {
+		t.Fatalf("omitted fragment was mistaken for successful empty semantics: %+v", representation)
 	}
 	if len(snapshot.Evidence) != 2 || len(snapshot.Observations) != 2 {
 		t.Fatalf("partial semantics lost deterministic extraction: evidence=%d observations=%d", len(snapshot.Evidence), len(snapshot.Observations))
@@ -784,13 +807,13 @@ func TestSilverSingleContractFailurePublishesSkippedCoverage(t *testing.T) {
 		t.Fatal(err)
 	}
 	service.processNext(context.Background())
-	job := service.state.Jobs[0]
+	job := *requireSilverJob(t, service, "30303030-3030-4303-8303-303030303030", silverKnowledgeRepresentation)
 	if job.State != "completed" || job.Attempts != 0 || calls != semanticContractMaximumAttempts {
 		t.Fatalf("single contract failure did not complete with bounded attempts: calls=%d job=%+v", calls, job)
 	}
-	coverage := service.snapshot().Sources[0].Coverage
-	if coverage.SemanticState != silverSemanticSkipped || coverage.SemanticSkipReason != silverSkipModelContract {
-		t.Fatalf("single contract failure did not publish skipped coverage: %+v", coverage)
+	representation := service.snapshot().Sources[0].Representations.Knowledge
+	if representation.State != silverRepresentationSkipped || representation.Error != silverSkipModelContract {
+		t.Fatalf("single contract failure did not publish skipped state: %+v", representation)
 	}
 }
 
@@ -814,11 +837,11 @@ func TestSilverFailedFailureStatePersistenceRemainsObservable(t *testing.T) {
 	}
 	originalPath := service.path
 	service.processNext(context.Background())
-	job := service.state.Jobs[0]
+	job := *requireSilverJob(t, service, "19191919-1919-4191-8191-191919191919", silverKnowledgeRepresentation)
 	if job.State != "failed" || !service.pendingPersistence || service.snapshot().Error == "" {
 		t.Fatalf("failed-state storage error was hidden or left running: job=%+v error=%q", job, service.snapshot().Error)
 	}
-	service.state.Jobs[0].RetryAt = time.Now().Add(time.Hour).UnixMilli()
+	requireSilverJob(t, service, "19191919-1919-4191-8191-191919191919", silverKnowledgeRepresentation).RetryAt = time.Now().Add(time.Hour).UnixMilli()
 	service.path = originalPath
 	if err := service.reconcile(); err != nil {
 		t.Fatal(err)
@@ -827,8 +850,9 @@ func TestSilverFailedFailureStatePersistenceRemainsObservable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if restarted.state.Jobs[0].State != "failed" || !restarted.state.Jobs[0].Retryable {
-		t.Fatalf("failed state was not durably recovered: %+v", restarted.state.Jobs[0])
+	restartedJob := requireSilverJob(t, restarted, "19191919-1919-4191-8191-191919191919", silverKnowledgeRepresentation)
+	if restartedJob.State != "failed" || !restartedJob.Retryable {
+		t.Fatalf("failed state was not durably recovered: %+v", restartedJob)
 	}
 }
 
@@ -860,13 +884,15 @@ func TestSilverPendingFailurePersistenceBlocksLaterJobs(t *testing.T) {
 	if !service.processNext(context.Background()) {
 		t.Fatal("first job was not processed")
 	}
-	if service.state.Jobs[0].State != "failed" || !service.pendingPersistence {
+	firstKnowledge := requireSilverJob(t, service, "20202020-2020-4202-8202-202020202020", silverKnowledgeRepresentation)
+	if firstKnowledge.State != "failed" || !service.pendingPersistence {
 		t.Fatalf("first failure was not retained pending persistence: %+v", service.state.Jobs)
 	}
 	if service.processNext(context.Background()) {
 		t.Fatal("worker selected later work while failed state was not durable")
 	}
-	if service.state.Jobs[1].State != "queued" || calls != 1 {
+	secondKnowledge := requireSilverJob(t, service, "21212121-2121-4212-8212-212121212121", silverKnowledgeRepresentation)
+	if secondKnowledge.State != "queued" || calls != 1 {
 		t.Fatalf("later job advanced before storage recovered: jobs=%+v calls=%d", service.state.Jobs, calls)
 	}
 
@@ -877,7 +903,7 @@ func TestSilverPendingFailurePersistenceBlocksLaterJobs(t *testing.T) {
 	if !service.processNext(context.Background()) {
 		t.Fatal("later job did not run after storage recovered")
 	}
-	if service.state.Jobs[1].State != "completed" || calls != 2 {
+	if secondKnowledge.State != "completed" || calls != 2 {
 		t.Fatalf("later job did not complete after recovery: jobs=%+v calls=%d", service.state.Jobs, calls)
 	}
 }
@@ -940,7 +966,8 @@ func TestSilverFailedSaveDoesNotExposeUnpublishedGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(restarted.state.Jobs) != 1 || len(restarted.state.Jobs[0].Checkpoints) != 1 {
+	restartedJob := requireSilverJob(t, restarted, "77777777-7777-4777-8777-777777777777", silverKnowledgeRepresentation)
+	if len(restartedJob.Checkpoints) != 1 {
 		t.Fatalf("failed publication lost the durable checkpoint: %+v", restarted.state.Jobs)
 	}
 	if !restarted.processNext(context.Background()) || len(restarted.snapshot().Sources) != 1 {
@@ -959,9 +986,9 @@ func TestSilverKeepsPreviousProcessorGenerationVisibleAsStale(t *testing.T) {
 	service.processNext(context.Background())
 
 	prior := service.state.Published[item.ID]
-	prior.Source.ProcessorVersion = "1"
+	prior.Source.Representations.Deterministic.Producer.ProcessorVersion = "1"
 	service.state.Published[item.ID] = prior
-	service.state.Jobs[0].ProcessorVersion = "1"
+	service.state.Jobs[0].Producer.ProcessorVersion = "1"
 	if _, err := service.enqueue(item); err != nil {
 		t.Fatal(err)
 	}
@@ -974,7 +1001,7 @@ func TestSilverKeepsPreviousProcessorGenerationVisibleAsStale(t *testing.T) {
 	}
 	snapshot = service.snapshot()
 	if len(snapshot.Sources) != 1 || snapshot.Sources[0].Stale || len(snapshot.Processing) != 0 ||
-		snapshot.Sources[0].ProcessorVersion != silverProcessorVersion {
+		snapshot.Sources[0].Representations.Deterministic.Producer.ProcessorVersion != silverProcessorVersion {
 		t.Fatalf("replacement generation did not become current: %+v", snapshot)
 	}
 }
@@ -1032,10 +1059,11 @@ func TestSilverProcessingIdentityIncludesFormatMetadata(t *testing.T) {
 	item.Title = "data.json"
 	item.Mime = "application/json"
 	changed, err := service.enqueue(item)
-	if err != nil || !changed || len(service.state.Jobs) != 2 || service.state.Jobs[1].State != "queued" {
+	if err != nil || !changed || service.state.Jobs[len(service.state.Jobs)-1].State != "queued" {
 		t.Fatalf("format metadata did not produce distinct work: changed=%v err=%v jobs=%+v", changed, err, service.state.Jobs)
 	}
-	if service.state.Jobs[0].Title == service.state.Jobs[1].Title || service.state.Jobs[0].Mime == service.state.Jobs[1].Mime {
+	latest := service.state.Jobs[len(service.state.Jobs)-1]
+	if service.state.Jobs[0].Title == latest.Title || service.state.Jobs[0].Mime == latest.Mime {
 		t.Fatalf("format identity was not captured in jobs: %+v", service.state.Jobs)
 	}
 }
@@ -1135,7 +1163,7 @@ func TestSilverCSVCompoundCellBecomesAtomicEvidenceWithRecordContext(t *testing.
 		t.Fatalf("compound cell was not atomized: got=%q want=%q fragments=%+v", keys, wantKeys, fragments)
 	}
 
-	job := silverJob{BronzeSourceID: "source", BronzeContentSHA256: hashBytes([]byte(content)), Title: "contacts.csv", Mime: "text/csv"}
+	job := silverProcessorJob{BronzeSourceID: "source", BronzeContentSHA256: hashBytes([]byte(content)), Title: "contacts.csv", Mime: "text/csv"}
 	input, err := semanticInputForFragments(job, fragments)
 	if err != nil {
 		t.Fatal(err)
@@ -1249,7 +1277,7 @@ func TestSilverAtomicEvidenceIsDeterministicAcrossRestartWithoutModel(t *testing
 	}
 	service.processNext(context.Background())
 	first := service.snapshot()
-	if len(first.Sources) != 1 || first.Sources[0].Coverage.SemanticSkipReason != silverSkipModelUnavailable {
+	if len(first.Sources) != 1 || first.Sources[0].Representations.Knowledge.State != silverRepresentationUnavailable {
 		t.Fatalf("deterministic Silver did not publish without a model: %+v", first)
 	}
 	ids := make([]string, 0, len(first.Evidence))
@@ -1309,7 +1337,7 @@ func TestSilverModelChangePreservesDeterministicRepresentation(t *testing.T) {
 	}
 	second.processNext(context.Background())
 	after := second.snapshot()
-	if len(after.Sources) != 1 || after.Sources[0].ModelRevision != "two" {
+	if len(after.Sources) != 1 || after.Sources[0].Representations.Knowledge.Producer.ModelRevision != "two" {
 		t.Fatalf("model-dependent generation did not change: %+v", after.Sources)
 	}
 	ids := func(snapshot silverSnapshot) string {
@@ -1363,8 +1391,8 @@ func (r *countingReader) Read(value []byte) (int, error) {
 func TestSilverRejectsKnownBinaryWithoutReadingContent(t *testing.T) {
 	reader := &countingReader{reader: bytes.NewReader(make([]byte, silverMaximumInputBytes+1))}
 	result, err := parseSilverReader(bronzeItem{Title: "photo.jpg", Mime: "image/jpeg"}, reader)
-	if err != nil || result.Coverage.ExtractionState != silverExtractionSkipped ||
-		result.Coverage.SemanticSkipReason != silverSkipUnsupportedContent || result.Fragments != nil || reader.read != 0 {
+	if err != nil || result.State != silverRepresentationSkipped ||
+		result.Error != silverSkipUnsupportedContent || result.Fragments != nil || reader.read != 0 {
 		t.Fatalf("binary read was not bounded by metadata: read=%d result=%+v err=%v", reader.read, result, err)
 	}
 }
@@ -1372,8 +1400,8 @@ func TestSilverRejectsKnownBinaryWithoutReadingContent(t *testing.T) {
 func TestSilverReaderHasHardInputBound(t *testing.T) {
 	reader := &countingReader{reader: bytes.NewReader(bytes.Repeat([]byte("x"), silverMaximumInputBytes+1024))}
 	result, err := parseSilverReader(bronzeItem{Title: "unknown.dat", Mime: "application/octet-stream"}, reader)
-	if err != nil || result.Coverage.ExtractionState != silverExtractionSkipped ||
-		result.Coverage.SemanticSkipReason != silverSkipSourceTooLarge || result.Fragments != nil ||
+	if err != nil || result.State != silverRepresentationSkipped ||
+		result.Error != silverSkipSourceTooLarge || result.Fragments != nil ||
 		reader.read > silverMaximumInputBytes+1 {
 		t.Fatalf("input bound: read=%d result=%+v err=%v", reader.read, result, err)
 	}
@@ -1452,72 +1480,56 @@ func TestSilverEntityAggregatesSourcesAndDeletionRemovesDerivedData(t *testing.T
 }
 
 func TestSilverEntityResolutionRequiresMatchingLabelAndType(t *testing.T) {
-	service := &silverService{state: silverDiskState{Entities: map[string]silverEntityRecord{}}}
-
-	person, ok := service.resolveEntityLocked("Atlas", "atlas", "person")
-	if !ok {
-		t.Fatal("person candidate was not resolved")
-	}
-	samePerson, ok := service.resolveEntityLocked("  Atlas  ", "atlas", "person")
-	if !ok || samePerson.ID != person.ID {
+	person := resolveEntity("atlas", "person")
+	samePerson := resolveEntity("  ATLAS  ", "person")
+	if samePerson.ID != person.ID {
 		t.Fatalf("matching label and type did not reuse Entity: first=%+v second=%+v", person, samePerson)
 	}
-	organization, ok := service.resolveEntityLocked("Atlas", "atlas", "organization")
-	if !ok || organization.ID == person.ID {
+	organization := resolveEntity("atlas", "organization")
+	if organization.ID == person.ID {
 		t.Fatalf("incompatible types were merged: person=%+v organization=%+v", person, organization)
 	}
-	untyped, ok := service.resolveEntityLocked("Atlas", "atlas", "")
-	if !ok || untyped.ID == person.ID || untyped.ID == organization.ID {
+	untyped := resolveEntity("atlas", "")
+	if untyped.ID == person.ID || untyped.ID == organization.ID {
 		t.Fatalf("typeless candidate was merged with a typed Entity: person=%+v organization=%+v untyped=%+v", person, organization, untyped)
 	}
-	sameUntyped, ok := service.resolveEntityLocked("Atlas", "atlas", "")
-	if !ok || sameUntyped.ID != untyped.ID {
+	sameUntyped := resolveEntity("atlas", "")
+	if sameUntyped.ID != untyped.ID {
 		t.Fatalf("sole compatible typeless match was not reused: first=%+v second=%+v", untyped, sameUntyped)
 	}
 }
 
-func TestSilverEntityResolutionLeavesAmbiguousMatchUnresolved(t *testing.T) {
-	service := &silverService{state: silverDiskState{Entities: map[string]silverEntityRecord{
-		"first":  {Entity: silverEntity{ID: "first"}, Label: "Alex", Normalized: "alex", Type: "person"},
-		"second": {Entity: silverEntity{ID: "second"}, Label: "Alex", Normalized: "alex", Type: "person"},
-	}}}
-	dataset := silverDataset{}
-	checkpoint := silverCheckpoint{Entities: []silverEntityCandidate{{
-		ObservationID: "observation", Ref: "alex", Label: "Alex", Normalized: "alex", Type: "person", Confidence: 0.99,
-	}}}
-
-	service.resolveCheckpointCandidatesLocked(&dataset, checkpoint, map[string]bool{}, "model", "1")
-
-	if len(dataset.Entities) != 0 || len(dataset.Claims) != 0 || len(service.state.Entities) != 2 {
-		t.Fatalf("ambiguous candidate was forced into resolved knowledge: dataset=%+v registry=%+v", dataset, service.state.Entities)
+func TestSilverEntityIdentityIsStableWithoutPersistedRegistry(t *testing.T) {
+	first := resolveEntity("ada lovelace", "person")
+	second := resolveEntity("ada lovelace", "person")
+	if second.ID != first.ID {
+		t.Fatalf("rebuild changed deterministic entity ID: first=%+v second=%+v", first, second)
 	}
 }
 
-func TestSilverEntityTypeBackfillIgnoresGenericTypeAttributes(t *testing.T) {
-	resolver := silverProducer{ProcessorID: silverResolverID, ProcessorVersion: "1"}
-	service := &silverService{state: silverDiskState{
-		Entities: map[string]silverEntityRecord{
-			"alex": {Entity: silverEntity{ID: "alex"}, Label: "Alex", Normalized: "alex"},
-		},
-		Published: map[string]silverDataset{
-			"source": {
-				Observations: []silverObservation{
-					{ID: "entity-observation", Kind: "entity-candidate"},
-					{ID: "attribute-observation", Kind: "attribute-candidate"},
-				},
-				Claims: []silverClaim{
-					{SubjectEntityID: "alex", Predicate: "type", Value: json.RawMessage(`"person"`), SupportingObservationIDs: []string{"entity-observation"}, Producer: resolver, State: "active"},
-					{SubjectEntityID: "alex", Predicate: "type", Value: json.RawMessage(`"engineer"`), SupportingObservationIDs: []string{"attribute-observation", "entity-observation"}, Producer: resolver, State: "active"},
-				},
-			},
-		},
-	}}
+func TestSilverEntityIDsAreStableAcrossFullRebuild(t *testing.T) {
+	root := t.TempDir()
+	bronze := newBronzeStore(root + "/bronze")
+	putSilverBronze(t, bronze, "45454545-4545-4545-8545-454545454545", "ada.txt", "text/plain", 1,
+		"Ada Lovelace designed a machine.")
+	first, err := newSilverServiceWithModel(root+"/silver-first", bronze, namedPeopleTestModel())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.processNext(context.Background())
+	firstSnapshot := first.snapshot()
+	if len(firstSnapshot.Entities) != 1 {
+		t.Fatalf("first build entities: %+v", firstSnapshot.Entities)
+	}
 
-	service.backfillEntityTypesLocked()
-
-	record := service.state.Entities["alex"]
-	if record.Type != "person" || record.TypeAmbiguous {
-		t.Fatalf("generic type attribute polluted entity type backfill: %+v", record)
+	rebuilt, err := newSilverServiceWithModel(root+"/silver-rebuilt", bronze, namedPeopleTestModel())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebuilt.processNext(context.Background())
+	rebuiltSnapshot := rebuilt.snapshot()
+	if len(rebuiltSnapshot.Entities) != 1 || rebuiltSnapshot.Entities[0].ID != firstSnapshot.Entities[0].ID {
+		t.Fatalf("full rebuild changed entity ID: first=%+v rebuilt=%+v", firstSnapshot.Entities, rebuiltSnapshot.Entities)
 	}
 }
 
@@ -1551,7 +1563,7 @@ func TestSilverSnapshotRequiresPairedSelf(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.SchemaVersion != silverSchemaVersion {
+	if snapshot.SchemaVersion != silverSnapshotSchemaVersion {
 		t.Fatalf("schema version: %d", snapshot.SchemaVersion)
 	}
 }

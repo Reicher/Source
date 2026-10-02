@@ -25,7 +25,7 @@ func (f parsedSilverFragment) identity() string {
 	return string(value)
 }
 
-func buildSilverBatches(job silverJob, fragments []parsedSilverFragment, targetBytes int, model semanticModel) ([]silverSemanticBatch, error) {
+func buildSilverBatches(job silverProcessorJob, fragments []parsedSilverFragment, targetBytes int, model semanticModel) ([]silverSemanticBatch, error) {
 	if len(fragments) == 0 {
 		return nil, nil
 	}
@@ -99,7 +99,7 @@ func checkpointsMatchingBatches(checkpoints []silverCheckpoint, batches []silver
 	return matching
 }
 
-func silverEvidenceForFragment(job silverJob, fragment parsedSilverFragment) silverEvidence {
+func silverEvidenceForFragment(job silverProcessorJob, fragment parsedSilverFragment) silverEvidence {
 	evidence := silverEvidence{
 		BronzeSourceID: job.BronzeSourceID, BronzeContentSHA256: job.BronzeContentSHA256,
 		Selector: fragment.Selector, Excerpt: fragment.Excerpt,
@@ -111,7 +111,7 @@ func silverEvidenceForFragment(job silverJob, fragment parsedSilverFragment) sil
 	return evidence
 }
 
-func semanticInputForFragments(job silverJob, fragments []parsedSilverFragment) (semanticInput, error) {
+func semanticInputForFragments(job silverProcessorJob, fragments []parsedSilverFragment) (semanticInput, error) {
 	input := semanticInput{Title: job.Title, Mime: job.Mime, Fragments: []semanticFragmentInput{}}
 	contexts := map[string]bool{}
 	for _, fragment := range fragments {
@@ -149,7 +149,7 @@ func semanticInputForFragments(job silverJob, fragments []parsedSilverFragment) 
 	return input, nil
 }
 
-func extractSilverBatch(ctx context.Context, job silverJob, fragments []parsedSilverFragment, index int, batchHash string, model semanticModel) (silverCheckpoint, error) {
+func extractSilverBatch(ctx context.Context, job silverProcessorJob, fragments []parsedSilverFragment, index int, batchHash string, model semanticModel) (silverCheckpoint, error) {
 	producer := silverProducer{ProcessorID: silverExtractionID, ProcessorVersion: silverExtractionVersion}
 	checkpoint := silverCheckpoint{BatchIndex: index, BatchSHA256: batchHash}
 	evidenceByID := make(map[string]silverEvidence, len(fragments))
@@ -177,8 +177,8 @@ func extractSilverBatch(ctx context.Context, job silverJob, fragments []parsedSi
 		return checkpoint, nil
 	}
 	modelID, modelRevision := model.identity()
-	if modelID != job.ModelID || modelRevision != job.ModelRevision || model.maximumInputBytes() != job.SemanticInputLimit {
-		return silverCheckpoint{}, errors.New("Source model identity or input limit changed during Silver processing")
+	if modelID != job.Producer.ModelID || modelRevision != job.Producer.ModelRevision {
+		return silverCheckpoint{}, errors.New("Source model identity changed during Silver processing")
 	}
 	if len(input.Fragments) == 0 {
 		return checkpoint, nil
@@ -188,7 +188,7 @@ func extractSilverBatch(ctx context.Context, job silverJob, fragments []parsedSi
 		return silverCheckpoint{}, err
 	}
 	if len(encodedInput) > model.maximumInputBytes() {
-		checkpoint.SemanticSkipReason = silverSkipFragmentTooLarge
+		checkpoint.SkipReason = silverSkipFragmentTooLarge
 		return checkpoint, nil
 	}
 	semanticFragments := make([]parsedSilverFragment, 0, len(fragments))
@@ -203,7 +203,7 @@ func extractSilverBatch(ctx context.Context, job silverJob, fragments []parsedSi
 	}
 	checkpoint.SemanticCompletedFragments = recovery.CompletedFragments
 	if recovery.SkippedContractFragment {
-		checkpoint.SemanticSkipReason = silverSkipModelContract
+		checkpoint.SkipReason = silverSkipModelContract
 	}
 	semanticProducer := silverProducer{ProcessorID: semanticProcessorID, ProcessorVersion: semanticProcessorVersion, ModelID: modelID, ModelRevision: modelRevision}
 	for _, fragmentResult := range recovery.Fragments {
@@ -295,12 +295,12 @@ func semanticCandidateCount(fragments []semanticFragmentResult) int {
 	return count
 }
 
-func recoverSilverSemanticFragments(ctx context.Context, job silverJob, fragments []parsedSilverFragment, model semanticModel, batchPath string) (silverSemanticRecovery, error) {
+func recoverSilverSemanticFragments(ctx context.Context, job silverProcessorJob, fragments []parsedSilverFragment, model semanticModel, batchPath string) (silverSemanticRecovery, error) {
 	budget := silverSemanticRecoveryBudget{RemainingFragments: semanticMaximumFragments, RemainingCandidates: semanticMaximumCandidates}
 	return recoverSilverSemanticFragmentsWithinBudget(ctx, job, fragments, model, batchPath, &budget)
 }
 
-func recoverSilverSemanticFragmentsWithinBudget(ctx context.Context, job silverJob, fragments []parsedSilverFragment, model semanticModel, batchPath string, budget *silverSemanticRecoveryBudget) (silverSemanticRecovery, error) {
+func recoverSilverSemanticFragmentsWithinBudget(ctx context.Context, job silverProcessorJob, fragments []parsedSilverFragment, model semanticModel, batchPath string, budget *silverSemanticRecoveryBudget) (silverSemanticRecovery, error) {
 	input, err := semanticInputForFragments(job, fragments)
 	if err != nil {
 		return silverSemanticRecovery{}, err
@@ -364,7 +364,7 @@ func recoverSilverSemanticFragmentsWithinBudget(ctx context.Context, job silverJ
 	return left, nil
 }
 
-func logSilverSemanticContractFailure(job silverJob, batchPath string, attempt int, contract *semanticContractError) {
+func logSilverSemanticContractFailure(job silverProcessorJob, batchPath string, attempt int, contract *semanticContractError) {
 	responseHash := contract.responseHash
 	if responseHash == "" {
 		responseHash = "unavailable"
@@ -386,17 +386,14 @@ type resolvedSilverCandidate struct {
 	ObservationID string
 }
 
-func (s *silverService) resolveCheckpointCandidatesLocked(dataset *silverDataset, checkpoint silverCheckpoint, entitySeen map[string]bool, modelID, modelRevision string) {
+func resolveCheckpointCandidates(dataset *silverDataset, checkpoint silverCheckpoint, entitySeen map[string]bool, modelID, modelRevision string) {
 	producer := silverProducer{ProcessorID: silverResolverID, ProcessorVersion: silverResolverVersion, ModelID: modelID, ModelRevision: modelRevision}
 	resolved := map[string]resolvedSilverCandidate{}
 	for _, candidate := range checkpoint.Entities {
 		if candidate.Confidence < silverResolutionMinimum {
 			continue
 		}
-		entity, ok := s.resolveEntityLocked(candidate.Label, candidate.Normalized, candidate.Type)
-		if !ok {
-			continue
-		}
+		entity := resolveEntity(candidate.Normalized, candidate.Type)
 		resolved[candidate.Ref] = resolvedSilverCandidate{Entity: entity, ObservationID: candidate.ObservationID}
 		if !entitySeen[entity.ID] {
 			dataset.Entities = append(dataset.Entities, entity)
@@ -442,81 +439,12 @@ func appendSilverClaim(dataset *silverDataset, subject, predicate string, value 
 	dataset.Claims = append(dataset.Claims, claim)
 }
 
-func (s *silverService) resolveEntityLocked(label, normalized, entityType string) (silverEntity, bool) {
+func resolveEntity(normalized, entityType string) silverEntity {
+	normalized = strings.ToLower(strings.Join(strings.Fields(normalized), " "))
 	entityType = strings.ToLower(strings.TrimSpace(entityType))
-	var match *silverEntity
-	for _, record := range s.state.Entities {
-		if record.Normalized != normalized || record.TypeAmbiguous || record.Type != entityType {
-			continue
-		}
-		if match != nil && match.ID != record.Entity.ID {
-			return silverEntity{}, false
-		}
-		value := record.Entity
-		match = &value
-	}
-	if match != nil {
-		return *match, true
-	}
-	id, err := randomUUID()
-	if err != nil {
-		return silverEntity{}, false
-	}
-	entity := silverEntity{ID: id}
-	s.state.Entities[id] = silverEntityRecord{Entity: entity, Label: label, Normalized: normalized, Type: entityType}
-	return entity, true
-}
-
-func (s *silverService) backfillEntityTypesLocked() {
-	types := map[string]map[string]bool{}
-	collect := func(dataset silverDataset) {
-		entityCandidates := map[string]bool{}
-		for _, observation := range dataset.Observations {
-			if observation.Kind == "entity-candidate" {
-				entityCandidates[observation.ID] = true
-			}
-		}
-		for _, claim := range dataset.Claims {
-			if claim.State != "active" || claim.Predicate != "type" || claim.ObjectEntityID != "" ||
-				claim.Producer.ProcessorID != silverResolverID || len(claim.SupportingObservationIDs) != 1 ||
-				!entityCandidates[claim.SupportingObservationIDs[0]] {
-				continue
-			}
-			var entityType string
-			if err := json.Unmarshal(claim.Value, &entityType); err != nil {
-				continue
-			}
-			entityType = strings.ToLower(strings.TrimSpace(entityType))
-			if entityType == "" {
-				continue
-			}
-			if types[claim.SubjectEntityID] == nil {
-				types[claim.SubjectEntityID] = map[string]bool{}
-			}
-			types[claim.SubjectEntityID][entityType] = true
-		}
-	}
-	for _, dataset := range s.state.Published {
-		collect(dataset)
-	}
-	for _, history := range s.state.History {
-		for _, dataset := range history {
-			collect(dataset)
-		}
-	}
-	for id, record := range s.state.Entities {
-		switch len(types[id]) {
-		case 0:
-			continue
-		case 1:
-			for entityType := range types[id] {
-				record.Type = entityType
-			}
-			record.TypeAmbiguous = false
-		default:
-			record.Type = ""
-			record.TypeAmbiguous = true
-		}
-		s.state.Entities[id] = record
-	}
+	return silverEntity{ID: stableID("source-silver-entity", struct {
+		Normalized      string `json:"normalized"`
+		Type            string `json:"type"`
+		ResolverVersion string `json:"resolver_version"`
+	}{normalized, entityType, silverResolverVersion})}
 }

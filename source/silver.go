@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -20,7 +18,8 @@ import (
 )
 
 const (
-	silverSchemaVersion            = 1
+	silverSnapshotSchemaVersion    = 2
+	silverDiskSchemaVersion        = 2
 	silverProcessorID              = "source.silver.deterministic-ingestion"
 	silverExtractionID             = "source.silver.format-extraction"
 	silverExtractionVersion        = "2"
@@ -29,8 +28,6 @@ const (
 	silverProcessorVersion         = "1-" + silverExtractionVersion
 	silverKnowledgeID              = "source.silver.knowledge"
 	silverKnowledgeVersion         = "1-" + semanticProcessorVersion + "-" + silverResolverVersion
-	silverJobProcessorID           = "source.silver.processing"
-	silverJobVersion               = silverProcessorVersion + "-" + silverKnowledgeVersion
 	silverResolutionMinimum        = 0.70
 	silverMaximumBatchBytes        = 4096
 	silverInspectionBytes          = 8192
@@ -41,12 +38,6 @@ const (
 	silverMaximumStructureDepth    = 4
 	silverReconcileInterval        = time.Second
 
-	silverExtractionCompleted = "completed"
-	silverExtractionSkipped   = "skipped"
-	silverSemanticCompleted   = "completed"
-	silverSemanticSkipped     = "skipped"
-	silverSemanticPartial     = "partial"
-
 	silverRepresentationReady       = "ready"
 	silverRepresentationProcessing  = "processing"
 	silverRepresentationUnavailable = "unavailable"
@@ -56,9 +47,11 @@ const (
 
 	silverSkipUnsupportedContent = "unsupported_content"
 	silverSkipSourceTooLarge     = "source_too_large"
-	silverSkipModelUnavailable   = "model_unavailable"
 	silverSkipFragmentTooLarge   = "fragment_exceeds_model_limit"
 	silverSkipModelContract      = "model_contract_failure"
+
+	silverDeterministicRepresentation = "deterministic"
+	silverKnowledgeRepresentation     = "knowledge"
 )
 
 type silverProducer struct {
@@ -103,16 +96,11 @@ type silverClaim struct {
 	State                    string          `json:"state"`
 }
 
-type silverCoverage struct {
-	ExtractionState    string `json:"extraction_state"`
-	SemanticState      string `json:"semantic_state"`
-	SemanticSkipReason string `json:"semantic_skip_reason,omitempty"`
-}
-
 type silverRepresentation struct {
-	State    string         `json:"state"`
-	Producer silverProducer `json:"producer"`
-	Error    string         `json:"error,omitempty"`
+	State         string         `json:"state"`
+	Producer      silverProducer `json:"producer"`
+	InputIdentity string         `json:"input_identity"`
+	Error         string         `json:"error,omitempty"`
 }
 
 type silverRepresentations struct {
@@ -125,12 +113,6 @@ type silverSource struct {
 	BronzeContentSHA256 string                `json:"bronze_content_sha256"`
 	Title               string                `json:"title"`
 	Mime                string                `json:"mime"`
-	ProcessorID         string                `json:"processor_id"`
-	ProcessorVersion    string                `json:"processor_version"`
-	ModelID             string                `json:"model_id,omitempty"`
-	ModelRevision       string                `json:"model_revision,omitempty"`
-	SemanticInputLimit  int                   `json:"semantic_input_limit,omitempty"`
-	Coverage            silverCoverage        `json:"coverage"`
 	Representations     silverRepresentations `json:"representations"`
 	EvidenceIDs         []string              `json:"evidence_ids"`
 	ObservationIDs      []string              `json:"observation_ids"`
@@ -150,7 +132,7 @@ type silverDataset struct {
 
 type silverProcessing struct {
 	BronzeSourceID   string `json:"bronze_source_id"`
-	Representation   string `json:"representation,omitempty"`
+	Representation   string `json:"representation"`
 	State            string `json:"state"`
 	CompletedBatches int    `json:"completed_batches"`
 	TotalBatches     int    `json:"total_batches"`
@@ -206,22 +188,18 @@ type silverCheckpoint struct {
 	Relationships              []silverRelationshipCandidate `json:"relationship_candidates,omitempty"`
 	SemanticFragments          int                           `json:"semantic_fragments,omitempty"`
 	SemanticCompletedFragments int                           `json:"semantic_completed_fragments,omitempty"`
-	SemanticSkipReason         string                        `json:"semantic_skip_reason,omitempty"`
+	SkipReason                 string                        `json:"skip_reason,omitempty"`
 }
 
-type silverJob struct {
+type silverProcessorJob struct {
 	ID                  string             `json:"id"`
 	BronzeSourceID      string             `json:"bronze_source_id"`
 	BronzeContentSHA256 string             `json:"bronze_content_sha256"`
 	Title               string             `json:"title"`
 	Mime                string             `json:"mime"`
-	ProcessorID         string             `json:"processor_id"`
-	ProcessorVersion    string             `json:"processor_version"`
-	ModelID             string             `json:"model_id,omitempty"`
-	ModelRevision       string             `json:"model_revision,omitempty"`
-	SemanticInputLimit  int                `json:"semantic_input_limit,omitempty"`
-	Coverage            silverCoverage     `json:"coverage"`
-	Phase               string             `json:"phase,omitempty"`
+	Representation      string             `json:"representation"`
+	Producer            silverProducer     `json:"producer"`
+	InputIdentity       string             `json:"input_identity"`
 	State               string             `json:"state"`
 	TotalBatches        int                `json:"total_batches"`
 	Checkpoints         []silverCheckpoint `json:"checkpoints,omitempty"`
@@ -233,24 +211,13 @@ type silverJob struct {
 	UpdatedAt           int64              `json:"updated_at"`
 }
 
-type silverEntityRecord struct {
-	Entity        silverEntity `json:"entity"`
-	Label         string       `json:"label"`
-	Normalized    string       `json:"normalized"`
-	Type          string       `json:"type,omitempty"`
-	TypeAmbiguous bool         `json:"type_ambiguous,omitempty"`
-}
-
 type silverDiskState struct {
-	SchemaVersion int                           `json:"schema_version"`
-	Revision      int64                         `json:"revision"`
-	DataRevision  int64                         `json:"data_revision"`
-	RevisionModel int                           `json:"revision_model"`
-	NextJob       int64                         `json:"next_job"`
-	Jobs          []silverJob                   `json:"jobs"`
-	Published     map[string]silverDataset      `json:"published"`
-	History       map[string][]silverDataset    `json:"history"`
-	Entities      map[string]silverEntityRecord `json:"entities"`
+	SchemaVersion int                      `json:"schema_version"`
+	Revision      int64                    `json:"revision"`
+	DataRevision  int64                    `json:"data_revision"`
+	NextJob       int64                    `json:"next_job"`
+	Jobs          []silverProcessorJob     `json:"jobs"`
+	Published     map[string]silverDataset `json:"published"`
 }
 
 type silverService struct {
@@ -316,40 +283,41 @@ func newSilverServiceWithConfiguration(dir string, bronze *bronzeStore, model se
 		path: filepath.Join(dir, "state.json"), bronze: bronze, configuration: configuration,
 		wake: make(chan struct{}, 1), semantic: model,
 	}
+	rebuilt := false
 	value, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
-		s.state = silverDiskState{SchemaVersion: silverSchemaVersion, RevisionModel: 1, Published: map[string]silverDataset{}, History: map[string][]silverDataset{}, Entities: map[string]silverEntityRecord{}}
+		s.state = newSilverDiskState(0)
 	} else if err != nil {
 		return nil, err
-	} else if err := json.Unmarshal(value, &s.state); err != nil {
-		return nil, fmt.Errorf("invalid Silver state: %w", err)
-	}
-	if s.state.SchemaVersion != silverSchemaVersion {
-		return nil, fmt.Errorf("unsupported Silver state version %d", s.state.SchemaVersion)
+	} else {
+		var header struct {
+			SchemaVersion int   `json:"schema_version"`
+			Revision      int64 `json:"revision"`
+			DataRevision  int64 `json:"data_revision"`
+		}
+		if err := json.Unmarshal(value, &header); err != nil {
+			return nil, fmt.Errorf("invalid Silver state: %w", err)
+		}
+		if header.SchemaVersion < silverDiskSchemaVersion {
+			// Silver is derived. Replacing an obsolete disk schema is safer and
+			// substantially simpler than permanently migrating old generations.
+			// Advance the public revision so Self replaces its mirrored snapshot.
+			s.state = newSilverDiskState(max(header.Revision, header.DataRevision) + 1)
+			rebuilt = true
+		} else if header.SchemaVersion > silverDiskSchemaVersion {
+			return nil, fmt.Errorf("unsupported newer Silver state version %d", header.SchemaVersion)
+		} else if err := json.Unmarshal(value, &s.state); err != nil {
+			return nil, fmt.Errorf("invalid Silver state: %w", err)
+		}
 	}
 	if s.state.Published == nil {
 		s.state.Published = map[string]silverDataset{}
 	}
-	if s.state.History == nil {
-		s.state.History = map[string][]silverDataset{}
-	}
-	if s.state.Entities == nil {
-		s.state.Entities = map[string]silverEntityRecord{}
-	}
-	migratedRevision := false
-	if s.state.RevisionModel == 0 {
-		s.state.DataRevision = s.state.Revision
-		s.state.RevisionModel = 1
-		migratedRevision = true
-	} else if s.state.RevisionModel != 1 {
-		return nil, fmt.Errorf("unsupported Silver revision model %d", s.state.RevisionModel)
-	}
-	s.backfillEntityTypesLocked()
 	s.persisted, err = json.Marshal(s.state)
 	if err != nil {
 		return nil, err
 	}
-	if migratedRevision {
+	if rebuilt {
 		if err := savePrivate(s.path, s.persisted); err != nil {
 			return nil, err
 		}
@@ -374,6 +342,15 @@ func newSilverServiceWithConfiguration(dir string, bronze *bronzeStore, model se
 		return nil, err
 	}
 	return s, nil
+}
+
+func newSilverDiskState(revision int64) silverDiskState {
+	return silverDiskState{
+		SchemaVersion: silverDiskSchemaVersion,
+		Revision:      revision,
+		DataRevision:  revision,
+		Published:     map[string]silverDataset{},
+	}
 }
 
 func (s *silverService) start(ctx context.Context) {
@@ -406,14 +383,6 @@ func (s *silverService) signal() {
 	case s.wake <- struct{}{}:
 	default:
 	}
-}
-
-func (s *silverService) modelIdentity() (string, string, int) {
-	if s.semantic == nil {
-		return "", "", 0
-	}
-	modelID, modelRevision := s.semantic.identity()
-	return modelID, modelRevision, s.semantic.maximumInputBytes()
 }
 
 func (s *silverService) retryDueFailuresLocked(now time.Time) bool {
@@ -489,9 +458,6 @@ func (s *silverService) needsReconcileLocked(item bronzeItem) bool {
 		if _, ok := s.state.Published[item.ID]; ok {
 			return true
 		}
-		if _, ok := s.state.History[item.ID]; ok {
-			return true
-		}
 		for _, job := range s.state.Jobs {
 			if job.BronzeSourceID == item.ID {
 				return true
@@ -499,77 +465,73 @@ func (s *silverService) needsReconcileLocked(item bronzeItem) bool {
 		}
 		return false
 	}
-	modelID, modelRevision, semanticInputLimit := s.modelIdentity()
-	if published, ok := s.state.Published[item.ID]; ok && s.sourceMatchesCurrent(published.Source, item) &&
-		s.knowledgeMatchesCurrent(published.Source, modelID, modelRevision, semanticInputLimit) {
+	published, ok := s.state.Published[item.ID]
+	if !ok || !s.deterministicMatchesCurrent(published.Source, item) {
+		return !s.hasCurrentJobLocked(item, silverDeterministicRepresentation)
+	}
+	if s.knowledgeMatchesCurrent(published.Source, item) {
 		return false
 	}
-	for _, job := range s.state.Jobs {
-		if job.State != "cancelled" && silverJobMatchesItem(job, item, modelID, modelRevision, semanticInputLimit) {
-			return false
-		}
+	return !s.hasCurrentJobLocked(item, silverKnowledgeRepresentation)
+}
+
+func deterministicProducer() silverProducer {
+	return silverProducer{ProcessorID: silverProcessorID, ProcessorVersion: silverProcessorVersion}
+}
+
+func (s *silverService) knowledgeProducer() silverProducer {
+	producer := silverProducer{ProcessorID: silverKnowledgeID, ProcessorVersion: silverKnowledgeVersion}
+	if s.semantic != nil {
+		producer.ModelID, producer.ModelRevision = s.semantic.identity()
 	}
-	return true
+	return producer
 }
 
-func silverJobMatchesItem(job silverJob, item bronzeItem, modelID, modelRevision string, semanticInputLimit int) bool {
-	return job.BronzeSourceID == item.ID && job.BronzeContentSHA256 == item.Hash &&
-		job.Title == item.Title && job.Mime == item.Mime &&
-		job.ProcessorID == silverJobProcessorID && job.ProcessorVersion == silverJobVersion &&
-		job.ModelID == modelID && job.ModelRevision == modelRevision && job.SemanticInputLimit == semanticInputLimit
+func deterministicInputIdentity(item bronzeItem) string {
+	return stableID("source-silver-deterministic-input", struct {
+		SourceID, Hash, Title, Mime string
+	}{item.ID, item.Hash, item.Title, item.Mime})
 }
 
-func (s *silverService) sourceMatchesCurrent(source silverSource, item bronzeItem) bool {
-	return silverSourceMatchesBronze(source, item) && source.ProcessorID == silverProcessorID &&
-		source.ProcessorVersion == silverProcessorVersion
+func (s *silverService) knowledgeInputIdentity(item bronzeItem) string {
+	limit := 0
+	if s.semantic != nil {
+		limit = s.semantic.maximumInputBytes()
+	}
+	return knowledgeInputIdentity(deterministicInputIdentity(item), limit)
 }
 
-func (s *silverService) knowledgeMatchesCurrent(source silverSource, modelID, modelRevision string, semanticInputLimit int) bool {
-	if source.Coverage.ExtractionState != silverExtractionCompleted {
-		return true
+func knowledgeInputIdentity(deterministic string, inputLimit int) string {
+	return stableID("source-silver-knowledge-input", struct {
+		Deterministic string
+		InputLimit    int
+	}{deterministic, inputLimit})
+}
+
+func representationComplete(state string) bool {
+	return state == silverRepresentationReady || state == silverRepresentationPartial || state == silverRepresentationSkipped
+}
+
+func (s *silverService) deterministicMatchesCurrent(source silverSource, item bronzeItem) bool {
+	representation := source.Representations.Deterministic
+	return silverSourceMatchesBronze(source, item) && representationComplete(representation.State) &&
+		representation.Producer == deterministicProducer() && representation.InputIdentity == deterministicInputIdentity(item)
+}
+
+func (s *silverService) knowledgeMatchesCurrent(source silverSource, item bronzeItem) bool {
+	deterministic := source.Representations.Deterministic
+	knowledge := source.Representations.Knowledge
+	if deterministic.State == silverRepresentationSkipped {
+		return knowledge.State == silverRepresentationSkipped && knowledge.Producer == s.knowledgeProducer() &&
+			knowledge.InputIdentity == s.knowledgeInputIdentity(item)
 	}
 	if s.semantic == nil {
-		return knowledgeCompleted(source) || knowledgeUnavailableWithoutModel(source)
+		return representationComplete(knowledge.State) ||
+			(knowledge.State == silverRepresentationUnavailable && knowledge.Producer == s.knowledgeProducer() &&
+				knowledge.InputIdentity == s.knowledgeInputIdentity(item))
 	}
-	producer := source.Representations.Knowledge.Producer
-	state := source.Representations.Knowledge.State
-	return source.ModelID == modelID && source.ModelRevision == modelRevision &&
-		source.SemanticInputLimit == semanticInputLimit && producer.ProcessorID == silverKnowledgeID &&
-		producer.ProcessorVersion == silverKnowledgeVersion && producer.ModelID == modelID && producer.ModelRevision == modelRevision &&
-		(state == silverRepresentationReady || state == silverRepresentationPartial || state == silverRepresentationSkipped)
-}
-
-func knowledgeCompleted(source silverSource) bool {
-	switch source.Representations.Knowledge.State {
-	case silverRepresentationReady, silverRepresentationPartial, silverRepresentationSkipped:
-		return true
-	case silverRepresentationProcessing, silverRepresentationUnavailable, silverRepresentationFailed:
-		return false
-	case "":
-		// Fall through to the legacy coverage fields below.
-	default:
-		return false
-	}
-	// Preserve completed knowledge written before representation states were
-	// introduced. In-progress and failed states must still be reconciled.
-	switch source.Coverage.SemanticState {
-	case silverSemanticCompleted, silverSemanticPartial:
-		return true
-	case silverSemanticSkipped:
-		return source.Coverage.SemanticSkipReason != silverSkipModelUnavailable
-	default:
-		return false
-	}
-}
-
-func knowledgeUnavailableWithoutModel(source silverSource) bool {
-	producer := source.Representations.Knowledge.Producer
-	return source.Representations.Knowledge.State == silverRepresentationUnavailable &&
-		source.Coverage.SemanticState == silverSemanticSkipped &&
-		source.Coverage.SemanticSkipReason == silverSkipModelUnavailable &&
-		source.ModelID == "" && source.ModelRevision == "" && source.SemanticInputLimit == 0 &&
-		producer.ProcessorID == silverKnowledgeID && producer.ProcessorVersion == silverKnowledgeVersion &&
-		producer.ModelID == "" && producer.ModelRevision == ""
+	return representationComplete(knowledge.State) && knowledge.Producer == s.knowledgeProducer() &&
+		knowledge.InputIdentity == s.knowledgeInputIdentity(item)
 }
 
 func silverSourceMatchesBronze(source silverSource, item bronzeItem) bool {
@@ -577,14 +539,33 @@ func silverSourceMatchesBronze(source silverSource, item bronzeItem) bool {
 		source.Title == item.Title && source.Mime == item.Mime
 }
 
+func (s *silverService) jobMatchesItem(job silverProcessorJob, item bronzeItem, representation string) bool {
+	if job.BronzeSourceID != item.ID || job.BronzeContentSHA256 != item.Hash || job.Title != item.Title ||
+		job.Mime != item.Mime || job.Representation != representation {
+		return false
+	}
+	if representation == silverDeterministicRepresentation {
+		return job.Producer == deterministicProducer() && job.InputIdentity == deterministicInputIdentity(item)
+	}
+	return job.Producer == s.knowledgeProducer() && job.InputIdentity == s.knowledgeInputIdentity(item)
+}
+
+func (s *silverService) hasCurrentJobLocked(item bronzeItem, representation string) bool {
+	for _, job := range s.state.Jobs {
+		if job.State != "cancelled" && s.jobMatchesItem(job, item, representation) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *silverService) enqueue(item bronzeItem) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	modelID, modelRevision, semanticInputLimit := s.modelIdentity()
 	changed := false
 	for index := range s.state.Jobs {
 		job := &s.state.Jobs[index]
-		if job.BronzeSourceID == item.ID && !silverJobMatchesItem(*job, item, modelID, modelRevision, semanticInputLimit) && (job.State == "queued" || job.State == "running" || job.State == "failed") {
+		if job.BronzeSourceID == item.ID && !s.jobMatchesItem(*job, item, job.Representation) && (job.State == "queued" || job.State == "running" || job.State == "failed") {
 			job.State = "cancelled"
 			job.Checkpoints = nil
 			job.UpdatedAt = time.Now().UnixMilli()
@@ -607,11 +588,6 @@ func (s *silverService) enqueue(item bronzeItem) (bool, error) {
 			changed = true
 			dataChanged = true
 		}
-		if _, ok := s.state.History[item.ID]; ok {
-			delete(s.state.History, item.ID)
-			changed = true
-		}
-		s.pruneEntitiesLocked()
 		if changed {
 			s.state.Revision++
 			if dataChanged {
@@ -623,17 +599,54 @@ func (s *silverService) enqueue(item bronzeItem) (bool, error) {
 		}
 		return changed, nil
 	}
-	if published, ok := s.state.Published[item.ID]; ok && s.sourceMatchesCurrent(published.Source, item) &&
-		s.knowledgeMatchesCurrent(published.Source, modelID, modelRevision, semanticInputLimit) {
+	published, publishedOK := s.state.Published[item.ID]
+	deterministicCurrent := publishedOK && s.deterministicMatchesCurrent(published.Source, item)
+	knowledgeCurrent := deterministicCurrent && s.knowledgeMatchesCurrent(published.Source, item)
+	if deterministicCurrent && knowledgeCurrent {
 		if changed {
 			s.state.Revision++
 			return true, s.saveLocked()
 		}
 		return false, nil
 	}
+	representation := silverDeterministicRepresentation
+	producer := deterministicProducer()
+	inputIdentity := deterministicInputIdentity(item)
+	if deterministicCurrent {
+		representation = silverKnowledgeRepresentation
+		if s.semantic == nil {
+			if !representationComplete(published.Source.Representations.Knowledge.State) {
+				deterministic := published.Observations[:0]
+				for _, observation := range published.Observations {
+					if observation.Producer.ProcessorID == silverExtractionID {
+						deterministic = append(deterministic, observation)
+					}
+				}
+				published.Observations = deterministic
+				published.Entities = nil
+				published.Claims = nil
+				published.Source.Representations.Knowledge = silverRepresentation{
+					State: silverRepresentationUnavailable, Producer: s.knowledgeProducer(),
+					InputIdentity: s.knowledgeInputIdentity(item), Error: "semantic model is not configured",
+				}
+				published.PublishedAt = time.Now().UnixMilli()
+				refreshSilverSourceIDs(&published)
+				s.state.Published[item.ID] = published
+				s.state.DataRevision++
+				changed = true
+			}
+			if changed {
+				s.state.Revision++
+				return true, s.saveLocked()
+			}
+			return false, nil
+		}
+		producer = s.knowledgeProducer()
+		inputIdentity = s.knowledgeInputIdentity(item)
+	}
 	for index := range s.state.Jobs {
 		job := &s.state.Jobs[index]
-		if job.State != "cancelled" && silverJobMatchesItem(*job, item, modelID, modelRevision, semanticInputLimit) {
+		if job.State != "cancelled" && s.jobMatchesItem(*job, item, representation) {
 			if changed {
 				s.state.Revision++
 				if err := s.saveLocked(); err != nil {
@@ -649,11 +662,10 @@ func (s *silverService) enqueue(item bronzeItem) (bool, error) {
 	}
 	s.state.NextJob++
 	now := time.Now().UnixMilli()
-	s.state.Jobs = append(s.state.Jobs, silverJob{
+	s.state.Jobs = append(s.state.Jobs, silverProcessorJob{
 		ID: fmt.Sprintf("job-%d", s.state.NextJob), BronzeSourceID: item.ID, BronzeContentSHA256: item.Hash,
-		Title: item.Title, Mime: item.Mime, ProcessorID: silverJobProcessorID, ProcessorVersion: silverJobVersion,
-		ModelID: modelID, ModelRevision: modelRevision, SemanticInputLimit: semanticInputLimit,
-		State: "queued", Phase: s.nextJobPhaseLocked(item), AcceptedAt: now, UpdatedAt: now,
+		Title: item.Title, Mime: item.Mime, Representation: representation, Producer: producer,
+		InputIdentity: inputIdentity, State: "queued", AcceptedAt: now, UpdatedAt: now,
 	})
 	s.state.Revision++
 	if err := s.saveLocked(); err != nil {
@@ -661,13 +673,6 @@ func (s *silverService) enqueue(item bronzeItem) (bool, error) {
 	}
 	s.signal()
 	return true, nil
-}
-
-func (s *silverService) nextJobPhaseLocked(item bronzeItem) string {
-	if published, ok := s.state.Published[item.ID]; ok && s.sourceMatchesCurrent(published.Source, item) {
-		return "knowledge"
-	}
-	return "deterministic"
 }
 
 func (s *silverService) processNext(ctx context.Context) bool {
@@ -717,7 +722,7 @@ func (s *silverService) processNext(ctx context.Context) bool {
 				current.RetryAt = 0
 			}
 			current.UpdatedAt = time.Now().UnixMilli()
-			if dataset, ok := s.state.Published[current.BronzeSourceID]; ok && current.Phase == "knowledge" {
+			if dataset, ok := s.state.Published[current.BronzeSourceID]; ok && current.Representation == silverKnowledgeRepresentation {
 				dataset.Source.Representations.Knowledge.State = silverRepresentationFailed
 				dataset.Source.Representations.Knowledge.Error = truncate(err.Error(), 1000)
 				s.state.Published[current.BronzeSourceID] = dataset
@@ -730,6 +735,23 @@ func (s *silverService) processNext(ctx context.Context) bool {
 			}
 		}
 		s.mu.Unlock()
+	}
+	if err == nil && job.Representation == silverDeterministicRepresentation {
+		if reconcileErr := s.reconcile(); reconcileErr != nil {
+			return false
+		}
+		s.mu.Lock()
+		knowledgeQueued := false
+		for _, candidate := range s.state.Jobs {
+			if candidate.BronzeSourceID == job.BronzeSourceID && candidate.Representation == silverKnowledgeRepresentation && candidate.State == "queued" {
+				knowledgeQueued = true
+				break
+			}
+		}
+		s.mu.Unlock()
+		if knowledgeQueued {
+			return s.processNext(ctx)
+		}
 	}
 	return ctx.Err() == nil
 }
@@ -762,53 +784,73 @@ func (s *silverService) processJob(ctx context.Context, jobID string) error {
 	if item.Hash != copy.BronzeContentSHA256 || item.Title != copy.Title || item.Mime != copy.Mime {
 		return s.cancelJob(jobID)
 	}
-
-	var parsed silverParseResult
-	s.mu.Lock()
-	core, coreCurrent := s.state.Published[item.ID]
-	coreCurrent = coreCurrent && s.sourceMatchesCurrent(core.Source, item)
-	s.mu.Unlock()
-	if coreCurrent {
-		parsed.Fragments, err = parsedFragmentsFromDataset(core)
-		parsed.Coverage = silverCoverage{ExtractionState: core.Source.Coverage.ExtractionState}
-		if err == nil && s.semantic != nil && parsed.Coverage.ExtractionState == silverExtractionCompleted {
-			err = s.beginKnowledge(jobID)
-		}
-	} else {
-		var file *os.File
-		item, file, err = s.bronze.openContent(copy.BronzeSourceID)
-		if err == nil {
-			parsed, err = parseSilverReader(item, file)
-			closeErr := file.Close()
-			if err == nil {
-				err = closeErr
-			}
-		}
-		if err == nil {
-			err = s.publishDeterministic(jobID, item, parsed)
-		}
+	if !s.jobMatchesItem(copy, item, copy.Representation) {
+		return s.cancelJob(jobID)
 	}
+	switch copy.Representation {
+	case silverDeterministicRepresentation:
+		return s.processDeterministicJob(jobID, item)
+	case silverKnowledgeRepresentation:
+		return s.processKnowledgeJob(ctx, jobID, item, copy)
+	default:
+		return permanentSilverProcessError(fmt.Errorf("unknown Silver representation %q", copy.Representation))
+	}
+}
+
+func (s *silverService) processDeterministicJob(jobID string, item bronzeItem) error {
+	item, file, err := s.bronze.openContent(item.ID)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return permanentSilverProcessError(fmt.Errorf("Bronze content is missing: %w", err))
 		}
 		return err
 	}
-	fragments := parsed.Fragments
+	parsed, parseErr := parseSilverReader(item, file)
+	closeErr := file.Close()
+	if parseErr != nil {
+		return parseErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return s.publishDeterministic(jobID, item, parsed)
+}
 
-	if s.semantic == nil || parsed.Coverage.ExtractionState != silverExtractionCompleted {
-		return s.completeWithoutKnowledge(jobID)
+func (s *silverService) processKnowledgeJob(ctx context.Context, jobID string, item bronzeItem, snapshot silverProcessorJob) error {
+	if s.semantic == nil {
+		return s.cancelJob(jobID)
+	}
+	s.mu.Lock()
+	dataset, ok := s.state.Published[item.ID]
+	if !ok || !s.deterministicMatchesCurrent(dataset.Source, item) ||
+		dataset.Source.Representations.Deterministic.State != silverRepresentationReady {
+		s.mu.Unlock()
+		return s.cancelJob(jobID)
+	}
+	dataset.Source.Representations.Knowledge = silverRepresentation{
+		State: silverRepresentationProcessing, Producer: snapshot.Producer, InputIdentity: snapshot.InputIdentity,
+	}
+	s.state.Published[item.ID] = dataset
+	s.state.Revision++
+	s.state.DataRevision++
+	if err := s.saveLocked(); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	s.mu.Unlock()
+
+	fragments, err := parsedFragmentsFromDataset(dataset)
+	if err != nil {
+		return err
 	}
 
 	s.mu.Lock()
-	job = s.jobLocked(jobID)
+	job := s.jobLocked(jobID)
 	if job == nil || job.State != "running" {
 		s.mu.Unlock()
 		return context.Canceled
 	}
-	job.Coverage = parsed.Coverage
-	job.Phase = "knowledge"
-	batches, err := buildSilverBatches(copy, fragments, s.configuration.SemanticBatchTargetBytes, s.semantic)
+	batches, err := buildSilverBatches(snapshot, fragments, s.configuration.SemanticBatchTargetBytes, s.semantic)
 	if err != nil {
 		s.mu.Unlock()
 		return err
@@ -839,7 +881,7 @@ func (s *silverService) processJob(ctx context.Context, jobID string) error {
 		}
 		s.mu.Unlock()
 
-		checkpoint, err := extractSilverBatch(ctx, copy, batch.Fragments, batchIndex, batch.Hash, s.semantic)
+		checkpoint, err := extractSilverBatch(ctx, snapshot, batch.Fragments, batchIndex, batch.Hash, s.semantic)
 		if err != nil {
 			return err
 		}
@@ -864,29 +906,8 @@ func (s *silverService) processJob(ctx context.Context, jobID string) error {
 	return s.publishKnowledge(jobID, item)
 }
 
-func (s *silverService) beginKnowledge(jobID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	job := s.jobLocked(jobID)
-	if job == nil || job.State != "running" {
-		return context.Canceled
-	}
-	dataset, ok := s.state.Published[job.BronzeSourceID]
-	if !ok {
-		return errors.New("deterministic Silver is missing for knowledge processing")
-	}
-	job.Phase = "knowledge"
-	dataset.Source.Representations.Knowledge = silverRepresentation{State: silverRepresentationProcessing,
-		Producer: silverProducer{ProcessorID: silverKnowledgeID, ProcessorVersion: silverKnowledgeVersion,
-			ModelID: job.ModelID, ModelRevision: job.ModelRevision}}
-	s.state.Published[job.BronzeSourceID] = dataset
-	s.state.Revision++
-	s.state.DataRevision++
-	return s.saveLocked()
-}
-
 func (s *silverService) publishDeterministic(jobID string, current bronzeItem, parsed silverParseResult) error {
-	jobSnapshot := silverJob{}
+	jobSnapshot := silverProcessorJob{}
 	s.mu.Lock()
 	job := s.jobLocked(jobID)
 	if job == nil || job.State != "running" {
@@ -912,12 +933,11 @@ func (s *silverService) publishDeterministic(jobID string, current bronzeItem, p
 		s.mu.Unlock()
 		return err
 	}
-	if prior, ok := s.state.Published[job.BronzeSourceID]; ok {
-		s.state.History[job.BronzeSourceID] = append(s.state.History[job.BronzeSourceID], prior)
-	}
 	s.state.Published[job.BronzeSourceID] = dataset
-	job.Coverage = dataset.Source.Coverage
-	job.Phase = "knowledge"
+	job.State = "completed"
+	job.Error = ""
+	job.RetryAt = 0
+	job.Retryable = false
 	job.UpdatedAt = time.Now().UnixMilli()
 	s.state.Revision++
 	s.state.DataRevision++
@@ -926,37 +946,39 @@ func (s *silverService) publishDeterministic(jobID string, current bronzeItem, p
 	if err == nil && s.onDeterministicPublish != nil {
 		s.onDeterministicPublish()
 	}
+	if err == nil {
+		s.signal()
+	}
 	return err
 }
 
-func deterministicSilverDataset(job silverJob, parsed silverParseResult, model semanticModel) (silverDataset, error) {
+func deterministicSilverDataset(job silverProcessorJob, parsed silverParseResult, model semanticModel) (silverDataset, error) {
 	producer := silverProducer{ProcessorID: silverExtractionID, ProcessorVersion: silverExtractionVersion}
 	dataset := silverDataset{Source: silverSource{
 		BronzeSourceID: job.BronzeSourceID, BronzeContentSHA256: job.BronzeContentSHA256,
-		Title: job.Title, Mime: job.Mime, ProcessorID: silverProcessorID, ProcessorVersion: silverProcessorVersion,
-		Coverage: parsed.Coverage,
+		Title: job.Title, Mime: job.Mime,
 		Representations: silverRepresentations{Deterministic: silverRepresentation{
-			State: silverRepresentationReady, Producer: silverProducer{ProcessorID: silverProcessorID, ProcessorVersion: silverProcessorVersion},
+			State: parsed.State, Producer: job.Producer, InputIdentity: job.InputIdentity, Error: parsed.Error,
 		}},
 	}, PublishedAt: time.Now().UnixMilli()}
-	if parsed.Coverage.ExtractionState != silverExtractionCompleted {
-		dataset.Source.Representations.Deterministic.State = silverRepresentationSkipped
+	knowledgeProducer := silverProducer{ProcessorID: silverKnowledgeID, ProcessorVersion: silverKnowledgeVersion}
+	knowledgeLimit := 0
+	if model != nil {
+		knowledgeProducer.ModelID, knowledgeProducer.ModelRevision = model.identity()
+		knowledgeLimit = model.maximumInputBytes()
+	}
+	knowledgeInput := knowledgeInputIdentity(job.InputIdentity, knowledgeLimit)
+	if parsed.State != silverRepresentationReady {
 		dataset.Source.Representations.Knowledge = silverRepresentation{State: silverRepresentationSkipped,
-			Producer: silverProducer{ProcessorID: silverKnowledgeID, ProcessorVersion: silverKnowledgeVersion}}
+			Producer: knowledgeProducer, InputIdentity: knowledgeInput, Error: parsed.Error}
 	} else if model == nil {
-		dataset.Source.Coverage.SemanticState = silverSemanticSkipped
-		dataset.Source.Coverage.SemanticSkipReason = silverSkipModelUnavailable
 		dataset.Source.Representations.Knowledge = silverRepresentation{State: silverRepresentationUnavailable,
-			Producer: silverProducer{ProcessorID: silverKnowledgeID, ProcessorVersion: silverKnowledgeVersion},
-			Error:    "semantic model is not configured"}
+			Producer: knowledgeProducer, InputIdentity: knowledgeInput,
+			Error: "semantic model is not configured"}
 	} else {
-		modelID, modelRevision := model.identity()
-		dataset.Source.ModelID = modelID
-		dataset.Source.ModelRevision = modelRevision
-		dataset.Source.SemanticInputLimit = model.maximumInputBytes()
-		dataset.Source.Representations.Knowledge = silverRepresentation{State: silverRepresentationProcessing,
-			Producer: silverProducer{ProcessorID: silverKnowledgeID, ProcessorVersion: silverKnowledgeVersion,
-				ModelID: modelID, ModelRevision: modelRevision}}
+		dataset.Source.Representations.Knowledge = silverRepresentation{State: silverRepresentationUnavailable,
+			Producer: knowledgeProducer, InputIdentity: knowledgeInput,
+			Error: "knowledge has not been processed"}
 	}
 	for _, fragment := range parsed.Fragments {
 		evidence := silverEvidenceForFragment(job, fragment)
@@ -976,132 +998,6 @@ func deterministicSilverDataset(job silverJob, parsed silverParseResult, model s
 	return dataset, nil
 }
 
-func parsedFragmentsFromDataset(dataset silverDataset) ([]parsedSilverFragment, error) {
-	evidence := make(map[string]silverEvidence, len(dataset.Evidence))
-	for _, value := range dataset.Evidence {
-		evidence[value.ID] = value
-	}
-	fragments := make([]parsedSilverFragment, 0, len(dataset.Observations))
-	for _, observation := range dataset.Observations {
-		if observation.Producer.ProcessorID != silverExtractionID || len(observation.EvidenceIDs) != 1 {
-			continue
-		}
-		item, ok := evidence[observation.EvidenceIDs[0]]
-		if !ok {
-			return nil, fmt.Errorf("deterministic observation %s refers to missing evidence", observation.ID)
-		}
-		decoder := json.NewDecoder(bytes.NewReader(observation.Payload))
-		decoder.UseNumber()
-		var payload any
-		if err := decoder.Decode(&payload); err != nil || requireJSONEOF(decoder) != nil {
-			return nil, fmt.Errorf("decode deterministic observation %s", observation.ID)
-		}
-		text := observation.Text
-		if text == "" && !observation.StructuralOnly && observation.Kind != "parsed-table-header" {
-			text = deterministicFragmentText(observation.Kind, payload)
-		}
-		fragments = append(fragments, parsedSilverFragment{
-			Kind: observation.Kind, Selector: item.Selector, Excerpt: item.Excerpt, Payload: payload, Text: text,
-			Context: observation.Context, StructuralOnly: observation.StructuralOnly,
-		})
-	}
-	return fragments, nil
-}
-
-func deterministicFragmentText(kind string, payload any) string {
-	value, ok := payload.(map[string]any)
-	if !ok {
-		return ""
-	}
-	switch kind {
-	case "text-block", "markdown-heading":
-		text, _ := value["text"].(string)
-		return text
-	case "parsed-json-value":
-		return scalarText(value["value"])
-	case "parsed-table-row":
-		if columns, ok := value["columns"].(map[string]any); ok && len(columns) > 0 {
-			keys := make([]string, 0, len(columns))
-			for key := range columns {
-				keys = append(keys, key)
-			}
-			sort.Strings(keys)
-			parts := make([]string, 0, len(keys))
-			for _, key := range keys {
-				if field, ok := columns[key].(string); ok {
-					parts = append(parts, field)
-				}
-			}
-			return strings.Join(parts, " ")
-		}
-		if values, ok := value["values"].([]any); ok {
-			parts := make([]string, 0, len(values))
-			for _, field := range values {
-				if text, ok := field.(string); ok {
-					parts = append(parts, text)
-				}
-			}
-			return strings.Join(parts, " ")
-		}
-	}
-	return ""
-}
-
-func (s *silverService) completeWithoutKnowledge(jobID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	job := s.jobLocked(jobID)
-	if job == nil || job.State != "running" {
-		return context.Canceled
-	}
-	dataChanged := false
-	if s.semantic == nil {
-		if dataset, ok := s.state.Published[job.BronzeSourceID]; ok &&
-			dataset.Source.Coverage.ExtractionState == silverExtractionCompleted &&
-			!knowledgeCompleted(dataset.Source) && !knowledgeUnavailableWithoutModel(dataset.Source) {
-			deterministic := dataset.Observations[:0]
-			for _, observation := range dataset.Observations {
-				if observation.Producer.ProcessorID == silverExtractionID {
-					deterministic = append(deterministic, observation)
-				}
-			}
-			dataset.Observations = deterministic
-			dataset.Entities = nil
-			dataset.Claims = nil
-			dataset.Source.ModelID = ""
-			dataset.Source.ModelRevision = ""
-			dataset.Source.SemanticInputLimit = 0
-			dataset.Source.Coverage.SemanticState = silverSemanticSkipped
-			dataset.Source.Coverage.SemanticSkipReason = silverSkipModelUnavailable
-			dataset.Source.Representations.Knowledge = silverRepresentation{
-				State: silverRepresentationUnavailable,
-				Producer: silverProducer{
-					ProcessorID: silverKnowledgeID, ProcessorVersion: silverKnowledgeVersion,
-				},
-				Error: "semantic model is not configured",
-			}
-			dataset.PublishedAt = time.Now().UnixMilli()
-			refreshSilverSourceIDs(&dataset)
-			s.state.Published[job.BronzeSourceID] = dataset
-			job.Coverage = dataset.Source.Coverage
-			s.pruneEntitiesLocked()
-			dataChanged = true
-		}
-	}
-	job.State = "completed"
-	job.Checkpoints = nil
-	job.Error = ""
-	job.Attempts = 0
-	job.RetryAt = 0
-	job.Retryable = false
-	job.UpdatedAt = time.Now().UnixMilli()
-	s.state.Revision++
-	if dataChanged {
-		s.state.DataRevision++
-	}
-	return s.saveLocked()
-}
-
 func (s *silverService) publishKnowledge(jobID string, current bronzeItem) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1110,18 +1006,17 @@ func (s *silverService) publishKnowledge(jobID string, current bronzeItem) error
 		return context.Canceled
 	}
 	latest, err := s.bronze.load(current.ID)
-	modelID, modelRevision, semanticInputLimit := s.modelIdentity()
 	if err != nil {
 		return fmt.Errorf("load current Bronze metadata: %w", err)
 	}
-	if latest.Deleted || !silverJobMatchesItem(*job, latest, modelID, modelRevision, semanticInputLimit) {
+	if latest.Deleted || !s.jobMatchesItem(*job, latest, silverKnowledgeRepresentation) {
 		return s.cancelJobLocked(job)
 	}
 	if len(job.Checkpoints) != job.TotalBatches {
 		return errors.New("Silver knowledge job is missing checkpoints")
 	}
 	dataset, ok := s.state.Published[job.BronzeSourceID]
-	if !ok || !s.sourceMatchesCurrent(dataset.Source, latest) {
+	if !ok || !s.deterministicMatchesCurrent(dataset.Source, latest) {
 		return errors.New("deterministic Silver is missing for knowledge publication")
 	}
 	deterministic := dataset.Observations[:0]
@@ -1141,17 +1036,12 @@ func (s *silverService) publishKnowledge(jobID string, current bronzeItem) error
 				dataset.Observations = append(dataset.Observations, observation)
 			}
 		}
-		s.resolveCheckpointCandidatesLocked(&dataset, checkpoint, entitySeen, job.ModelID, job.ModelRevision)
+		resolveCheckpointCandidates(&dataset, checkpoint, entitySeen, job.Producer.ModelID, job.Producer.ModelRevision)
 	}
-	dataset.Source.ModelID = job.ModelID
-	dataset.Source.ModelRevision = job.ModelRevision
-	dataset.Source.SemanticInputLimit = job.SemanticInputLimit
-	dataset.Source.Coverage = silverCoverageForCompletedJob(*job)
-	dataset.Source.Representations.Knowledge = knowledgeRepresentationForCoverage(dataset.Source.Coverage, job)
+	dataset.Source.Representations.Knowledge = knowledgeRepresentationForCheckpoints(*job)
 	dataset.PublishedAt = time.Now().UnixMilli()
 	refreshSilverSourceIDs(&dataset)
 	s.state.Published[job.BronzeSourceID] = dataset
-	job.Coverage = dataset.Source.Coverage
 	job.State = "completed"
 	job.Checkpoints = nil
 	job.Error = ""
@@ -1159,23 +1049,9 @@ func (s *silverService) publishKnowledge(jobID string, current bronzeItem) error
 	job.RetryAt = 0
 	job.Retryable = false
 	job.UpdatedAt = time.Now().UnixMilli()
-	s.pruneEntitiesLocked()
 	s.state.Revision++
 	s.state.DataRevision++
 	return s.saveLocked()
-}
-
-func knowledgeRepresentationForCoverage(coverage silverCoverage, job *silverJob) silverRepresentation {
-	state := silverRepresentationReady
-	if coverage.SemanticState == silverSemanticPartial {
-		state = silverRepresentationPartial
-	} else if coverage.SemanticState == silverSemanticSkipped {
-		state = silverRepresentationSkipped
-	}
-	return silverRepresentation{State: state, Producer: silverProducer{
-		ProcessorID: silverKnowledgeID, ProcessorVersion: silverKnowledgeVersion,
-		ModelID: job.ModelID, ModelRevision: job.ModelRevision,
-	}}
 }
 
 func refreshSilverSourceIDs(dataset *silverDataset) {
@@ -1197,38 +1073,38 @@ func refreshSilverSourceIDs(dataset *silverDataset) {
 	}
 }
 
-func silverCoverageForCompletedJob(job silverJob) silverCoverage {
-	coverage := job.Coverage
-	if coverage.SemanticState != "" {
-		return coverage
-	}
+func knowledgeRepresentationForCheckpoints(job silverProcessorJob) silverRepresentation {
 	semanticFragments := 0
 	completedFragments := 0
 	reasons := map[string]bool{}
 	for _, checkpoint := range job.Checkpoints {
 		semanticFragments += checkpoint.SemanticFragments
 		completedFragments += checkpoint.SemanticCompletedFragments
-		if checkpoint.SemanticSkipReason != "" {
-			reasons[checkpoint.SemanticSkipReason] = true
+		if checkpoint.SkipReason != "" {
+			reasons[checkpoint.SkipReason] = true
 		}
 	}
+	state := silverRepresentationReady
 	switch {
 	case completedFragments == semanticFragments:
-		coverage.SemanticState = silverSemanticCompleted
+		state = silverRepresentationReady
 	case completedFragments == 0:
-		coverage.SemanticState = silverSemanticSkipped
+		state = silverRepresentationSkipped
 	default:
-		coverage.SemanticState = silverSemanticPartial
+		state = silverRepresentationPartial
 	}
+	errorText := ""
 	if len(reasons) > 0 {
 		values := make([]string, 0, len(reasons))
 		for reason := range reasons {
 			values = append(values, reason)
 		}
 		sort.Strings(values)
-		coverage.SemanticSkipReason = strings.Join(values, ",")
+		errorText = strings.Join(values, ",")
 	}
-	return coverage
+	return silverRepresentation{
+		State: state, Producer: job.Producer, InputIdentity: job.InputIdentity, Error: errorText,
+	}
 }
 
 func (s *silverService) cancelJob(jobID string) error {
@@ -1241,7 +1117,7 @@ func (s *silverService) cancelJob(jobID string) error {
 	return s.cancelJobLocked(job)
 }
 
-func (s *silverService) cancelJobLocked(job *silverJob) error {
+func (s *silverService) cancelJobLocked(job *silverProcessorJob) error {
 	job.State = "cancelled"
 	job.Checkpoints = nil
 	job.Error = ""
@@ -1252,28 +1128,7 @@ func (s *silverService) cancelJobLocked(job *silverJob) error {
 	return s.saveLocked()
 }
 
-func (s *silverService) pruneEntitiesLocked() {
-	used := map[string]bool{}
-	for _, dataset := range s.state.Published {
-		for _, entity := range dataset.Entities {
-			used[entity.ID] = true
-		}
-	}
-	for _, history := range s.state.History {
-		for _, dataset := range history {
-			for _, entity := range dataset.Entities {
-				used[entity.ID] = true
-			}
-		}
-	}
-	for id := range s.state.Entities {
-		if !used[id] {
-			delete(s.state.Entities, id)
-		}
-	}
-}
-
-func (s *silverService) jobLocked(id string) *silverJob {
+func (s *silverService) jobLocked(id string) *silverProcessorJob {
 	for index := range s.state.Jobs {
 		if s.state.Jobs[index].ID == id {
 			return &s.state.Jobs[index]
@@ -1282,7 +1137,7 @@ func (s *silverService) jobLocked(id string) *silverJob {
 	return nil
 }
 
-func checkpointFor(job *silverJob, index int, hash string) *silverCheckpoint {
+func checkpointFor(job *silverProcessorJob, index int, hash string) *silverCheckpoint {
 	for checkpointIndex := range job.Checkpoints {
 		checkpoint := &job.Checkpoints[checkpointIndex]
 		if checkpoint.BatchIndex == index && checkpoint.BatchSHA256 == hash {
@@ -1349,7 +1204,7 @@ func (s *silverService) restoreLocked() {
 func (s *silverService) snapshot() silverSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	snapshot := silverSnapshot{SchemaVersion: silverSchemaVersion, Revision: s.state.DataRevision, Error: s.statusError}
+	snapshot := silverSnapshot{SchemaVersion: silverSnapshotSchemaVersion, Revision: s.state.DataRevision, Error: s.statusError}
 	entityMap := map[string]silverEntity{}
 	claimMap := map[string]silverClaim{}
 	evidenceMap := map[string]silverEvidence{}
@@ -1370,7 +1225,7 @@ func (s *silverService) snapshot() silverSnapshot {
 		if current.Deleted || !silverSourceMatchesBronze(dataset.Source, current) {
 			continue
 		}
-		dataset.Source.Stale = !s.sourceMatchesCurrent(dataset.Source, current)
+		dataset.Source.Stale = !s.deterministicMatchesCurrent(dataset.Source, current)
 		snapshot.Sources = append(snapshot.Sources, dataset.Source)
 		for _, value := range dataset.Evidence {
 			evidenceMap[value.ID] = value
@@ -1390,7 +1245,7 @@ func (s *silverService) snapshot() silverSnapshot {
 			continue
 		}
 		snapshot.Processing = append(snapshot.Processing, silverProcessing{
-			BronzeSourceID: job.BronzeSourceID, Representation: job.Phase, State: job.State,
+			BronzeSourceID: job.BronzeSourceID, Representation: job.Representation, State: job.State,
 			CompletedBatches: len(job.Checkpoints), TotalBatches: job.TotalBatches,
 			Error: job.Error, Retryable: job.Retryable,
 		})
@@ -1449,7 +1304,7 @@ func (s *silverService) processingSnapshotLocked() []silverProcessing {
 			continue
 		}
 		processing = append(processing, silverProcessing{
-			BronzeSourceID: job.BronzeSourceID, Representation: job.Phase, State: job.State,
+			BronzeSourceID: job.BronzeSourceID, Representation: job.Representation, State: job.State,
 			CompletedBatches: len(job.Checkpoints), TotalBatches: job.TotalBatches,
 			Error: job.Error, Retryable: job.Retryable,
 		})
@@ -1520,16 +1375,6 @@ func stableID(prefix string, value any) string {
 }
 
 func hashBytes(value []byte) string { sum := sha256.Sum256(value); return hex.EncodeToString(sum[:]) }
-
-func randomUUID() (string, error) {
-	value := make([]byte, 16)
-	if _, err := rand.Read(value); err != nil {
-		return "", err
-	}
-	value[6] = value[6]&0x0f | 0x40
-	value[8] = value[8]&0x3f | 0x80
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", value[0:4], value[4:6], value[6:8], value[8:10], value[10:16]), nil
-}
 
 func scalarText(value any) string {
 	switch typed := value.(type) {

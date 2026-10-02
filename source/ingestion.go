@@ -37,15 +37,84 @@ type parsedSilverContext struct {
 
 type silverParseResult struct {
 	Fragments []parsedSilverFragment
-	Coverage  silverCoverage
+	State     string
+	Error     string
+}
+
+func parsedFragmentsFromDataset(dataset silverDataset) ([]parsedSilverFragment, error) {
+	evidence := make(map[string]silverEvidence, len(dataset.Evidence))
+	for _, value := range dataset.Evidence {
+		evidence[value.ID] = value
+	}
+	fragments := make([]parsedSilverFragment, 0, len(dataset.Observations))
+	for _, observation := range dataset.Observations {
+		if observation.Producer.ProcessorID != silverExtractionID || len(observation.EvidenceIDs) != 1 {
+			continue
+		}
+		item, ok := evidence[observation.EvidenceIDs[0]]
+		if !ok {
+			return nil, fmt.Errorf("deterministic observation %s refers to missing evidence", observation.ID)
+		}
+		decoder := json.NewDecoder(bytes.NewReader(observation.Payload))
+		decoder.UseNumber()
+		var payload any
+		if err := decoder.Decode(&payload); err != nil || requireJSONEOF(decoder) != nil {
+			return nil, fmt.Errorf("decode deterministic observation %s", observation.ID)
+		}
+		text := observation.Text
+		if text == "" && !observation.StructuralOnly && observation.Kind != "parsed-table-header" {
+			text = deterministicFragmentText(observation.Kind, payload)
+		}
+		fragments = append(fragments, parsedSilverFragment{
+			Kind: observation.Kind, Selector: item.Selector, Excerpt: item.Excerpt, Payload: payload, Text: text,
+			Context: observation.Context, StructuralOnly: observation.StructuralOnly,
+		})
+	}
+	return fragments, nil
+}
+
+func deterministicFragmentText(kind string, payload any) string {
+	value, ok := payload.(map[string]any)
+	if !ok {
+		return ""
+	}
+	switch kind {
+	case "text-block", "markdown-heading":
+		text, _ := value["text"].(string)
+		return text
+	case "parsed-json-value":
+		return scalarText(value["value"])
+	case "parsed-table-row":
+		if columns, ok := value["columns"].(map[string]any); ok && len(columns) > 0 {
+			keys := make([]string, 0, len(columns))
+			for key := range columns {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			parts := make([]string, 0, len(keys))
+			for _, key := range keys {
+				if field, ok := columns[key].(string); ok {
+					parts = append(parts, field)
+				}
+			}
+			return strings.Join(parts, " ")
+		}
+		if values, ok := value["values"].([]any); ok {
+			parts := make([]string, 0, len(values))
+			for _, field := range values {
+				if text, ok := field.(string); ok {
+					parts = append(parts, text)
+				}
+			}
+			return strings.Join(parts, " ")
+		}
+	}
+	return ""
 }
 
 func parseSilverReader(item bronzeItem, reader io.Reader) (silverParseResult, error) {
 	if !declaredSilverText(item.Mime) && knownBinarySilverInput(item) {
-		return silverParseResult{Coverage: silverCoverage{
-			ExtractionState: silverExtractionSkipped, SemanticState: silverSemanticSkipped,
-			SemanticSkipReason: silverSkipUnsupportedContent,
-		}}, nil
+		return silverParseResult{State: silverRepresentationSkipped, Error: silverSkipUnsupportedContent}, nil
 	}
 	buffered := bufio.NewReaderSize(reader, silverInspectionBytes)
 	prefix, err := buffered.Peek(silverInspectionBytes)
@@ -53,34 +122,25 @@ func parseSilverReader(item bronzeItem, reader io.Reader) (silverParseResult, er
 		return silverParseResult{}, err
 	}
 	if !declaredSilverText(item.Mime) && silverPrefixLooksBinary(prefix) {
-		return silverParseResult{Coverage: silverCoverage{
-			ExtractionState: silverExtractionSkipped, SemanticState: silverSemanticSkipped,
-			SemanticSkipReason: silverSkipUnsupportedContent,
-		}}, nil
+		return silverParseResult{State: silverRepresentationSkipped, Error: silverSkipUnsupportedContent}, nil
 	}
 	data, err := io.ReadAll(io.LimitReader(buffered, silverMaximumInputBytes+1))
 	if err != nil {
 		return silverParseResult{}, err
 	}
 	if len(data) > silverMaximumInputBytes {
-		return silverParseResult{Coverage: silverCoverage{
-			ExtractionState: silverExtractionSkipped, SemanticState: silverSemanticSkipped,
-			SemanticSkipReason: silverSkipSourceTooLarge,
-		}}, nil
+		return silverParseResult{State: silverRepresentationSkipped, Error: silverSkipSourceTooLarge}, nil
 	}
 	fragments, supported, err := parseSilverText(item, data)
 	if err != nil {
 		return silverParseResult{}, err
 	}
 	if !supported {
-		return silverParseResult{Coverage: silverCoverage{
-			ExtractionState: silverExtractionSkipped, SemanticState: silverSemanticSkipped,
-			SemanticSkipReason: silverSkipUnsupportedContent,
-		}}, nil
+		return silverParseResult{State: silverRepresentationSkipped, Error: silverSkipUnsupportedContent}, nil
 	}
 	return silverParseResult{
 		Fragments: fragments,
-		Coverage:  silverCoverage{ExtractionState: silverExtractionCompleted},
+		State:     silverRepresentationReady,
 	}, nil
 }
 

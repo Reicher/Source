@@ -473,7 +473,8 @@ func TestSilverModelCandidatesResolveToEntitiesAttributesAndRelationships(t *tes
 		t.Fatal("Silver model job did not run")
 	}
 	snapshot := service.snapshot()
-	if len(snapshot.Sources) != 1 || snapshot.Sources[0].ModelID != "qwen-test" || snapshot.Sources[0].ModelRevision != "model-revision" {
+	if len(snapshot.Sources) != 1 || snapshot.Sources[0].Representations.Knowledge.Producer.ModelID != "qwen-test" ||
+		snapshot.Sources[0].Representations.Knowledge.Producer.ModelRevision != "model-revision" {
 		t.Fatalf("model identity missing from published source: %+v", snapshot.Sources)
 	}
 	if len(snapshot.Entities) != 2 || len(snapshot.Claims) != 6 {
@@ -557,13 +558,14 @@ func TestSilverModelRevisionQueuesReplacementAndKeepsPriorVisible(t *testing.T) 
 		t.Fatalf("model revision did not queue a safe replacement: %+v", snapshot)
 	}
 	if snapshot.Sources[0].Representations.Deterministic.State != silverRepresentationReady ||
-		snapshot.Sources[0].ModelRevision != "1" {
+		snapshot.Sources[0].Representations.Knowledge.Producer.ModelRevision != "1" {
 		t.Fatalf("knowledge replacement invalidated deterministic Silver or prior knowledge: %+v", snapshot.Sources[0])
 	}
 	beforeEvidence := append([]string(nil), snapshot.Sources[0].EvidenceIDs...)
 	second.processNext(context.Background())
 	after := second.snapshot()
-	if after.Sources[0].ModelRevision != "2" || strings.Join(after.Sources[0].EvidenceIDs, ",") != strings.Join(beforeEvidence, ",") {
+	if after.Sources[0].Representations.Knowledge.Producer.ModelRevision != "2" ||
+		strings.Join(after.Sources[0].EvidenceIDs, ",") != strings.Join(beforeEvidence, ",") {
 		t.Fatalf("semantic model rebuild changed deterministic evidence: before=%v after=%+v", beforeEvidence, after.Sources[0])
 	}
 }
@@ -580,11 +582,11 @@ func TestSilverRetriesTransientModelFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	service.processNext(context.Background())
-	if service.state.Jobs[0].State != "failed" || !service.state.Jobs[0].Retryable ||
-		service.state.Jobs[0].RetryAt <= time.Now().UnixMilli() {
-		t.Fatalf("transient model failure was not scheduled for retry: %+v", service.state.Jobs[0])
+	job := requireSilverJob(t, service, "dddddddd-dddd-4ddd-8ddd-dddddddddddd", silverKnowledgeRepresentation)
+	if job.State != "failed" || !job.Retryable || job.RetryAt <= time.Now().UnixMilli() {
+		t.Fatalf("transient model failure was not scheduled for retry: %+v", job)
 	}
-	service.state.Jobs[0].RetryAt = time.Now().Add(time.Hour).UnixMilli()
+	job.RetryAt = time.Now().Add(time.Hour).UnixMilli()
 	if err := service.saveLocked(); err != nil {
 		t.Fatal(err)
 	}
@@ -592,14 +594,15 @@ func TestSilverRetriesTransientModelFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if restarted.state.Jobs[0].State != "failed" || !restarted.state.Jobs[0].Retryable {
-		t.Fatalf("restart discarded transient failure state: %+v", restarted.state.Jobs[0])
+	job = requireSilverJob(t, restarted, "dddddddd-dddd-4ddd-8ddd-dddddddddddd", silverKnowledgeRepresentation)
+	if job.State != "failed" || !job.Retryable {
+		t.Fatalf("restart discarded transient failure state: %+v", job)
 	}
-	restarted.state.Jobs[0].RetryAt = time.Now().Add(-time.Second).UnixMilli()
+	job.RetryAt = time.Now().Add(-time.Second).UnixMilli()
 	if err := restarted.reconcile(); err != nil {
 		t.Fatal(err)
 	}
-	if restarted.state.Jobs[0].State != "queued" {
-		t.Fatalf("due model failure was not requeued: %+v", restarted.state.Jobs[0])
+	if job.State != "queued" {
+		t.Fatalf("due model failure was not requeued: %+v", job)
 	}
 }

@@ -20,7 +20,11 @@ An individual JSON scalar or table field can still be larger than the embedding 
 
 ## Storage and lifecycle
 
-`silver/retrieval.sqlite` owns only the retrieval representation. `silver/state.json` durably owns Core Silver plus knowledge jobs and generations; migrating all Silver state to SQLite remains a separate scalability change.
+`silver/retrieval.sqlite` owns only the retrieval representation. `silver/state.json` currently owns Core Silver, the current optional knowledge representation, and small durable processor jobs. Jobs identify one representation, its producer and its input identity; deterministic ingestion and knowledge are no longer phases of one combined workflow.
+
+The JSON state contains only current published datasets and active/completed job records. It has no generation history or global entity registry. Entity IDs are derived deterministically from normalized label, entity type, and resolver version, preserving the resolver's current matching semantics while making its output rebuildable. An obsolete Silver disk schema is replaced with empty derived state and rebuilt from Bronze; snapshot schema v2 makes Self discard its obsolete mirror, and the public revision advances before the rebuild. Bronze and pairing data are not part of this rebuild.
+
+Moving the remaining derived JSON state to SQLite is best kept as a separate change. A focused migration could place sources/representations, Evidence/observations, processor jobs/checkpoints, and knowledge entities/claims alongside the existing retrieval tables in one transactional store. That would remove atomic JSON rewrite/restore code, in-memory aggregation maps, and custom revision persistence, while allowing representation-scoped replacement and deletes. It should retain Bronze as an independent canonical store and preserve the current API snapshot boundary. Combining that storage migration with this lifecycle cleanup would add schema, query, transaction, and deployment risk without changing product behavior.
 
 Source uses sqlite-vec's official CGO binding with `mattn/go-sqlite3` and the `sqlite_fts5` build tag. The earlier WASM-backed driver was rejected after its pager failed against the real persistent Docker volume on plattserver; the CGO binding embeds sqlite-vec into the Source binary and uses native SQLite without a separate database service.
 

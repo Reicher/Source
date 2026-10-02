@@ -71,7 +71,9 @@ Silver is not absolute truth. Source may later discover that two entities are th
 
 The essential requirement is that Source can explain what it currently derives or believes and where it came from. Silver representations are independently versioned where practical: changing the embedding model rebuilds embeddings without making the chat LLM part of the retrieval identity.
 
-Source is the only authority for persistent Silver. It publishes complete generations atomically, keeps processing work durable across restarts, and mirrors the latest complete snapshot to Self. Partial processing is never presented as completed knowledge.
+Source is the only authority for persistent Silver. It publishes deterministic Core Silver first, then updates retrieval and semantic knowledge as independent representations. Each representation records its producer and input identity, processing work survives restarts, and Self mirrors the current Source snapshot without treating partial processing as completed knowledge.
+
+Bronze is the durable compatibility boundary. Machine-produced Silver is intentionally rebuildable: when Source encounters an obsolete local Silver disk schema, it discards that derived state, advances the mirrored revision, and rebuilds from unchanged Bronze. Automatically resolved entity IDs are likewise deterministic from the resolver's existing normalized-label-and-type identity rather than preserved in a separate registry.
 
 ### Gold
 

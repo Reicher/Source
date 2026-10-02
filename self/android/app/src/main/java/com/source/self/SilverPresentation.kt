@@ -18,24 +18,26 @@ internal fun SilverProcessing.presentation(defaultState: String = "Processing"):
     else "Processing stopped · $detail"
 }
 
-internal fun SilverSource.coveragePresentation(): String? {
-    val current = coverage ?: return null
-    if (current.extractionState == "completed" && current.semanticState == "completed") return null
-    val reason = when (current.semanticSkipReason) {
+internal fun SilverSource.representationStatusPresentation(): String? {
+    val deterministic = representations.deterministic
+    val knowledge = representations.knowledge
+    if (deterministic.state == "ready" && knowledge.state == "ready") return null
+    val reason = when (knowledge.error?.takeIf(String::isNotEmpty) ?: deterministic.error.orEmpty()) {
         "unsupported_content" -> "This content type is not supported for knowledge extraction."
         "source_too_large" -> "This source is too large for the current extractor."
-        "model_unavailable" -> "The semantic model was unavailable."
+        "semantic model is not configured" -> "The semantic model was unavailable."
         "fragment_exceeds_model_limit" -> "Some content exceeds the semantic model's current input limit."
         else -> "Some semantic work was not completed."
     }
-    return when (current.semanticState) {
+    return when (knowledge.state) {
         "partial" -> "Semantic processing is partial. $reason"
-        "skipped" -> if (current.extractionState == "skipped") {
+        "skipped" -> if (deterministic.state == "skipped") {
             "Deterministic extraction and semantic processing were skipped. $reason"
         } else {
             "Semantic processing was skipped. $reason"
         }
-        else -> if (current.extractionState == "skipped") "Deterministic extraction was skipped. $reason" else null
+        "unavailable", "failed" -> reason
+        else -> if (deterministic.state == "skipped") "Deterministic extraction was skipped. $reason" else null
     }
 }
 
