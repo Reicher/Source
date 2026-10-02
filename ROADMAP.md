@@ -81,23 +81,20 @@ Completed:
 
 The foundation should now be simplified rather than expanded with more special cases.
 
-## 2. Silver cleanup and persistence — 🚧 In progress
+## 2. Silver cleanup — ✅ Done; persistence follow-up — ○ Planned
 
 Simplify the implementation now that deterministic ingestion, retrieval and semantic knowledge have clear boundaries.
 
-Near-term cleanup should include:
+Completed cleanup:
 
-- remove legacy fields and compatibility paths that duplicate the new representation model;
-- prefer rebuilding derived Silver from Bronze over carrying long-lived migrations for obsolete Silver schemas;
-- remove old semantic coverage/model fields where representation state now owns the same information;
-- review and preferably remove the old Silver `History` mechanism if it is no longer required;
-- make automatically derived entity identity rebuildable where possible instead of preserving it through historical datasets;
-- simplify or remove the persistent entity registry if the current resolver no longer needs it;
-- replace the old phase-oriented Silver job model with the smallest useful generic processor-job model if that reduces special-case code;
-- keep processor failures and retries isolated;
-- reduce duplicated state and lifecycle logic in `silver.go`.
+- ✅ Representation state, producer identity and input identity replace legacy source-level processor/model/coverage fields.
+- ✅ Obsolete derived Silver schemas rebuild from Bronze instead of accumulating compatibility fallbacks.
+- ✅ Silver generation history and the persistent automatic entity registry have been removed.
+- ✅ Automatically resolved entity IDs are deterministic over the resolver's existing normalized-label-and-type identity.
+- ✅ Durable processor jobs target one representation rather than moving through hardcoded Silver phases.
+- ✅ Processor failures and retries remain isolated while Core Silver is independently publishable.
 
-After the cleanup, evaluate moving rebuildable Silver data and processor state from `silver/state.json` into SQLite.
+The remaining follow-up is to move rebuildable Silver data and processor state from `silver/state.json` into SQLite when that work can be isolated as a storage change.
 
 Likely SQLite-owned derived state could eventually include:
 

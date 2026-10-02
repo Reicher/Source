@@ -8,7 +8,25 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SilverStoreTest {
-    @Test fun sourceCoverageAndProcessingErrorsParseFromSnapshot() {
+    @Test fun obsoleteMirroredSilverIsDiscardedForResync() {
+        val legacy = JSONObject()
+            .put("schema_version", 1)
+            .put("revision", 99)
+            .put("sources", JSONArray().put(JSONObject()
+                .put("bronze_source_id", "bronze")
+                .put("bronze_content_sha256", "hash")
+                .put("title", "note.txt")
+                .put("mime", "text/plain")))
+            .put("evidence", JSONArray())
+            .put("observations", JSONArray())
+            .put("entities", JSONArray())
+            .put("claims", JSONArray())
+            .put("processing", JSONArray())
+
+        assertEquals(SilverSnapshot.EMPTY, silverSnapshotFromPersistence(legacy.toString()))
+    }
+
+    @Test fun sourceRepresentationsAndProcessingErrorsParseFromSnapshot() {
         val empty = JSONArray()
         val source = JSONObject()
             .put("bronze_source_id", "bronze")
@@ -19,18 +37,17 @@ class SilverStoreTest {
             .put("observation_ids", empty)
             .put("entity_ids", empty)
             .put("claim_ids", empty)
-            .put("coverage", JSONObject()
-                .put("extraction_state", "completed")
-                .put("semantic_state", "partial")
-                .put("semantic_skip_reason", "fragment_exceeds_model_limit"))
             .put("representations", JSONObject()
                 .put("deterministic", JSONObject()
                     .put("state", "ready")
+                    .put("input_identity", "deterministic-input")
                     .put("producer", JSONObject()
                         .put("processor_id", "source.silver.deterministic-ingestion")
                         .put("processor_version", "1-1")))
                 .put("knowledge", JSONObject()
                     .put("state", "partial")
+                    .put("input_identity", "knowledge-input")
+                    .put("error", "fragment_exceeds_model_limit")
                     .put("producer", JSONObject()
                         .put("processor_id", "source.silver.knowledge")
                         .put("processor_version", "1-5-2")
@@ -45,7 +62,7 @@ class SilverStoreTest {
             .put("retryable", true)
             .put("representation", "knowledge")
         val snapshot = SilverSnapshot.fromJson(JSONObject()
-            .put("schema_version", 1)
+            .put("schema_version", 2)
             .put("revision", 3)
             .put("sources", JSONArray().put(source))
             .put("evidence", JSONArray())
@@ -55,11 +72,11 @@ class SilverStoreTest {
             .put("processing", JSONArray().put(processing))
             .put("error", "Silver reconciliation failed"))
 
-        assertEquals("partial", snapshot.sources.single().coverage?.semanticState)
-        assertEquals("fragment_exceeds_model_limit", snapshot.sources.single().coverage?.semanticSkipReason)
-        assertEquals("ready", snapshot.sources.single().representations?.deterministic?.state)
-        assertEquals("partial", snapshot.sources.single().representations?.knowledge?.state)
-        assertEquals("semantic", snapshot.sources.single().representations?.knowledge?.modelId)
+        assertEquals("ready", snapshot.sources.single().representations.deterministic.state)
+        assertEquals("deterministic-input", snapshot.sources.single().representations.deterministic.inputIdentity)
+        assertEquals("partial", snapshot.sources.single().representations.knowledge.state)
+        assertEquals("fragment_exceeds_model_limit", snapshot.sources.single().representations.knowledge.error)
+        assertEquals("semantic", snapshot.sources.single().representations.knowledge.modelId)
         assertEquals("Model loading", snapshot.processing.single().error)
         assertTrue(snapshot.processing.single().retryable)
         assertEquals("knowledge", snapshot.processing.single().representation)
@@ -103,7 +120,7 @@ class SilverStoreTest {
         val completed = SourceJob("done", "silver_extraction", "photo.jpg", null, "completed", 2, 3)
         val status = SourceStatus(
             "person", 7, 12, SourceJobs(12, listOf(queued), listOf(completed), 1, 9),
-            listOf(SilverProcessing("bronze", "failed", 2, 4, "Model unavailable", true)),
+            listOf(SilverProcessing("bronze", "failed", 2, 4, "Model unavailable", true, "knowledge")),
             "Silver reconciliation failed: storage unavailable",
         )
 
@@ -126,9 +143,13 @@ class SilverStoreTest {
             SilverClaim("claim-1", entity.id, "name", "Ada Lovelace", null, listOf("observation-1"), "active"),
             SilverClaim("claim-2", entity.id, "name", "Ada Lovelace", null, listOf("observation-2"), "active"),
         )
+        val representations = SilverRepresentations(
+            SilverRepresentation("ready", "deterministic", "1", "deterministic-input"),
+            SilverRepresentation("ready", "knowledge", "1", "knowledge-input"),
+        )
         val sources = listOf(
-            SilverSource("bronze-1", "hash-1", "first.txt", "text/plain", listOf("evidence-1"), listOf("observation-1"), listOf(entity.id), listOf("claim-1")),
-            SilverSource("bronze-2", "hash-2", "second.txt", "text/plain", listOf("evidence-2"), listOf("observation-2"), listOf(entity.id), listOf("claim-2")),
+            SilverSource("bronze-1", "hash-1", "first.txt", "text/plain", listOf("evidence-1"), listOf("observation-1"), listOf(entity.id), listOf("claim-1"), representations = representations),
+            SilverSource("bronze-2", "hash-2", "second.txt", "text/plain", listOf("evidence-2"), listOf("observation-2"), listOf(entity.id), listOf("claim-2"), representations = representations),
         )
         val snapshot = SilverSnapshot(1, sources, evidence, observations, listOf(entity), claims, emptyList())
 

@@ -768,8 +768,8 @@ class SelfViews(private val activity: Activity, private val bronze: BronzeStore)
             val state = knowledge.processing?.presentation() ?: "No knowledge"
             body.addView(label(state, 15f).apply { setTextColor(secondaryColor) })
         }
-        knowledge.source?.coveragePresentation()?.let { coverage ->
-            body.addView(label(coverage, 13f).apply { setTextColor(secondaryColor) })
+        knowledge.source?.representationStatusPresentation()?.let { status ->
+            body.addView(label(status, 13f).apply { setTextColor(secondaryColor) })
         }
         val activeClaims = knowledge.activeClaims.sortedWith(
             compareBy<SilverClaim> { silver.describe(it) }.thenBy { it.id },

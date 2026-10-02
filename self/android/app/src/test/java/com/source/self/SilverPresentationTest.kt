@@ -111,23 +111,29 @@ class SilverPresentationTest {
         val source = SilverSource(
             "bronze", "hash", "note.txt", "text/plain",
             emptyList(), emptyList(), emptyList(), emptyList(),
-            coverage = SilverCoverage("completed", "partial", "fragment_exceeds_model_limit"),
+            representations = SilverRepresentations(
+                SilverRepresentation("ready", "deterministic", "1", "deterministic-input"),
+                SilverRepresentation(
+                    "partial", "knowledge", "1", "knowledge-input",
+                    error = "fragment_exceeds_model_limit",
+                ),
+            ),
         )
 
         assertEquals(
             "Semantic processing is partial. Some content exceeds the semantic model's current input limit.",
-            source.coveragePresentation(),
+            source.representationStatusPresentation(),
         )
     }
 
     @Test fun failedProcessingDistinguishesRetryableAndPermanentErrors() {
         assertEquals(
             "Processing failed; retry scheduled · Model loading",
-            SilverProcessing("bronze", "failed", 1, 2, "Model loading", true).presentation(),
+            SilverProcessing("bronze", "failed", 1, 2, "Model loading", true, "knowledge").presentation(),
         )
         assertEquals(
             "Processing stopped · Invalid model response",
-            SilverProcessing("bronze", "failed", 0, 1, "Invalid model response", false).presentation(),
+            SilverProcessing("bronze", "failed", 0, 1, "Invalid model response", false, "knowledge").presentation(),
         )
     }
 }
